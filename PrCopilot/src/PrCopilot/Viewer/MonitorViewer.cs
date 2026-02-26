@@ -410,7 +410,7 @@ public static class MonitorViewer
         var rawVersion = Assembly.GetExecutingAssembly()
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
             ?? Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "?";
-        // Strip +metadata suffix (e.g. +commitsha) for clean display and comparison
+        // Strip +metadata suffix for clean display and comparison
         var plusIdx = rawVersion.IndexOf('+');
         var version = plusIdx >= 0 ? rawVersion[..plusIdx] : rawVersion;
         var versionLabel = new Label

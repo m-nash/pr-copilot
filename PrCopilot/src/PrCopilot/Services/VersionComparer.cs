@@ -41,7 +41,7 @@ public static class VersionComparer
 
     private static (int[] Prefix, string? Prerelease) Split(string version)
     {
-        // Strip +metadata (e.g., +commitsha)
+        // Strip +metadata (e.g., +abc123)
         var plusIdx = version.IndexOf('+');
         if (plusIdx >= 0)
             version = version[..plusIdx];
