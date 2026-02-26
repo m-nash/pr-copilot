@@ -8,6 +8,8 @@
     "dotnet",
     "FEFF",
     "keepalive",
+    "LASTEXITCODE",
+    "nologo",
     "slnx",
     "xunit"
   ],

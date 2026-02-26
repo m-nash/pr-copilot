@@ -761,27 +761,42 @@ public class MonitorFlowTools
 
     /// <summary>
     /// Checks if a viewer is already running for this PR and launches one if not.
-    /// Uses Process.GetProcessesByName for cross-platform compatibility.
+    /// Uses a PID file written by the viewer process for reliable detection.
     /// </summary>
     private static void LaunchViewerIfNeeded(MonitorState state)
     {
         try
         {
-            // Check for existing viewer via process list
-            var processes = Process.GetProcessesByName("PrCopilot");
-            // We can't easily check command line cross-platform, but having any viewer running is a reasonable check
-            // Future: could use a lock/pid file per PR number for precise detection
-            if (processes.Length > 1) // >1 because the MCP server itself is PrCopilot.exe
-                return;
+            var pidFile = state.LogFile + ".viewer.pid";
+
+            // Check if a viewer is already running for this PR via PID file
+            if (File.Exists(pidFile))
+            {
+                if (int.TryParse(File.ReadAllText(pidFile).Trim(), out var pid))
+                {
+                    try
+                    {
+                        var existing = Process.GetProcessById(pid);
+                        if (!existing.HasExited)
+                            return;
+                    }
+                    catch (ArgumentException)
+                    {
+                        // Process no longer exists — stale PID file
+                    }
+                }
+
+                File.Delete(pidFile);
+            }
 
             var viewerPath = Path.Combine(AppContext.BaseDirectory, "PrCopilot.exe");
-            var args = $"-w 0 new-tab -- \"{viewerPath}\" --viewer --pr {state.PrNumber} " +
-                       $"--log \"{state.LogFile}\" --trigger \"{state.TriggerFile}\" --debug \"{state.DebugLogFile}\"";
+            var viewerArgs = $"--viewer --pr {state.PrNumber} " +
+                             $"--log \"{state.LogFile}\" --trigger \"{state.TriggerFile}\" --debug \"{state.DebugLogFile}\"";
 
             Process.Start(new ProcessStartInfo
             {
                 FileName = "wt.exe",
-                Arguments = args,
+                Arguments = $"-w 0 new-tab -- \"{viewerPath}\" {viewerArgs}",
                 UseShellExecute = false,
                 CreateNoWindow = true
             });
