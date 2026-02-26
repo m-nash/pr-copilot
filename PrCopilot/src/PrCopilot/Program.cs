@@ -1,6 +1,7 @@
 // Licensed under the MIT License.
 
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.DependencyInjection;
@@ -11,9 +12,14 @@ using PrCopilot.Services;
 using PrCopilot.Tools;
 using PrCopilot.Viewer;
 
-// Startup cleanup: try to delete PrCopilot.old*.exe left by install/update rename pattern
+var isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+var exeName = isWindows ? "PrCopilot.exe" : "PrCopilot";
+var oldPattern = isWindows ? "PrCopilot.old*.exe" : "PrCopilot.old*";
+
+// Startup cleanup: try to delete old copies left by install/update rename pattern
 // Don't fail — other CLI sessions may still be using older versions.
-foreach (var old in Directory.GetFiles(AppContext.BaseDirectory, "PrCopilot.old*.exe"))
+foreach (var old in Directory.GetFiles(AppContext.BaseDirectory, oldPattern)
+    .Where(f => !f.EndsWith(".pdb"))) // avoid matching .old.pdb on unix
 {
     try { File.Delete(old); } catch { }
 }
@@ -40,12 +46,19 @@ if (args.Contains("--update"))
     var tagName = release["tag_name"]!.GetValue<string>();
     Console.WriteLine($"📦 Latest release: {tagName}");
 
+    var rid = RuntimeInformation.RuntimeIdentifier;
+    // Normalize to the RIDs we publish (e.g. osx-arm64, osx-x64, win-x64)
+    if (rid.StartsWith("osx") || rid.StartsWith("macos"))
+        rid = RuntimeInformation.OSArchitecture == Architecture.Arm64 ? "osx-arm64" : "osx-x64";
+    else if (rid.StartsWith("win"))
+        rid = "win-x64";
+
     var asset = release["assets"]!.AsArray()
-        .FirstOrDefault(a => a!["name"]!.GetValue<string>().Contains("win-x64") &&
+        .FirstOrDefault(a => a!["name"]!.GetValue<string>().Contains(rid) &&
                              a!["name"]!.GetValue<string>().EndsWith(".zip"));
     if (asset == null)
     {
-        Console.Error.WriteLine("❌ No win-x64 zip asset found in latest release.");
+        Console.Error.WriteLine($"❌ No {rid} zip asset found in latest release.");
         return;
     }
 
@@ -57,18 +70,19 @@ if (args.Contains("--update"))
     await File.WriteAllBytesAsync(zipPath, zipBytes);
 
     var installDir = AppContext.BaseDirectory;
-    var currentExe = Path.Combine(installDir, "PrCopilot.exe");
+    var currentExe = Path.Combine(installDir, exeName);
 
-    // Rename current exe with next available .old.N.exe suffix
+    // Rename current exe with next available .old.N suffix
     if (File.Exists(currentExe))
     {
         var n = 0;
         string backupPath;
+        var ext = isWindows ? ".exe" : "";
         do
         {
             backupPath = n == 0
-                ? Path.Combine(installDir, "PrCopilot.old.exe")
-                : Path.Combine(installDir, $"PrCopilot.old.{n}.exe");
+                ? Path.Combine(installDir, $"PrCopilot.old{ext}")
+                : Path.Combine(installDir, $"PrCopilot.old.{n}{ext}");
             n++;
         } while (File.Exists(backupPath));
         File.Move(currentExe, backupPath);
@@ -82,8 +96,15 @@ if (args.Contains("--update"))
     var releaseVersion = tagName.TrimStart('v');
     File.WriteAllText(Path.Combine(installDir, "version.txt"), releaseVersion);
 
+    // Make binary executable on Unix
+    if (!isWindows)
+    {
+        var newBin = Path.Combine(installDir, exeName);
+        System.Diagnostics.Process.Start("chmod", $"+x \"{newBin}\"")?.WaitForExit();
+    }
+
     Console.WriteLine("⚙️  Running setup...");
-    var newExe = Path.Combine(installDir, "PrCopilot.exe");
+    var newExe = Path.Combine(installDir, exeName);
     var setupProcess = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
     {
         FileName = newExe,
@@ -101,7 +122,7 @@ if (args.Contains("--update"))
 if (args.Contains("--setup"))
 {
     var exePath = Environment.ProcessPath
-        ?? Path.Combine(AppContext.BaseDirectory, "PrCopilot.exe");
+        ?? Path.Combine(AppContext.BaseDirectory, exeName);
     var copilotHome = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".copilot");
 
     // 1. Extract embedded SKILL.md
@@ -139,7 +160,7 @@ if (args.Contains("--setup"))
 
     servers["pr-copilot"] = new JsonObject
     {
-        ["command"] = exePath.Replace("/", "\\"),
+        ["command"] = exePath,
         ["args"] = new JsonArray(),
         ["timeout"] = 3600000
     };
@@ -163,7 +184,7 @@ if (args.Contains("--viewer"))
     if (prIdx < 0 || logIdx < 0 || triggerIdx < 0 ||
         prIdx + 1 >= args.Length || logIdx + 1 >= args.Length || triggerIdx + 1 >= args.Length)
     {
-        Console.Error.WriteLine("Usage: PrCopilot.exe --viewer --pr <number> --log <path> --trigger <path>");
+        Console.Error.WriteLine("Usage: PrCopilot --viewer --pr <number> --log <path> --trigger <path>");
         return;
     }
 

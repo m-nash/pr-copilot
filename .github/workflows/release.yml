@@ -14,7 +14,16 @@ permissions:
 
 jobs:
   publish:
-    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - rid: win-x64
+            os: windows-latest
+          - rid: osx-x64
+            os: macos-latest
+          - rid: osx-arm64
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,24 +43,39 @@ jobs:
           $ver = $tag -replace '^v', ''
           echo "VERSION=$ver" >> $env:GITHUB_OUTPUT
 
-      - name: Publish win-x64
+      - name: Publish ${{ matrix.rid }}
         run: >
           dotnet publish PrCopilot/src/PrCopilot/PrCopilot.csproj
           -c Release
-          -r win-x64
+          -r ${{ matrix.rid }}
           --self-contained
           -p:PublishSingleFile=true
           -p:IncludeNativeLibrariesForSelfExtract=true
           -p:Version=${{ steps.version.outputs.VERSION }}
-          -o publish/win-x64
+          -o publish/${{ matrix.rid }}
 
       - name: Package
         shell: pwsh
-        run: Compress-Archive -Path publish/win-x64/* -DestinationPath pr-copilot-win-x64.zip
+        run: Compress-Archive -Path publish/${{ matrix.rid }}/* -DestinationPath pr-copilot-${{ matrix.rid }}.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-copilot-${{ matrix.rid }}
+          path: pr-copilot-${{ matrix.rid }}.zip
+
+  release:
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
-          files: pr-copilot-win-x64.zip
+          files: artifacts/**/*.zip
           generate_release_notes: true
