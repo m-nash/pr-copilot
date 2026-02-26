@@ -44,15 +44,96 @@ jobs:
       - name: Test
         run: dotnet test PrCopilot/PrCopilot.slnx --no-build --configuration Release --verbosity normal
 
+  integration-test:
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+          dotnet-quality: 'preview'
+
+      - name: Test install.ps1
+        shell: pwsh
+        run: |
+          ./install.ps1
+          if ($IsWindows) {
+            $exe = Join-Path $env:USERPROFILE ".copilot" "mcp-servers" "pr-copilot" "PrCopilot.exe"
+          } else {
+            $exe = Join-Path $env:HOME ".copilot" "mcp-servers" "pr-copilot" "PrCopilot"
+          }
+          if (-not (Test-Path $exe)) { throw "install.ps1 failed: binary not found at $exe" }
+          $ver = & $exe --version 2>&1
+          Write-Host "Installed version: $ver"
+          if ($ver -notmatch 'pr-copilot') { throw "Unexpected --version output: $ver" }
+
+      - name: Verify --setup created config files
+        shell: pwsh
+        run: |
+          if ($IsWindows) { $home = $env:USERPROFILE } else { $home = $env:HOME }
+          $configPath = Join-Path $home ".copilot" "mcp-config.json"
+          $skillPath = Join-Path $home ".copilot" "skills" "pr-monitor" "SKILL.md"
+          if (-not (Test-Path $configPath)) { throw "--setup failed: mcp-config.json not found" }
+          if (-not (Test-Path $skillPath)) { throw "--setup failed: SKILL.md not found" }
+          $config = Get-Content $configPath -Raw | ConvertFrom-Json
+          if (-not $config.mcpServers.'pr-copilot') { throw "pr-copilot not registered in mcp-config.json" }
+          Write-Host "✅ Config: $configPath"
+          Write-Host "✅ Skill: $skillPath"
+
+      - name: Verify version.txt sidecar
+        shell: pwsh
+        run: |
+          if ($IsWindows) { $home = $env:USERPROFILE } else { $home = $env:HOME }
+          $versionFile = Join-Path $home ".copilot" "mcp-servers" "pr-copilot" "version.txt"
+          if (-not (Test-Path $versionFile)) { throw "version.txt not found" }
+          $ver = Get-Content $versionFile
+          Write-Host "✅ version.txt: $ver"
+
+      - name: Test --update
+        shell: pwsh
+        run: |
+          if ($IsWindows) {
+            $exe = Join-Path $env:USERPROFILE ".copilot" "mcp-servers" "pr-copilot" "PrCopilot.exe"
+          } else {
+            $exe = Join-Path $env:HOME ".copilot" "mcp-servers" "pr-copilot" "PrCopilot"
+          }
+          $output = & $exe --update 2>&1 | Out-String
+          Write-Host $output
+          if ($output -notmatch 'Updated to|already.*latest') {
+            if ($output -notmatch 'Extracting') { throw "--update failed: $output" }
+          }
+
+      - name: Test Install-Debug.ps1
+        shell: pwsh
+        run: |
+          ./Install-Debug.ps1
+          if ($IsWindows) {
+            $exe = Join-Path $env:USERPROFILE ".copilot" "mcp-servers" "pr-copilot" "PrCopilot.exe"
+          } else {
+            $exe = Join-Path $env:HOME ".copilot" "mcp-servers" "pr-copilot" "PrCopilot"
+          }
+          $ver = & $exe --version 2>&1
+          Write-Host "Debug version: $ver"
+          if ($ver -notmatch 'dev') { throw "Install-Debug should produce a dev version: $ver" }
+
   ci-complete:
     if: always()
-    needs: [build-and-test, spellcheck]
+    needs: [build-and-test, spellcheck, integration-test]
     runs-on: ubuntu-latest
     steps:
       - name: Check results
         run: |
-          if [ "${{ needs.build-and-test.result }}" != "success" ] || [ "${{ needs.spellcheck.result }}" != "success" ]; then
-            echo "CI failed: build-and-test=${{ needs.build-and-test.result }}, spellcheck=${{ needs.spellcheck.result }}"
+          if [ "${{ needs.build-and-test.result }}" != "success" ] || \
+             [ "${{ needs.spellcheck.result }}" != "success" ] || \
+             [ "${{ needs.integration-test.result }}" != "success" ]; then
+            echo "CI failed: build-and-test=${{ needs.build-and-test.result }}, spellcheck=${{ needs.spellcheck.result }}, integration-test=${{ needs.integration-test.result }}"
             exit 1
           fi
 

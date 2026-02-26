@@ -51,9 +51,13 @@ if ($Version -eq "latest") {
 }
 
 try {
-    $release = Invoke-RestMethod -Uri $releaseUrl -Headers @{ Accept = "application/vnd.github+json" }
+    $headers = @{
+        Accept = "application/vnd.github+json"
+        "User-Agent" = "pr-copilot-installer"
+    }
+    $release = Invoke-RestMethod -Uri $releaseUrl -Headers $headers
 } catch {
-    Write-Error "Failed to fetch release. Check that the version exists: $releaseUrl"
+    Write-Error "Failed to fetch release from $releaseUrl — $_"
     exit 1
 }
 
