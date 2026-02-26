@@ -122,6 +122,14 @@ public static class MonitorTransitions
 
     private static MonitorAction ProcessTaskComplete(MonitorState state)
     {
+        // If we just auto-resolved a thread after addressing a comment, advance to next comment
+        if (state.PendingResolveAfterAddress)
+        {
+            state.PendingResolveAfterAddress = false;
+            state.ActiveWaitingComment = null;
+            return AdvanceAfterCommentAddressed(state);
+        }
+
         // If we were in a comment flow (e.g. explain_comment), return to the comment prompt
         if (state.CommentFlow == CommentFlowState.SingleCommentPrompt &&
             state.CurrentCommentIndex < state.UnresolvedComments.Count)
@@ -377,6 +385,22 @@ public static class MonitorTransitions
     }
 
     private static MonitorAction ProcessCommentAddressed(MonitorState state, object? data)
+    {
+        // Auto-resolve the thread that was just addressed
+        var addressedComment = state.UnresolvedComments.Count > state.CurrentCommentIndex
+            ? state.UnresolvedComments[state.CurrentCommentIndex]
+            : null;
+        if (addressedComment != null)
+        {
+            state.ActiveWaitingComment = addressedComment;
+            state.PendingResolveAfterAddress = true;
+            return BuildResolveThreadAction(state, addressedComment);
+        }
+
+        return AdvanceAfterCommentAddressed(state);
+    }
+
+    private static MonitorAction AdvanceAfterCommentAddressed(MonitorState state)
     {
         if (state.CommentFlow == CommentFlowState.AddressAllIterating)
         {

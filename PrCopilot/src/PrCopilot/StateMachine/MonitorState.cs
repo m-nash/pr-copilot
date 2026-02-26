@@ -66,6 +66,9 @@ public class MonitorState
     // Set when merge fails due to branch policy — requires more approvals before merge terminal state fires again
     public bool NeedsAdditionalApproval { get; set; }
     public int ApprovalCountAtMergeFailure { get; set; }
+
+    // Set when auto-resolving a thread after addressing a comment
+    public bool PendingResolveAfterAddress { get; set; }
 }
 
 /// <summary>
