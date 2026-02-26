@@ -630,9 +630,15 @@ public class StateMachineTests
         state.UnresolvedComments = [MakeComment("c1"), MakeComment("c2")];
         state.CurrentCommentIndex = 0;
 
+        // First: auto-resolve the addressed thread
         var action = MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
+        Assert.Equal("auto_execute", action.Action);
+        Assert.Equal("resolve_thread", action.Task);
+        Assert.True(state.PendingResolveAfterAddress);
 
-        Assert.Equal("ask_user", action.Action);
+        // Then: task_complete from resolve advances to next comment
+        var action2 = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        Assert.Equal("ask_user", action2.Action);
         Assert.Equal(MonitorStateId.AwaitingUser, state.CurrentState);
         Assert.Equal(1, state.CurrentCommentIndex);
     }
@@ -646,9 +652,14 @@ public class StateMachineTests
         state.UnresolvedComments = [MakeComment()];
         state.CurrentCommentIndex = 0;
 
+        // First: auto-resolve
         var action = MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
+        Assert.Equal("auto_execute", action.Action);
+        Assert.Equal("resolve_thread", action.Task);
 
-        Assert.Equal("polling", action.Action);
+        // Then: task_complete resumes polling (last comment)
+        var action2 = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        Assert.Equal("polling", action2.Action);
         Assert.Equal(MonitorStateId.Polling, state.CurrentState);
     }
 
@@ -661,11 +672,16 @@ public class StateMachineTests
         state.UnresolvedComments = [MakeComment("c1"), MakeComment("c2")];
         state.CurrentCommentIndex = 0;
 
+        // First: auto-resolve
         var action = MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
+        Assert.Equal("auto_execute", action.Action);
+        Assert.Equal("resolve_thread", action.Task);
 
-        Assert.Equal("ask_user", action.Action);
+        // Then: task_complete shows remaining
+        var action2 = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        Assert.Equal("ask_user", action2.Action);
         Assert.Equal(CommentFlowState.PickRemaining, state.CommentFlow);
-        Assert.Contains("1 more", action.Question);
+        Assert.Contains("1 more", action2.Question);
     }
 
     #endregion
