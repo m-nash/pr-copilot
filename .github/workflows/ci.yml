@@ -16,6 +16,7 @@ jobs:
         uses: streetsidesoftware/cspell-action@v6
         with:
           files: '**/*.{cs,md,yml,ps1}'
+          config: 'PrCopilot/cspell.json'
 
   build-and-test:
     runs-on: windows-latest
