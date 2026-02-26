@@ -3,6 +3,7 @@
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -311,6 +312,11 @@ public static class MonitorViewer
 
         // --- Debug panel (collapsible, toggled by button) — bottommost ---
         var hasDebugFile = !string.IsNullOrEmpty(debugFile);
+        Action<string> viewerLog = (msg) =>
+        {
+            if (hasDebugFile)
+                try { File.AppendAllText(debugFile!, $"[VIEWER {DateTime.Now:HH:mm:ss}] {msg}{Environment.NewLine}"); } catch { }
+        };
         var debugExpanded = false;
         var debugLines = new ObservableCollection<string>();
         var debugLastLineCount = 0;
@@ -400,8 +406,29 @@ public static class MonitorViewer
             catch (Exception ex) { statusLabel.Text = $"Error: {ex.Message}"; }
         };
 
+        // Capture version at startup from the running assembly (immutable for this process)
+        var rawVersion = Assembly.GetExecutingAssembly()
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+            ?? Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "?";
+        // Strip +metadata suffix (e.g. +commitsha) for clean display and comparison
+        var plusIdx = rawVersion.IndexOf('+');
+        var version = plusIdx >= 0 ? rawVersion[..plusIdx] : rawVersion;
+        var versionLabel = new Label
+        {
+            Text = $"pr-copilot {version}",
+            X = Pos.Center(),
+            Y = Pos.AnchorEnd(1),
+            ColorScheme = dimScheme
+        };
+
+        var currentVersion = version;
+        var lastVersionCheck = DateTime.MinValue;
+        var versionFilePath = Path.Combine(AppContext.BaseDirectory, "version.txt");
+        viewerLog($"Viewer started: version={currentVersion} versionFile={versionFilePath}");
+
         window.Add(headerButton, ciFrame, approvalsFrame, commentsFrame, waitingFrame,
-                    updatedLabel, separator, debugToggleButton, debugFrame, progressBar, statusLabel, extendButton, checkButton);
+                    updatedLabel, separator, debugToggleButton, debugFrame, progressBar, statusLabel, extendButton, checkButton,
+                    versionLabel);
 
         window.Loaded += (s, e) => checkButton.SetFocus();
 
@@ -476,6 +503,30 @@ public static class MonitorViewer
                 checkButton.Visible = true;
                 statusLabel.Width = Dim.Percent(70);
                 statusLabel.Height = 1;
+            }
+
+            // Check if a newer version has been installed (reads lightweight version.txt sidecar)
+            if ((DateTime.Now - lastVersionCheck).TotalSeconds >= 30)
+            {
+                lastVersionCheck = DateTime.Now;
+                try
+                {
+                    if (File.Exists(versionFilePath))
+                    {
+                        var diskVersion = File.ReadAllText(versionFilePath).Trim();
+                        viewerLog($"Version check: running={currentVersion} disk={diskVersion}");
+                        if (Services.VersionComparer.IsNewer(currentVersion, diskVersion))
+                        {
+                            versionLabel.Text = $"pr-copilot {currentVersion}  ·  ⬆ {diskVersion} available — restart to update";
+                            versionLabel.ColorScheme = new ColorScheme { Normal = new Attribute(Color.BrightYellow, Color.Black) };
+                            viewerLog($"Version upgrade available: {currentVersion} → {diskVersion}");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    viewerLog($"Version check error: {ex.Message}");
+                }
             }
 
             // Terminal state reached — freeze the UI

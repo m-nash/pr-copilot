@@ -53,12 +53,19 @@ New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 
 # Handle locked exe (running MCP server)
 $exePath = Join-Path $InstallDir "PrCopilot.exe"
-$bakPath = Join-Path $InstallDir "PrCopilot.old.exe"
 if (Test-Path $exePath) {
-    if (Test-Path $bakPath) { Remove-Item $bakPath -Force -ErrorAction SilentlyContinue }
+    $n = 0
+    do {
+        $bakTarget = if ($n -eq 0) {
+            Join-Path $InstallDir "PrCopilot.old.exe"
+        } else {
+            Join-Path $InstallDir "PrCopilot.old.$n.exe"
+        }
+        $n++
+    } while (Test-Path $bakTarget)
     try {
-        Rename-Item $exePath $bakPath -Force
-        Write-Host "  Renamed existing PrCopilot.exe → PrCopilot.old.exe" -ForegroundColor DarkGray
+        Rename-Item $exePath $bakTarget -Force
+        Write-Host "  Renamed existing PrCopilot.exe → $(Split-Path $bakTarget -Leaf)" -ForegroundColor DarkGray
     } catch {
         Write-Warning "Could not rename existing exe. Close any running instances and retry."
         exit 1
@@ -68,11 +75,17 @@ if (Test-Path $exePath) {
 Expand-Archive -Path $zipPath -DestinationPath $InstallDir -Force
 Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
 
+# Write version sidecar for viewer update detection
+$installedVersion = ($release.tag_name) -replace '^v', ''
+Set-Content -Path (Join-Path $InstallDir "version.txt") -Value $installedVersion -NoNewline
+
 Write-Host "⚙️  Running setup..." -ForegroundColor Cyan
 & $exePath --setup
 
-# Clean up backup
-if (Test-Path $bakPath) { Remove-Item $bakPath -Force -ErrorAction SilentlyContinue }
+# Best-effort cleanup of old versions (some may be locked by other sessions)
+Get-ChildItem $InstallDir -Filter "PrCopilot.old*.exe" | ForEach-Object {
+    Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+}
 
 Write-Host ""
 Write-Host "✅ pr-copilot installed successfully!" -ForegroundColor Green

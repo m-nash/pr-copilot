@@ -11,11 +11,11 @@ using PrCopilot.Services;
 using PrCopilot.Tools;
 using PrCopilot.Viewer;
 
-// Startup cleanup: delete PrCopilot.old.exe left by install/update rename pattern
-var oldExe = Path.Combine(AppContext.BaseDirectory, "PrCopilot.old.exe");
-if (File.Exists(oldExe))
+// Startup cleanup: try to delete PrCopilot.old*.exe left by install/update rename pattern
+// Don't fail — other CLI sessions may still be using older versions.
+foreach (var old in Directory.GetFiles(AppContext.BaseDirectory, "PrCopilot.old*.exe"))
 {
-    try { File.Delete(oldExe); } catch { }
+    try { File.Delete(old); } catch { }
 }
 
 // --version: print version and exit
@@ -58,17 +58,29 @@ if (args.Contains("--update"))
 
     var installDir = AppContext.BaseDirectory;
     var currentExe = Path.Combine(installDir, "PrCopilot.exe");
-    var backupExe = Path.Combine(installDir, "PrCopilot.old.exe");
 
-    // Rename current exe so the new one can be extracted
-    if (File.Exists(backupExe))
-        File.Delete(backupExe);
+    // Rename current exe with next available .old.N.exe suffix
     if (File.Exists(currentExe))
-        File.Move(currentExe, backupExe);
+    {
+        var n = 0;
+        string backupPath;
+        do
+        {
+            backupPath = n == 0
+                ? Path.Combine(installDir, "PrCopilot.old.exe")
+                : Path.Combine(installDir, $"PrCopilot.old.{n}.exe");
+            n++;
+        } while (File.Exists(backupPath));
+        File.Move(currentExe, backupPath);
+    }
 
     Console.WriteLine($"📂 Extracting to {installDir}...");
     System.IO.Compression.ZipFile.ExtractToDirectory(zipPath, installDir, overwriteFiles: true);
     File.Delete(zipPath);
+
+    // Write version sidecar for viewer update detection
+    var releaseVersion = tagName.TrimStart('v');
+    File.WriteAllText(Path.Combine(installDir, "version.txt"), releaseVersion);
 
     Console.WriteLine("⚙️  Running setup...");
     var newExe = Path.Combine(installDir, "PrCopilot.exe");
