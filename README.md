@@ -90,6 +90,7 @@ The `pr-monitor` skill activates automatically on:
 | Flag | Description |
 |------|-------------|
 | `--setup` | Install SKILL.md and register MCP server |
+| `--update` | Self-update to the latest GitHub release |
 | `--version` | Print version and exit |
 | `--viewer --pr N --log PATH --trigger PATH` | Launch TUI viewer (internal use) |
 
@@ -119,6 +120,15 @@ The state machine (`MonitorTransitions`) makes all decisions deterministically. 
 - Analyzes logs (to investigate CI failures)
 - Follows instructions (execute what the state machine says)
 
+## Updating
+
+```powershell
+# Self-update to the latest release (no need to kill running instances)
+PrCopilot.exe --update
+```
+
+The update renames the running exe to `PrCopilot.old.exe`, extracts the new version, and cleans up on next startup.
+
 ## Development
 
 ```powershell
@@ -130,4 +140,12 @@ dotnet test
 
 # Publish
 dotnet publish src/PrCopilot/PrCopilot.csproj -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ~/.copilot/mcp-servers/pr-copilot
+```
+
+### Local install for testing
+
+```powershell
+# Build and install without killing running instances
+./Install-Debug.ps1
+# Then restart your Copilot CLI session
 ```

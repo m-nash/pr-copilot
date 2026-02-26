@@ -11,12 +11,77 @@ using PrCopilot.Services;
 using PrCopilot.Tools;
 using PrCopilot.Viewer;
 
+// Startup cleanup: delete PrCopilot.old.exe left by install/update rename pattern
+var oldExe = Path.Combine(AppContext.BaseDirectory, "PrCopilot.old.exe");
+if (File.Exists(oldExe))
+{
+    try { File.Delete(oldExe); } catch { }
+}
+
 // --version: print version and exit
 if (args.Contains("--version"))
 {
     var version = Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
         ?? Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "unknown";
     Console.WriteLine($"pr-copilot {version}");
+    return;
+}
+
+// --update: self-update from latest GitHub release
+if (args.Contains("--update"))
+{
+    using var http = new HttpClient();
+    http.DefaultRequestHeaders.Add("User-Agent", "pr-copilot-updater");
+    http.DefaultRequestHeaders.Add("Accept", "application/vnd.github+json");
+
+    Console.WriteLine("🔍 Checking for latest release...");
+    var releaseJson = await http.GetStringAsync("https://api.github.com/repos/m-nash/pr-copilot/releases/latest");
+    var release = JsonNode.Parse(releaseJson)!;
+    var tagName = release["tag_name"]!.GetValue<string>();
+    Console.WriteLine($"📦 Latest release: {tagName}");
+
+    var asset = release["assets"]!.AsArray()
+        .FirstOrDefault(a => a!["name"]!.GetValue<string>().Contains("win-x64") &&
+                             a!["name"]!.GetValue<string>().EndsWith(".zip"));
+    if (asset == null)
+    {
+        Console.Error.WriteLine("❌ No win-x64 zip asset found in latest release.");
+        return;
+    }
+
+    var downloadUrl = asset["browser_download_url"]!.GetValue<string>();
+    var zipPath = Path.Combine(Path.GetTempPath(), $"pr-copilot-{tagName}.zip");
+
+    Console.WriteLine($"⬇️  Downloading {asset["name"]!.GetValue<string>()}...");
+    var zipBytes = await http.GetByteArrayAsync(downloadUrl);
+    await File.WriteAllBytesAsync(zipPath, zipBytes);
+
+    var installDir = AppContext.BaseDirectory;
+    var currentExe = Path.Combine(installDir, "PrCopilot.exe");
+    var backupExe = Path.Combine(installDir, "PrCopilot.old.exe");
+
+    // Rename current exe so the new one can be extracted
+    if (File.Exists(backupExe))
+        File.Delete(backupExe);
+    if (File.Exists(currentExe))
+        File.Move(currentExe, backupExe);
+
+    Console.WriteLine($"📂 Extracting to {installDir}...");
+    System.IO.Compression.ZipFile.ExtractToDirectory(zipPath, installDir, overwriteFiles: true);
+    File.Delete(zipPath);
+
+    Console.WriteLine("⚙️  Running setup...");
+    var newExe = Path.Combine(installDir, "PrCopilot.exe");
+    var setupProcess = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+    {
+        FileName = newExe,
+        Arguments = "--setup",
+        UseShellExecute = false
+    });
+    setupProcess?.WaitForExit();
+
+    Console.WriteLine();
+    Console.WriteLine($"✅ Updated to {tagName}! Restart your Copilot CLI session.");
     return;
 }
 
@@ -95,10 +160,21 @@ if (args.Contains("--viewer"))
     var triggerFile = args[triggerIdx + 1];
     Console.Title = $"PrCopilot Viewer #{prNumber}";
 
+    // Write PID file so the MCP server can detect this viewer is running
+    var pidFile = logFile + ".viewer.pid";
+    File.WriteAllText(pidFile, Environment.ProcessId.ToString());
+
     var debugIdx = Array.IndexOf(args, "--debug");
     var debugFile = (debugIdx >= 0 && debugIdx + 1 < args.Length) ? args[debugIdx + 1] : null;
 
-    MonitorViewer.Run(prNumber, logFile, triggerFile, debugFile);
+    try
+    {
+        MonitorViewer.Run(prNumber, logFile, triggerFile, debugFile);
+    }
+    finally
+    {
+        try { File.Delete(pidFile); } catch { }
+    }
     return;
 }
 
