@@ -44,9 +44,21 @@ jobs:
       - name: Test
         run: dotnet test PrCopilot/PrCopilot.slnx --no-build --configuration Release --verbosity normal
 
+  ci-complete:
+    if: always()
+    needs: [build-and-test, spellcheck]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check results
+        run: |
+          if [ "${{ needs.build-and-test.result }}" != "success" ] || [ "${{ needs.spellcheck.result }}" != "success" ]; then
+            echo "CI failed: build-and-test=${{ needs.build-and-test.result }}, spellcheck=${{ needs.spellcheck.result }}"
+            exit 1
+          fi
+
   auto-tag:
     if: github.ref == 'refs/heads/main'
-    needs: [build-and-test, spellcheck]
+    needs: [ci-complete]
     runs-on: ubuntu-latest
     concurrency:
       group: auto-tag-main
