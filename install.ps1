@@ -55,6 +55,9 @@ try {
         Accept = "application/vnd.github+json"
         "User-Agent" = "pr-copilot-installer"
     }
+    if ($env:GITHUB_TOKEN) {
+        $headers["Authorization"] = "Bearer $env:GITHUB_TOKEN"
+    }
     $release = Invoke-RestMethod -Uri $releaseUrl -Headers $headers
 } catch {
     Write-Error "Failed to fetch release from $releaseUrl — $_"

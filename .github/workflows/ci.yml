@@ -62,6 +62,8 @@ jobs:
 
       - name: Test install.ps1
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           ./install.ps1
           if ($IsWindows) {
@@ -99,6 +101,8 @@ jobs:
       - name: Test --update
         shell: pwsh
         continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           if ($IsWindows) {
             $exe = Join-Path $env:USERPROFILE ".copilot" "mcp-servers" "pr-copilot" "PrCopilot.exe"
