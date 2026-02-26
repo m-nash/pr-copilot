@@ -39,3 +39,30 @@ jobs:
 
       - name: Test
         run: dotnet test PrCopilot/PrCopilot.slnx --no-build --configuration Release --verbosity normal
+
+  auto-tag:
+    if: github.ref == 'refs/heads/main'
+    needs: [build-and-test, spellcheck]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: auto-tag-main
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Bump patch version and tag
+        run: |
+          latest=$(git tag --list 'v*' --sort=-v:refname | head -1)
+          if [ -z "$latest" ]; then
+            next="v0.1.0"
+          else
+            IFS='.' read -r major minor patch <<< "${latest#v}"
+            next="v${major}.${minor}.$((patch + 1))"
+          fi
+          echo "Tagging $next"
+          git tag "$next"
+          git push origin "$next"
