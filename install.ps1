@@ -50,8 +50,11 @@ if ($Version -eq "latest") {
     $releaseUrl = "https://api.github.com/repos/$Owner/$Repo/releases/tags/v$Version"
 }
 
-# Build headers – use GH_TOKEN / GITHUB_TOKEN env-var, or fall back to `gh auth token`
-$headers = @{ Accept = "application/vnd.github+json" }
+# Build headers — use GH_TOKEN / GITHUB_TOKEN env-var, or fall back to `gh auth token`
+$headers = @{
+    Accept = "application/vnd.github+json"
+    "User-Agent" = "pr-copilot-installer"
+}
 $token = if ($env:GH_TOKEN) { $env:GH_TOKEN }
          elseif ($env:GITHUB_TOKEN) { $env:GITHUB_TOKEN }
          else {
@@ -64,7 +67,7 @@ if ($token) {
 try {
     $release = Invoke-RestMethod -Uri $releaseUrl -Headers $headers
 } catch {
-    Write-Error "Failed to fetch release. Check that the version exists: $releaseUrl"
+    Write-Error "Failed to fetch release from $releaseUrl — $_"
     exit 1
 }
 
