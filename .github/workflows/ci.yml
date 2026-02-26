@@ -77,9 +77,9 @@ jobs:
       - name: Verify --setup created config files
         shell: pwsh
         run: |
-          if ($IsWindows) { $home = $env:USERPROFILE } else { $home = $env:HOME }
-          $configPath = Join-Path $home ".copilot" "mcp-config.json"
-          $skillPath = Join-Path $home ".copilot" "skills" "pr-monitor" "SKILL.md"
+          if ($IsWindows) { $userHome = $env:USERPROFILE } else { $userHome = $env:HOME }
+          $configPath = Join-Path $userHome ".copilot" "mcp-config.json"
+          $skillPath = Join-Path $userHome ".copilot" "skills" "pr-monitor" "SKILL.md"
           if (-not (Test-Path $configPath)) { throw "--setup failed: mcp-config.json not found" }
           if (-not (Test-Path $skillPath)) { throw "--setup failed: SKILL.md not found" }
           $config = Get-Content $configPath -Raw | ConvertFrom-Json
@@ -90,8 +90,8 @@ jobs:
       - name: Verify version.txt sidecar
         shell: pwsh
         run: |
-          if ($IsWindows) { $home = $env:USERPROFILE } else { $home = $env:HOME }
-          $versionFile = Join-Path $home ".copilot" "mcp-servers" "pr-copilot" "version.txt"
+          if ($IsWindows) { $userHome = $env:USERPROFILE } else { $userHome = $env:HOME }
+          $versionFile = Join-Path $userHome ".copilot" "mcp-servers" "pr-copilot" "version.txt"
           if (-not (Test-Path $versionFile)) { throw "version.txt not found" }
           $ver = Get-Content $versionFile
           Write-Host "✅ version.txt: $ver"
