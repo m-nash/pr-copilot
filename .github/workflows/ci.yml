@@ -19,7 +19,10 @@ jobs:
           config: 'PrCopilot/cspell.json'
 
   build-and-test:
-    runs-on: windows-latest
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 

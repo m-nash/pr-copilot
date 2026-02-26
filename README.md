@@ -1,23 +1,35 @@
 # pr-copilot
 
-An MCP server that monitors GitHub pull requests through GitHub Copilot CLI. It provides a state machine-driven monitoring loop with a TUI dashboard viewer.
+An MCP server that monitors GitHub pull requests through GitHub Copilot CLI. It provides a state machine-driven monitoring loop with an optional TUI dashboard viewer.
 
 ## Features
 
 - **Automated PR monitoring** — polls PR status (CI checks, reviews, comments, merge conflicts)
 - **State machine architecture** — deterministic C# logic drives all decisions; the LLM agent is a thin executor
-- **TUI dashboard** — live Terminal.Gui viewer with CI status, comments, approvals, progress bars, and deep links
+- **TUI dashboard** (Windows only) — live Terminal.Gui viewer with CI status, comments, approvals, progress bars, and deep links
 - **Comment handling** — address, explain, or ignore review comments one-by-one or in batch
 - **CI failure investigation** — analyze failed check logs, suggest fixes, rerun failed jobs via Azure DevOps
 - **Auto-merge** — squash merge when approved + CI green (with admin override option)
 - **After-hours awareness** — pauses polling during off-hours, resumes automatically
 
-## Prerequisites
+## Requirements
 
-- [.NET 10 SDK](https://dotnet.microsoft.com/download) (or the published self-contained binary)
 - [GitHub CLI (`gh`)](https://cli.github.com/) — authenticated with repo access
 - [GitHub Copilot CLI](https://docs.github.com/en/copilot/github-copilot-in-the-cli)
-- Windows (Terminal.Gui viewer uses Windows-specific APIs)
+
+### Platform support
+
+| Platform | MCP Server | TUI Viewer |
+|----------|-----------|------------|
+| Windows (x64) | ✅ | ✅ Requires [Windows Terminal](https://aka.ms/terminal) |
+| macOS (x64) | ✅ | ❌ Not yet supported |
+| macOS (Apple Silicon) | ✅ | ❌ Not yet supported |
+
+The MCP server and all PR monitoring features work on both platforms. The TUI dashboard viewer (a separate window showing live CI/review status) currently requires Windows with Windows Terminal installed. On macOS, monitoring works entirely through the Copilot CLI conversation.
+
+### For building from source
+
+- [.NET 10 SDK](https://dotnet.microsoft.com/download)
 
 ### Optional
 
@@ -25,12 +37,24 @@ An MCP server that monitors GitHub pull requests through GitHub Copilot CLI. It 
 
 ## Installation
 
-### From published binary
+### Quick install (PowerShell 7+)
 
 ```powershell
-# Download the latest release
-# Then run setup:
+# Downloads the correct binary for your platform and runs --setup
+irm https://raw.githubusercontent.com/m-nash/pr-copilot/main/install.ps1 | iex
+```
+
+### From published binary
+
+Download the latest release for your platform from [GitHub Releases](https://github.com/m-nash/pr-copilot/releases), extract it, then run setup:
+
+```powershell
+# Windows
 PrCopilot.exe --setup
+
+# macOS
+chmod +x PrCopilot
+./PrCopilot --setup
 ```
 
 `--setup` will:
@@ -39,16 +63,25 @@ PrCopilot.exe --setup
 
 ### From source
 
-```powershell
+```bash
 git clone https://github.com/m-nash/pr-copilot.git
 cd pr-copilot
-dotnet build
 
-# Publish self-contained binary
-dotnet publish src/PrCopilot/PrCopilot.csproj -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ~/.copilot/mcp-servers/pr-copilot
+# Build and install using the dev script (auto-detects platform)
+./Install-Debug.ps1
+```
 
-# Run setup from published location
-~/.copilot/mcp-servers/pr-copilot/PrCopilot.exe --setup
+Or manually:
+
+```powershell
+# Windows
+dotnet publish PrCopilot/src/PrCopilot/PrCopilot.csproj -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ~/.copilot/mcp-servers/pr-copilot
+
+# macOS (Apple Silicon)
+dotnet publish PrCopilot/src/PrCopilot/PrCopilot.csproj -c Release -r osx-arm64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ~/.copilot/mcp-servers/pr-copilot
+
+# Then run setup
+~/.copilot/mcp-servers/pr-copilot/PrCopilot --setup
 ```
 
 ### Optional: Playwright MCP
@@ -124,28 +157,26 @@ The state machine (`MonitorTransitions`) makes all decisions deterministically. 
 
 ```powershell
 # Self-update to the latest release (no need to kill running instances)
-PrCopilot.exe --update
+PrCopilot --update      # macOS
+PrCopilot.exe --update  # Windows
 ```
 
-The update renames the running exe to `PrCopilot.old.exe`, extracts the new version, and cleans up on next startup.
+The update renames the running binary, extracts the new version, and cleans up on next startup.
 
 ## Development
 
-```powershell
+```bash
 # Build
-dotnet build
+dotnet build PrCopilot/PrCopilot.slnx
 
 # Run tests
-dotnet test
-
-# Publish
-dotnet publish src/PrCopilot/PrCopilot.csproj -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ~/.copilot/mcp-servers/pr-copilot
+dotnet test PrCopilot/PrCopilot.slnx
 ```
 
 ### Local install for testing
 
 ```powershell
-# Build and install without killing running instances
+# Build and install without killing running instances (auto-detects platform)
 ./Install-Debug.ps1
 # Then restart your Copilot CLI session
 ```

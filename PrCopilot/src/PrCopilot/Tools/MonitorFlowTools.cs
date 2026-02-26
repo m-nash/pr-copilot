@@ -3,6 +3,7 @@
 using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using ModelContextProtocol.Server;
@@ -789,17 +790,23 @@ public class MonitorFlowTools
                 File.Delete(pidFile);
             }
 
-            var viewerPath = Path.Combine(AppContext.BaseDirectory, "PrCopilot.exe");
+            var isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+            var viewerExe = isWindows ? "PrCopilot.exe" : "PrCopilot";
+            var viewerPath = Path.Combine(AppContext.BaseDirectory, viewerExe);
             var viewerArgs = $"--viewer --pr {state.PrNumber} " +
                              $"--log \"{state.LogFile}\" --trigger \"{state.TriggerFile}\" --debug \"{state.DebugLogFile}\"";
 
-            Process.Start(new ProcessStartInfo
+            if (isWindows)
             {
-                FileName = "wt.exe",
-                Arguments = $"-w 0 new-tab -- \"{viewerPath}\" {viewerArgs}",
-                UseShellExecute = false,
-                CreateNoWindow = true
-            });
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = "wt.exe",
+                    Arguments = $"-w 0 new-tab -- \"{viewerPath}\" {viewerArgs}",
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                });
+            }
+            // On macOS the TUI viewer is not yet supported — monitoring works without it
         }
         catch
         {
