@@ -1,0 +1,7 @@
+root = true
+
+[*.cs]
+file_header_template = Licensed under the MIT License.
+
+# IDE0073: File header
+dotnet_diagnostic.IDE0073.severity = error

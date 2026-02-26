@@ -1,0 +1,21 @@
+{
+  "version": "0.2",
+  "language": "en",
+  "words": [
+    "capturable",
+    "csproj",
+    "dedup",
+    "dotnet",
+    "FEFF",
+    "keepalive",
+    "slnx",
+    "xunit"
+  ],
+  "ignorePaths": [
+    "**/bin/**",
+    "**/obj/**",
+    "**/publish/**",
+    "**/*.slnx",
+    "LICENSE"
+  ]
+}

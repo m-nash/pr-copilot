@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  spellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Spell check
+        uses: streetsidesoftware/cspell-action@v6
+        with:
+          files: '**/*.{cs,md,yml,ps1}'
+
+  build-and-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+          dotnet-quality: 'preview'
+
+      - name: Restore
+        run: dotnet restore PrCopilot/PrCopilot.slnx
+
+      - name: Build
+        run: dotnet build PrCopilot/PrCopilot.slnx --no-restore --configuration Release
+
+      - name: Test
+        run: dotnet test PrCopilot/PrCopilot.slnx --no-build --configuration Release --verbosity normal
