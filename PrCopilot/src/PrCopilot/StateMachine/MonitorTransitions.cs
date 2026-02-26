@@ -123,7 +123,7 @@ public static class MonitorTransitions
     private static MonitorAction ProcessTaskComplete(MonitorState state)
     {
         // If we were in a comment flow (e.g. explain_comment), return to the comment prompt
-        if (state.CommentFlow == CommentFlowState.SingleCommentPrompt && 
+        if (state.CommentFlow == CommentFlowState.SingleCommentPrompt &&
             state.CurrentCommentIndex < state.UnresolvedComments.Count)
         {
             var c = state.UnresolvedComments[state.CurrentCommentIndex];

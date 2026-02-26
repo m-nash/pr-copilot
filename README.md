@@ -65,11 +65,14 @@ In any Copilot CLI session with a PR checked out:
 
 ```
 > monitor the pr
+> monitor this pr https://github.com/owner/repo/pull/123
+> monitor pr 456
 ```
 
 The `pr-monitor` skill activates automatically on:
 - `git push` to a branch with an open PR
 - "monitor the PR", "watch the PR", "check PR status", etc.
+- A direct PR link or PR number (assumes the current repo)
 
 ### What happens
 
