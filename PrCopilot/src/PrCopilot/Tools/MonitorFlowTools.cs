@@ -34,15 +34,19 @@ public class MonitorFlowTools
     /// </summary>
     public static void NotifyShutdown()
     {
-        foreach (var session in _sessions.Values)
+        foreach (var kvp in _sessions)
         {
             try
             {
                 var line = $"STOPPED|{DateTime.Now:hh:mm tt}|Server shutting down";
-                File.AppendAllText(session.State.LogFile, line + Environment.NewLine);
+                File.AppendAllText(kvp.Value.State.LogFile, line + Environment.NewLine);
+                kvp.Value.CancelPolling();
+                kvp.Value.Dispose();
             }
             catch { }
         }
+
+        _sessions.Clear();
     }
 
     [McpServerTool(Name = "pr_monitor_start"), Description("Initialize PR monitoring. Fetches PR data, sets up log file, returns monitor_id. Call pr_monitor_next_step next.")]
@@ -56,12 +60,26 @@ public class MonitorFlowTools
         var monitorId = $"pr-{prNumber}";
         DebugLogger.Log("PrMonitorStart", $"Called: owner={owner}, repo={repo}, pr={prNumber}");
 
-        // Cancel and dispose any existing session for this PR (prevents orphaned poll loops)
-        if (_sessions.TryRemove(monitorId, out var existingSession))
+        // If there's already an active session for this PR, reuse it.
+        // This handles the Esc → resume case: the old poll loop is still alive,
+        // so we just return the existing state without disrupting the viewer or log.
+        if (_sessions.TryGetValue(monitorId, out var existing))
         {
-            DebugLogger.Log("PrMonitorStart", $"Cancelling existing session for {monitorId}");
-            existingSession.CancelPolling();
-            existingSession.Dispose();
+            DebugLogger.Log("PrMonitorStart", $"Reusing existing session for {monitorId}");
+            var s = existing.State;
+            return JsonSerializer.Serialize(new
+            {
+                monitor_id = monitorId,
+                pr_title = s.PrTitle,
+                pr_url = s.PrUrl,
+                checks = s.Checks,
+                approvals = s.Approvals.Select(a => a.Author).ToList(),
+                stale_approvals = s.StaleApprovals.Select(a => a.Author).ToList(),
+                unresolved_comments = s.UnresolvedComments.Count,
+                waiting_for_reply_comments = s.WaitingForReplyComments.Count,
+                merge_conflict = s.HasMergeConflict,
+                message = $"Resuming existing monitor for PR #{prNumber}. Call pr_monitor_next_step with event='ready' to continue."
+            }, _jsonOptions);
         }
 
         // Fetch all PR data
@@ -164,88 +182,96 @@ public class MonitorFlowTools
 
         try
         {
-        var state = session.State;
-        DebugLogger.Log("NextStep", $"Called: event={@event}, choice={choice ?? "null"}, state={state.CurrentState}");
+            var state = session.State;
+            DebugLogger.Log("NextStep", $"Called: event={@event}, choice={choice ?? "null"}, state={state.CurrentState}");
 
-        // Start session-level heartbeat to keep MCP client alive
-        session.StartHeartbeat(progress);
-        // Check for pending viewer action (captured by FileSystemWatcher even when not polling)
-        if (session.PendingTriggerContent != null && session.PendingTriggerContent.StartsWith("ACTION|") &&
-            state.ActiveWaitingComment == null && @event != "user_chose")
-        {
-            var threadId = session.PendingTriggerContent["ACTION|".Length..];
-            session.PendingTriggerContent = null;
-            DebugLogger.Log("NextStep", $"Trigger intercept: ACTION|{threadId}");
-            var comment = state.WaitingForReplyComments.FirstOrDefault(c => c.Id == threadId);
-            if (comment != null)
+            // Start session-level heartbeat to keep MCP client alive
+            session.StartHeartbeat(progress);
+            // Check for pending viewer action (captured by FileSystemWatcher even when not polling)
+            if (session.PendingTriggerContent != null && session.PendingTriggerContent.StartsWith("ACTION|") &&
+                state.ActiveWaitingComment == null && @event != "user_chose")
             {
-                var triggerAction = MonitorTransitions.BuildWaitingCommentAction(state, comment);
-                if (triggerAction.Action == "ask_user")
-                    triggerAction.Instructions = "MANDATORY: Call the ask_user tool with the EXACT question and choices above. Do NOT rewrite, rephrase, or add your own choices. Do NOT act on behalf of the user. Wait for the user's selection, then call pr_monitor_next_step with event='user_chose' and choice=<mapped choice value>.";
-                await WriteLogEntryAsync(state, triggerAction);
-                DebugLogger.Log("NextStep", $"Returning trigger action: {triggerAction.Action}");
-                return JsonSerializer.Serialize(triggerAction, _jsonOptions);
+                var threadId = session.PendingTriggerContent["ACTION|".Length..];
+                session.PendingTriggerContent = null;
+                DebugLogger.Log("NextStep", $"Trigger intercept: ACTION|{threadId}");
+                var comment = state.WaitingForReplyComments.FirstOrDefault(c => c.Id == threadId);
+                if (comment != null)
+                {
+                    var triggerAction = MonitorTransitions.BuildWaitingCommentAction(state, comment);
+                    if (triggerAction.Action == "ask_user")
+                        triggerAction.Instructions = "MANDATORY: Call the ask_user tool with the EXACT question and choices above. Do NOT rewrite, rephrase, or add your own choices. Do NOT act on behalf of the user. Wait for the user's selection, then call pr_monitor_next_step with event='user_chose' and choice=<mapped choice value>.";
+                    await WriteLogEntryAsync(state, triggerAction);
+                    DebugLogger.Log("NextStep", $"Returning trigger action: {triggerAction.Action}");
+                    return JsonSerializer.Serialize(triggerAction, _jsonOptions);
+                }
+                session.PendingTriggerContent = null;
             }
-            session.PendingTriggerContent = null;
-        }
 
-        // Parse data if provided
-        if (!string.IsNullOrEmpty(data))
-        {
-            try
+            // Parse data if provided
+            if (!string.IsNullOrEmpty(data))
             {
-                using var dataDoc = JsonDocument.Parse(data);
-                var root = dataDoc.RootElement;
-                if (root.TryGetProperty("findings", out var findings))
-                    state.InvestigationFindings = findings.GetString();
-                if (root.TryGetProperty("suggested_fix", out var fix))
-                    state.SuggestedFix = fix.GetString();
-                if (root.TryGetProperty("issue_type", out var issueType))
-                    state.IssueType = issueType.GetString();
+                try
+                {
+                    using var dataDoc = JsonDocument.Parse(data);
+                    var root = dataDoc.RootElement;
+                    if (root.TryGetProperty("findings", out var findings))
+                        state.InvestigationFindings = findings.GetString();
+                    if (root.TryGetProperty("suggested_fix", out var fix))
+                        state.SuggestedFix = fix.GetString();
+                    if (root.TryGetProperty("issue_type", out var issueType))
+                        state.IssueType = issueType.GetString();
+                }
+                catch { /* ignore parse errors in data */ }
             }
-            catch { /* ignore parse errors in data */ }
-        }
 
-        // Feed event to state machine
-        var action = MonitorTransitions.ProcessEvent(state, @event, choice, data);
-        DebugLogger.Log("NextStep", $"State machine returned: action={action.Action}, task={action.Task ?? "null"}");
+            // Feed event to state machine
+            var action = MonitorTransitions.ProcessEvent(state, @event, choice, data);
+            DebugLogger.Log("NextStep", $"State machine returned: action={action.Action}, task={action.Task ?? "null"}");
 
-        // Handle auto_execute: run the command in C# and loop back
-        while (action.Action == "auto_execute")
-        {
-            action = await ExecuteAutoAction(state, action);
-            DebugLogger.Log("NextStep", $"Auto-execute result: action={action.Action}, task={action.Task ?? "null"}");
-        }
+            // Handle auto_execute: run the command in C# and loop back
+            while (action.Action == "auto_execute")
+            {
+                action = await ExecuteAutoAction(state, action);
+                DebugLogger.Log("NextStep", $"Auto-execute result: action={action.Action}, task={action.Task ?? "null"}");
+            }
 
-        // If the state machine says "polling", we block here until a terminal state
-        if (action.Action == "polling")
-        {
-            // Cancel any existing poll loop from a previous tool call (e.g., user hit Esc then resumed)
-            session.CancelPolling();
-            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, session.PollToken);
-            // Write RESUMING line so the viewer clears any terminal state and shows polling UI
-            await WriteLogEntryAsync(state, action);
-            // Persist ignore file before blocking (may have changed during comment flow)
+            // If the state machine says "polling", we block here until a terminal state
+            if (action.Action == "polling")
+            {
+                // Cancel any existing poll loop from a previous tool call (e.g., user hit Esc then resumed)
+                session.CancelPolling();
+                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, session.PollToken);
+                // Write RESUMING line so the viewer clears any terminal state and shows polling UI
+                await WriteLogEntryAsync(state, action);
+                // Persist ignore file before blocking (may have changed during comment flow)
+                await PersistIgnoreFileAsync(state);
+                DebugLogger.Log("NextStep", "Entering poll loop...");
+                action = await PollUntilTerminalStateAsync(session, linkedCts.Token);
+                DebugLogger.Log("NextStep", $"Poll loop exited: action={action.Action}");
+
+                // If we were cancelled because a new next_step call replaced our poll loop,
+                // exit silently — the new call has taken over this session's log file.
+                if (action.Action == "stop" && !cancellationToken.IsCancellationRequested)
+                {
+                    DebugLogger.Log("NextStep", "Poll replaced by new call — exiting silently");
+                    return JsonSerializer.Serialize(action, _jsonOptions);
+                }
+            }
+
+            // Persist ignore file after any state change
             await PersistIgnoreFileAsync(state);
-            DebugLogger.Log("NextStep", "Entering poll loop...");
-            action = await PollUntilTerminalStateAsync(session, linkedCts.Token);
-            DebugLogger.Log("NextStep", $"Poll loop exited: action={action.Action}");
-        }
 
-        // Persist ignore file after any state change
-        await PersistIgnoreFileAsync(state);
+            // Write to log if transitioning
+            await WriteLogEntryAsync(state, action);
 
-        // Write to log if transitioning
-        await WriteLogEntryAsync(state, action);
+            // For ask_user actions, inject a mandatory instruction into the response
+            // so the LLM cannot skip the ask_user step or rewrite the choices
+            if (action.Action == "ask_user")
+            {
+                action.Instructions = "MANDATORY: Call the ask_user tool with the EXACT question and choices above. Do NOT rewrite, rephrase, or add your own choices. Do NOT act on behalf of the user. Wait for the user's selection, then call pr_monitor_next_step with event='user_chose' and choice=<mapped choice value>.";
+            }
 
-        // For ask_user actions, inject a mandatory instruction into the response
-        // so the LLM cannot skip the ask_user step or rewrite the choices
-        if (action.Action == "ask_user")
-        {
-            action.Instructions = "MANDATORY: Call the ask_user tool with the EXACT question and choices above. Do NOT rewrite, rephrase, or add your own choices. Do NOT act on behalf of the user. Wait for the user's selection, then call pr_monitor_next_step with event='user_chose' and choice=<mapped choice value>.";
-        }
-
-        return JsonSerializer.Serialize(action, _jsonOptions);
+            return JsonSerializer.Serialize(action, _jsonOptions);
         }
         catch (Exception ex)
         {
@@ -437,114 +463,114 @@ public class MonitorFlowTools
         switch (action.Task)
         {
             case "resolve_thread":
-            {
-                var comment = state.ActiveWaitingComment;
-                if (comment == null)
+                {
+                    var comment = state.ActiveWaitingComment;
+                    if (comment == null)
+                        return MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+                    var (success, output) = await GitHubCliExecutor.ResolveThreadAsync(comment.Id);
+                    DebugLogger.Log("AutoExec", $"resolve_thread {comment.Id}: success={success}");
+
+                    if (!success)
+                    {
+                        state.CurrentState = MonitorStateId.AwaitingUser;
+                        return new MonitorAction
+                        {
+                            Action = "ask_user",
+                            Question = $"Failed to resolve thread: {output}. What would you like to do?",
+                            Choices = ["Resume monitoring", "I'll handle it myself"]
+                        };
+                    }
+
+                    // Clear the waiting comment and let the state machine decide next
+                    state.ActiveWaitingComment = null;
                     return MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
-
-                var (success, output) = await GitHubCliExecutor.ResolveThreadAsync(comment.Id);
-                DebugLogger.Log("AutoExec", $"resolve_thread {comment.Id}: success={success}");
-
-                if (!success)
-                {
-                    state.CurrentState = MonitorStateId.AwaitingUser;
-                    return new MonitorAction
-                    {
-                        Action = "ask_user",
-                        Question = $"Failed to resolve thread: {output}. What would you like to do?",
-                        Choices = ["Resume monitoring", "I'll handle it myself"]
-                    };
                 }
-
-                // Clear the waiting comment and let the state machine decide next
-                state.ActiveWaitingComment = null;
-                return MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
-            }
             case "merge_pr":
-            {
-                var (success, output) = await GitHubCliExecutor.MergePrAsync(state.Owner, state.Repo, state.PrNumber);
-                DebugLogger.Log("AutoExec", $"merge_pr #{state.PrNumber}: success={success}");
-
-                if (!success)
                 {
-                    // Detect branch policy failure — offer richer choices
-                    var isBranchPolicy = output.Contains("policy prohibits") || output.Contains("not mergeable");
-                    state.CurrentState = MonitorStateId.AwaitingUser;
+                    var (success, output) = await GitHubCliExecutor.MergePrAsync(state.Owner, state.Repo, state.PrNumber);
+                    DebugLogger.Log("AutoExec", $"merge_pr #{state.PrNumber}: success={success}");
 
-                    if (isBranchPolicy)
+                    if (!success)
                     {
+                        // Detect branch policy failure — offer richer choices
+                        var isBranchPolicy = output.Contains("policy prohibits") || output.Contains("not mergeable");
+                        state.CurrentState = MonitorStateId.AwaitingUser;
+
+                        if (isBranchPolicy)
+                        {
+                            return new MonitorAction
+                            {
+                                Action = "ask_user",
+                                Question = $"Failed to merge PR: {output}. What would you like to do?",
+                                Choices = ["Force merge (--admin)", "Wait for another approver", "Resume monitoring", "I'll handle it myself"]
+                            };
+                        }
+
                         return new MonitorAction
                         {
                             Action = "ask_user",
                             Question = $"Failed to merge PR: {output}. What would you like to do?",
-                            Choices = ["Force merge (--admin)", "Wait for another approver", "Resume monitoring", "I'll handle it myself"]
+                            Choices = ["Resume monitoring", "I'll handle it myself"]
                         };
                     }
 
+                    // Merge succeeded — write to log and return merged action
+                    var mergedLine = $"STOPPED|{DateTime.Now:hh:mm tt}|🟣 PR #{state.PrNumber} merged successfully";
+                    try { await File.AppendAllTextAsync(state.LogFile, mergedLine + Environment.NewLine); }
+                    catch { }
+                    state.CurrentState = MonitorStateId.Stopped;
                     return new MonitorAction
                     {
-                        Action = "ask_user",
-                        Question = $"Failed to merge PR: {output}. What would you like to do?",
-                        Choices = ["Resume monitoring", "I'll handle it myself"]
+                        Action = "merged",
+                        Message = $"🟣 PR #{state.PrNumber} merged successfully! {output}"
                     };
                 }
-
-                // Merge succeeded — write to log and return merged action
-                var mergedLine = $"STOPPED|{DateTime.Now:hh:mm tt}|🟣 PR #{state.PrNumber} merged successfully";
-                try { await File.AppendAllTextAsync(state.LogFile, mergedLine + Environment.NewLine); }
-                catch { }
-                state.CurrentState = MonitorStateId.Stopped;
-                return new MonitorAction
-                {
-                    Action = "merged",
-                    Message = $"🟣 PR #{state.PrNumber} merged successfully! {output}"
-                };
-            }
             case "merge_pr_admin":
-            {
-                var (success, output) = await GitHubCliExecutor.MergePrAdminAsync(state.Owner, state.Repo, state.PrNumber);
-                DebugLogger.Log("AutoExec", $"merge_pr_admin #{state.PrNumber}: success={success}");
-
-                if (!success)
                 {
-                    state.CurrentState = MonitorStateId.AwaitingUser;
+                    var (success, output) = await GitHubCliExecutor.MergePrAdminAsync(state.Owner, state.Repo, state.PrNumber);
+                    DebugLogger.Log("AutoExec", $"merge_pr_admin #{state.PrNumber}: success={success}");
+
+                    if (!success)
+                    {
+                        state.CurrentState = MonitorStateId.AwaitingUser;
+                        return new MonitorAction
+                        {
+                            Action = "ask_user",
+                            Question = $"Failed to admin-merge PR: {output}. What would you like to do?",
+                            Choices = ["Resume monitoring", "I'll handle it myself"]
+                        };
+                    }
+
+                    var adminMergedLine = $"STOPPED|{DateTime.Now:hh:mm tt}|🟣 PR #{state.PrNumber} merged (admin) successfully";
+                    try { await File.AppendAllTextAsync(state.LogFile, adminMergedLine + Environment.NewLine); }
+                    catch { }
+                    state.CurrentState = MonitorStateId.Stopped;
                     return new MonitorAction
                     {
-                        Action = "ask_user",
-                        Question = $"Failed to admin-merge PR: {output}. What would you like to do?",
-                        Choices = ["Resume monitoring", "I'll handle it myself"]
+                        Action = "merged",
+                        Message = $"🟣 PR #{state.PrNumber} merged (admin) successfully! {output}"
                     };
                 }
-
-                var adminMergedLine = $"STOPPED|{DateTime.Now:hh:mm tt}|🟣 PR #{state.PrNumber} merged (admin) successfully";
-                try { await File.AppendAllTextAsync(state.LogFile, adminMergedLine + Environment.NewLine); }
-                catch { }
-                state.CurrentState = MonitorStateId.Stopped;
-                return new MonitorAction
-                {
-                    Action = "merged",
-                    Message = $"🟣 PR #{state.PrNumber} merged (admin) successfully! {output}"
-                };
-            }
             case "run_new_build":
-            {
-                var (success, output) = await GitHubCliExecutor.PushEmptyCommitAsync(
-                    state.Owner, state.Repo, state.HeadBranch, state.HeadSha);
-                DebugLogger.Log("AutoExec", $"run_new_build: success={success}, output={output}");
-
-                if (!success)
                 {
-                    state.CurrentState = MonitorStateId.AwaitingUser;
-                    return new MonitorAction
-                    {
-                        Action = "ask_user",
-                        Question = $"Failed to trigger new build: {output}. What would you like to do?",
-                        Choices = ["Resume monitoring", "I'll handle it myself"]
-                    };
-                }
+                    var (success, output) = await GitHubCliExecutor.PushEmptyCommitAsync(
+                        state.Owner, state.Repo, state.HeadBranch, state.HeadSha);
+                    DebugLogger.Log("AutoExec", $"run_new_build: success={success}, output={output}");
 
-                return new MonitorAction { Action = "polling", Message = $"New CI run triggered — {output}. Resuming monitoring." };
-            }
+                    if (!success)
+                    {
+                        state.CurrentState = MonitorStateId.AwaitingUser;
+                        return new MonitorAction
+                        {
+                            Action = "ask_user",
+                            Question = $"Failed to trigger new build: {output}. What would you like to do?",
+                            Choices = ["Resume monitoring", "I'll handle it myself"]
+                        };
+                    }
+
+                    return new MonitorAction { Action = "polling", Message = $"New CI run triggered — {output}. Resuming monitoring." };
+                }
             default:
                 DebugLogger.Error("AutoExec", $"Unknown auto_execute task: {action.Task}");
                 return MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
@@ -559,11 +585,9 @@ public class MonitorFlowTools
         using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(sleepSeconds));
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
 
-        // Wait for: timeout or trigger file (via FileSystemWatcher)
         var timeoutTask = Task.Delay(TimeSpan.FromSeconds(sleepSeconds), linkedCts.Token);
         var triggerTask = session.WaitForTriggerAsync(linkedCts.Token);
 
-        // Detect pre-completed tasks (root cause of instant-return bugs)
         if (timeoutTask.IsCompleted || triggerTask.IsCompleted)
             DebugLogger.Log("Sleep", $"PRE-COMPLETED: timeout={timeoutTask.Status}, trigger={triggerTask.Status}");
 
@@ -814,6 +838,7 @@ internal class MonitorSession : IDisposable
         {
             // Small delay to let the writer finish
             Thread.Sleep(50);
+            if (!File.Exists(e.FullPath)) return;
             var content = File.ReadAllText(e.FullPath).Trim();
             File.Delete(e.FullPath);
             DebugLogger.Log("Trigger", $"File detected: changeType={e.ChangeType}, content='{content}'");
