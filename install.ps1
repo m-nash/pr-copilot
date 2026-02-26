@@ -51,12 +51,18 @@ if ($Version -eq "latest") {
 }
 
 try {
+    # Build headers — use GH_TOKEN / GITHUB_TOKEN env-var, or fall back to `gh auth token`
     $headers = @{
         Accept = "application/vnd.github+json"
         "User-Agent" = "pr-copilot-installer"
     }
-    if ($env:GITHUB_TOKEN) {
-        $headers["Authorization"] = "Bearer $env:GITHUB_TOKEN"
+    $token = if ($env:GH_TOKEN) { $env:GH_TOKEN }
+             elseif ($env:GITHUB_TOKEN) { $env:GITHUB_TOKEN }
+             else {
+                 try { (gh auth token 2>$null) } catch { $null }
+             }
+    if ($token) {
+        $headers["Authorization"] = "Bearer $token"
     }
     $release = Invoke-RestMethod -Uri $releaseUrl -Headers $headers
 } catch {
