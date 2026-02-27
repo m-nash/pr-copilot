@@ -88,6 +88,18 @@ public class MonitorFlowTools
         var checkResult = await PrStatusFetcher.FetchCheckRunsAsync(owner, repo, prInfo.HeadSha);
         var reviewResult = await PrStatusFetcher.FetchReviewsAsync(owner, repo, prNumber, prInfo.HeadSha);
         var allComments = await PrStatusFetcher.FetchUnresolvedCommentsAsync(owner, repo, prNumber, prInfo.Author);
+
+        // Get the current authenticated GitHub user
+        var currentUser = "";
+        try
+        {
+            currentUser = await PrStatusFetcher.FetchCurrentUserAsync();
+        }
+        catch
+        {
+            currentUser = prInfo.Author; // fallback to PR author if gh fails
+        }
+
         DebugLogger.Log("PrMonitorStart", $"Fetched: {checkResult.Counts.Total} checks ({checkResult.Counts.Failed} failed), {reviewResult.Approvals.Count} approvals, {allComments.Count} comments");
         // Build state
         var state = new MonitorState
@@ -98,6 +110,7 @@ public class MonitorFlowTools
             PrTitle = prInfo.Title,
             PrUrl = prInfo.Url,
             PrAuthor = prInfo.Author,
+            CurrentUser = currentUser,
             HeadSha = prInfo.HeadSha,
             HeadBranch = prInfo.HeadBranch,
             SessionFolder = sessionFolder,

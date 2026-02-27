@@ -33,6 +33,15 @@ public static class PrStatusFetcher
     };
 
     /// <summary>
+    /// Fetches the authenticated GitHub user's login name.
+    /// </summary>
+    public static async Task<string> FetchCurrentUserAsync()
+    {
+        var login = await RunGhAsync("api user --jq .login");
+        return login.Trim();
+    }
+
+    /// <summary>
     /// Fetches basic PR info: title, head SHA, URL, mergeable state.
     /// </summary>
     public static async Task<PrInfo> FetchPrInfoAsync(string owner, string repo, int prNumber)

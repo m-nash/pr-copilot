@@ -809,5 +809,5 @@ public static class MonitorTransitions
     /// Footer instruction for AI-generated comment replies so reviewers know it's bot-assisted.
     /// </summary>
     private static string CopilotFooter(MonitorState state) =>
-        $" IMPORTANT: Append this footer to the END of every comment reply you post (after a blank line and ---): '\\n---\\n🤖 {state.PrAuthor}-copilot'";
+        $" IMPORTANT: Append this footer to the END of every comment reply you post (after a blank line and ---): '\\n---\\n🤖 {state.CurrentUser}-copilot'";
 }

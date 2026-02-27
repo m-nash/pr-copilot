@@ -17,6 +17,9 @@ public class MonitorState
     public string PrTitle { get; set; } = "";
     public string PrUrl { get; set; } = "";
     public string PrAuthor { get; set; } = "";
+
+    /// <summary>The GitHub username of the person running this tool (from gh api user).</summary>
+    public string CurrentUser { get; set; } = "";
     public string HeadSha { get; set; } = "";
     public string HeadBranch { get; set; } = "";
     public string SessionFolder { get; set; } = "";
