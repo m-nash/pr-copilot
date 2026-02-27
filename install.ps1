@@ -10,12 +10,17 @@
 .PARAMETER Version
     Specific version to install (e.g., "0.1.0"). Defaults to "latest".
 
+.PARAMETER AutoUpdate
+    Enable automatic update checks on MCP server startup.
+
 .EXAMPLE
     ./install.ps1
     ./install.ps1 -Version 0.1.0
+    ./install.ps1 -AutoUpdate
 #>
 param(
-    [string]$Version = "latest"
+    [string]$Version = "latest",
+    [switch]$AutoUpdate
 )
 
 $ErrorActionPreference = "Stop"
@@ -119,7 +124,9 @@ if (-not $IsWindows) {
 }
 
 Write-Host "⚙️  Running setup..." -ForegroundColor Cyan
-& $exePath --setup
+$setupArgs = @("--setup")
+if ($AutoUpdate) { $setupArgs += "--auto-update" }
+& $exePath @setupArgs
 
 # Best-effort cleanup of old versions (some may be locked by other sessions)
 Get-ChildItem $InstallDir -Filter $oldPattern | Where-Object { $_.Extension -ne '.pdb' } | ForEach-Object {

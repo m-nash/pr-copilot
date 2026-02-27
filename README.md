@@ -127,6 +127,10 @@ The `pr-monitor` skill activates automatically on:
 | `--version` | Print version and exit |
 | `--viewer --pr N --log PATH --trigger PATH` | Launch TUI viewer (internal use) |
 
+### Configuration
+
+pr-copilot supports optional configuration through the `args` array in `mcp-config.json`. See [docs/configuration.md](docs/configuration.md) for available options.
+
 ## Architecture
 
 ```

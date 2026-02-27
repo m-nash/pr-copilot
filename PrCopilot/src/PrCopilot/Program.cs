@@ -36,85 +36,28 @@ if (args.Contains("--version"))
 // --update: self-update from latest GitHub release
 if (args.Contains("--update"))
 {
-    using var http = new HttpClient();
-    http.DefaultRequestHeaders.Add("User-Agent", "pr-copilot-updater");
-    http.DefaultRequestHeaders.Add("Accept", "application/vnd.github+json");
-
     Console.WriteLine("🔍 Checking for latest release...");
-    var releaseJson = await http.GetStringAsync("https://api.github.com/repos/m-nash/pr-copilot/releases/latest");
-    var release = JsonNode.Parse(releaseJson)!;
-    var tagName = release["tag_name"]!.GetValue<string>();
-    Console.WriteLine($"📦 Latest release: {tagName}");
-
-    var rid = RuntimeInformation.RuntimeIdentifier;
-    // Normalize to the RIDs we publish (e.g. osx-arm64, osx-x64, win-x64)
-    if (rid.StartsWith("osx") || rid.StartsWith("macos"))
-        rid = RuntimeInformation.OSArchitecture == Architecture.Arm64 ? "osx-arm64" : "osx-x64";
-    else if (rid.StartsWith("win"))
-        rid = "win-x64";
-
-    var asset = release["assets"]!.AsArray()
-        .FirstOrDefault(a => a!["name"]!.GetValue<string>().Contains(rid) &&
-                             a!["name"]!.GetValue<string>().EndsWith(".zip"));
-    if (asset == null)
+    var tag = await UpdateService.CheckAndApplyUpdate(msg => Console.WriteLine($"  {msg}"));
+    if (tag != null)
     {
-        Console.Error.WriteLine($"❌ No {rid} zip asset found in latest release.");
-        return;
-    }
-
-    var downloadUrl = asset["browser_download_url"]!.GetValue<string>();
-    var zipPath = Path.Combine(Path.GetTempPath(), $"pr-copilot-{tagName}.zip");
-
-    Console.WriteLine($"⬇️  Downloading {asset["name"]!.GetValue<string>()}...");
-    var zipBytes = await http.GetByteArrayAsync(downloadUrl);
-    await File.WriteAllBytesAsync(zipPath, zipBytes);
-
-    var installDir = AppContext.BaseDirectory;
-    var currentExe = Path.Combine(installDir, exeName);
-
-    // Rename current exe with next available .old.N suffix
-    if (File.Exists(currentExe))
-    {
-        var n = 0;
-        string backupPath;
-        var ext = isWindows ? ".exe" : "";
-        do
+        // Run --setup with the new binary to re-register
+        Console.WriteLine("⚙️  Running setup...");
+        var newExe = Path.Combine(AppContext.BaseDirectory, exeName);
+        var setupArgs = "--setup";
+        // Preserve --auto-update in the registration if the user had it
+        if (args.Contains("--auto-update"))
+            setupArgs += " --auto-update";
+        var setupProcess = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
         {
-            backupPath = n == 0
-                ? Path.Combine(installDir, $"PrCopilot.old{ext}")
-                : Path.Combine(installDir, $"PrCopilot.old.{n}{ext}");
-            n++;
-        } while (File.Exists(backupPath));
-        File.Move(currentExe, backupPath);
+            FileName = newExe,
+            Arguments = setupArgs,
+            UseShellExecute = false
+        });
+        setupProcess?.WaitForExit();
+
+        Console.WriteLine();
+        Console.WriteLine($"✅ Updated to {tag}! Restart your Copilot CLI session.");
     }
-
-    Console.WriteLine($"📂 Extracting to {installDir}...");
-    System.IO.Compression.ZipFile.ExtractToDirectory(zipPath, installDir, overwriteFiles: true);
-    File.Delete(zipPath);
-
-    // Write version sidecar for viewer update detection
-    var releaseVersion = tagName.TrimStart('v');
-    File.WriteAllText(Path.Combine(installDir, "version.txt"), releaseVersion);
-
-    // Make binary executable on Unix
-    if (!isWindows)
-    {
-        var newBin = Path.Combine(installDir, exeName);
-        System.Diagnostics.Process.Start("chmod", $"+x \"{newBin}\"")?.WaitForExit();
-    }
-
-    Console.WriteLine("⚙️  Running setup...");
-    var newExe = Path.Combine(installDir, exeName);
-    var setupProcess = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-    {
-        FileName = newExe,
-        Arguments = "--setup",
-        UseShellExecute = false
-    });
-    setupProcess?.WaitForExit();
-
-    Console.WriteLine();
-    Console.WriteLine($"✅ Updated to {tagName}! Restart your Copilot CLI session.");
     return;
 }
 
@@ -161,7 +104,7 @@ if (args.Contains("--setup"))
     servers["pr-copilot"] = new JsonObject
     {
         ["command"] = exePath,
-        ["args"] = new JsonArray(),
+        ["args"] = args.Contains("--auto-update") ? new JsonArray("--auto-update") : new JsonArray(),
         ["timeout"] = 3600000
     };
 
@@ -218,6 +161,28 @@ Console.Title = "PrCopilot MCP Server";
 var copilotDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".copilot");
 DebugLogger.SetFallbackPath(Path.Combine(copilotDir, "pr-copilot-server.log"));
 DebugLogger.Log("Startup", "MCP server starting");
+
+// --auto-update: check for updates in the background (non-blocking)
+if (args.Contains("--auto-update"))
+{
+    _ = Task.Run(async () =>
+    {
+        try
+        {
+            DebugLogger.Log("AutoUpdate", "Checking for updates...");
+            var tag = await UpdateService.CheckAndApplyUpdate(
+                msg => DebugLogger.Log("AutoUpdate", msg));
+            if (tag != null)
+                DebugLogger.Log("AutoUpdate", $"Updated to {tag} — will take effect on next restart");
+            else
+                DebugLogger.Log("AutoUpdate", "No update available");
+        }
+        catch (Exception ex)
+        {
+            DebugLogger.Log("AutoUpdate", $"Update check failed: {ex.Message}");
+        }
+    });
+}
 
 // Global exception handlers — write to log before process dies
 AppDomain.CurrentDomain.UnhandledException += (sender, e) =>
