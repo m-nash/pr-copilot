@@ -15,6 +15,12 @@ public static class UpdateService
     private const string ReleaseUrl = "https://api.github.com/repos/m-nash/pr-copilot/releases/latest";
 
     /// <summary>
+    /// Lock held during the rename+extract+copy window of an update.
+    /// LaunchViewerIfNeeded waits on this so it doesn't try to launch the exe mid-swap.
+    /// </summary>
+    public static readonly SemaphoreSlim UpdateLock = new(1, 1);
+
+    /// <summary>
     /// Checks for a newer release and installs it if available.
     /// Returns the new version tag if updated, or null if already up to date.
     /// </summary>
@@ -73,25 +79,47 @@ public static class UpdateService
         var installDir = AppContext.BaseDirectory;
         var currentExe = Path.Combine(installDir, exeName);
 
-        // Rename current exe with next available .old.N suffix
-        if (File.Exists(currentExe))
+        // Extract to a staging directory first — don't touch the running exe until we know it works
+        var stagingDir = Path.Combine(Path.GetTempPath(), $"pr-copilot-update-{Guid.NewGuid():N}");
+        log($"Extracting to staging dir...");
+        System.IO.Compression.ZipFile.ExtractToDirectory(zipPath, stagingDir, overwriteFiles: true);
+        File.Delete(zipPath);
+
+        // Hold the lock during the rename+copy window so viewer launch waits
+        await UpdateLock.WaitAsync();
+        try
         {
-            var n = 0;
-            string backupPath;
-            var ext = isWindows ? ".exe" : "";
-            do
+            // Rename current exe with next available .old.N suffix
+            if (File.Exists(currentExe))
             {
-                backupPath = n == 0
-                    ? Path.Combine(installDir, $"PrCopilot.old{ext}")
-                    : Path.Combine(installDir, $"PrCopilot.old.{n}{ext}");
-                n++;
-            } while (File.Exists(backupPath));
-            File.Move(currentExe, backupPath);
+                var n = 0;
+                string backupPath;
+                var ext = isWindows ? ".exe" : "";
+                do
+                {
+                    backupPath = n == 0
+                        ? Path.Combine(installDir, $"PrCopilot.old{ext}")
+                        : Path.Combine(installDir, $"PrCopilot.old.{n}{ext}");
+                    n++;
+                } while (File.Exists(backupPath));
+                File.Move(currentExe, backupPath);
+            }
+
+            // Copy staged files into install dir
+            log($"Installing to {installDir}...");
+            foreach (var file in Directory.GetFiles(stagingDir))
+            {
+                var dest = Path.Combine(installDir, Path.GetFileName(file));
+                File.Copy(file, dest, overwrite: true);
+            }
+        }
+        finally
+        {
+            UpdateLock.Release();
         }
 
-        log($"Extracting to {installDir}...");
-        System.IO.Compression.ZipFile.ExtractToDirectory(zipPath, installDir, overwriteFiles: true);
-        File.Delete(zipPath);
+        // Clean up staging
+        try { Directory.Delete(stagingDir, recursive: true); } catch { }
 
         // Write version sidecar for viewer update detection
         File.WriteAllText(Path.Combine(installDir, "version.txt"), releaseVersion);

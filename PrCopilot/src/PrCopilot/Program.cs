@@ -179,7 +179,7 @@ if (args.Contains("--auto-update"))
         }
         catch (Exception ex)
         {
-            DebugLogger.Log("AutoUpdate", $"Update check failed: {ex.Message}");
+            DebugLogger.Log("AutoUpdate", $"Update check failed: {ex}");
         }
     });
 }
