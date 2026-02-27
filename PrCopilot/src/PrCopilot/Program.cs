@@ -113,7 +113,7 @@ if (args.Contains("--setup"))
     Console.WriteLine($"   command: {exePath}");
     Console.WriteLine();
     Console.WriteLine("💡 Optional: Install Playwright MCP for full CI rerun automation:");
-    Console.WriteLine("   copilot mcp add playwright -- npx -y @playwright/mcp@latest --browser msedge");
+    Console.WriteLine("   copilot -i \"mcp add playwright -- npx -y @playwright/mcp@latest --browser msedge\"");
     return;
 }
 
