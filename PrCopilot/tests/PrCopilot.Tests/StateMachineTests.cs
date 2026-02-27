@@ -703,4 +703,59 @@ public class StateMachineTests
     }
 
     #endregion
+
+    #region ProcessEvent — Explain Then Apply Flow
+
+    [Fact]
+    public void ExplainFlow_AfterExplainTaskComplete_ShowsApplyAsFirstChoice()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.UnresolvedComments = [MakeComment()];
+        state.CurrentCommentIndex = 0;
+
+        // User chooses "explain" → agent completes
+        MonitorTransitions.ProcessEvent(state, "user_chose", "explain", null);
+        var postExplainAction = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        Assert.Equal("ask_user", postExplainAction.Action);
+        Assert.Equal("Apply the recommendation", postExplainAction.Choices![0]);
+    }
+
+    [Fact]
+    public void ExplainFlow_AfterExplainTaskComplete_OnlyTwoChoices()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.UnresolvedComments = [MakeComment()];
+        state.CurrentCommentIndex = 0;
+
+        MonitorTransitions.ProcessEvent(state, "user_chose", "explain", null);
+        var postExplainAction = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        Assert.Equal(2, postExplainAction.Choices!.Count);
+        Assert.DoesNotContain("Explain and suggest what to do", postExplainAction.Choices!);
+    }
+
+    [Fact]
+    public void ExplainFlow_ApplyAfterExplain_ExecutesAddressTask()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.UnresolvedComments = [MakeComment()];
+        state.CurrentCommentIndex = 0;
+
+        // explain → task_complete → user chooses apply
+        MonitorTransitions.ProcessEvent(state, "user_chose", "explain", null);
+        MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        var applyAction = MonitorTransitions.ProcessEvent(state, "user_chose", "apply_fix", null);
+
+        Assert.Equal("execute", applyAction.Action);
+        Assert.Equal("address_comment", applyAction.Task);
+    }
+
+    #endregion
 }
