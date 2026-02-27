@@ -7,7 +7,13 @@
     Publishes a Release build, then renames the running PrCopilot binary to
     a backup name (which gets cleaned up on next startup) and copies
     the new build in place. Just restart your Copilot CLI session afterward.
+
+.PARAMETER AutoUpdate
+    Enable automatic update checks on MCP server startup.
 #>
+param(
+    [switch]$AutoUpdate
+)
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = $PSScriptRoot
@@ -96,6 +102,12 @@ Set-Content -Path (Join-Path $InstallDir "version.txt") -Value $devVersion -NoNe
 if (-not $IsWindows) {
     chmod +x $ExePath
 }
+
+Write-Host ""
+Write-Host "⚙️  Running setup..." -ForegroundColor Cyan
+$setupArgs = @("--setup")
+if ($AutoUpdate) { $setupArgs += "--auto-update" }
+& $ExePath @setupArgs
 
 Write-Host ""
 Write-Host "✅ Installed! Restart your Copilot CLI session to pick up the new build." -ForegroundColor Green
