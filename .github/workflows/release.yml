@@ -56,7 +56,9 @@ jobs:
 
       - name: Package
         shell: pwsh
-        run: Compress-Archive -Path publish/${{ matrix.rid }}/* -DestinationPath pr-copilot-${{ matrix.rid }}.zip
+        run: |
+          Remove-Item publish/${{ matrix.rid }}/*.pdb -ErrorAction SilentlyContinue
+          Compress-Archive -Path publish/${{ matrix.rid }}/* -DestinationPath pr-copilot-${{ matrix.rid }}.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
