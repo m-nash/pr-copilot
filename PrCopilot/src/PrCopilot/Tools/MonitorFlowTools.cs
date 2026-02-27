@@ -790,23 +790,32 @@ public class MonitorFlowTools
                 File.Delete(pidFile);
             }
 
-            var isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
-            var viewerExe = isWindows ? "PrCopilot.exe" : "PrCopilot";
-            var viewerPath = Path.Combine(AppContext.BaseDirectory, viewerExe);
-            var viewerArgs = $"--viewer --pr {state.PrNumber} " +
-                             $"--log \"{state.LogFile}\" --trigger \"{state.TriggerFile}\" --debug \"{state.DebugLogFile}\"";
-
-            if (isWindows)
+            // Wait for any in-progress update to finish so the exe exists
+            UpdateService.UpdateLock.Wait(TimeSpan.FromSeconds(30));
+            try
             {
-                Process.Start(new ProcessStartInfo
+                var isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+                var viewerExe = isWindows ? "PrCopilot.exe" : "PrCopilot";
+                var viewerPath = Path.Combine(AppContext.BaseDirectory, viewerExe);
+                var viewerArgs = $"--viewer --pr {state.PrNumber} " +
+                                 $"--log \"{state.LogFile}\" --trigger \"{state.TriggerFile}\" --debug \"{state.DebugLogFile}\"";
+
+                if (isWindows)
                 {
-                    FileName = "wt.exe",
-                    Arguments = $"-w 0 new-tab -- \"{viewerPath}\" {viewerArgs}",
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                });
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = "wt.exe",
+                        Arguments = $"-w 0 new-tab -- \"{viewerPath}\" {viewerArgs}",
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    });
+                }
+                // On macOS the TUI viewer is not yet supported — monitoring works without it
             }
-            // On macOS the TUI viewer is not yet supported — monitoring works without it
+            finally
+            {
+                UpdateService.UpdateLock.Release();
+            }
         }
         catch
         {
