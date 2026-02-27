@@ -89,7 +89,7 @@ dotnet publish PrCopilot/src/PrCopilot/PrCopilot.csproj -c Release -r osx-arm64 
 For full CI rerun automation (clicking "Rerun failed jobs" in Azure DevOps):
 
 ```powershell
-copilot mcp add playwright -- npx -y @playwright/mcp@latest --browser msedge
+copilot -i "mcp add playwright -- npx -y @playwright/mcp@latest --browser msedge"
 ```
 
 ## Usage
