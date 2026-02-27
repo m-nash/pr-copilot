@@ -42,6 +42,7 @@ if ($IsWindows) {
 $ExePath = Join-Path $InstallDir $exeName
 
 # Compute dev version from latest git tag
+git -C $RepoRoot fetch --tags --quiet 2>$null
 $latestTag = git -C $RepoRoot tag --list 'v*' --sort=-v:refname | Select-Object -First 1
 if ($latestTag) {
     $ver = $latestTag -replace '^v', ''
