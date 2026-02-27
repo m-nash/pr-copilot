@@ -136,6 +136,20 @@ public static class MonitorTransitions
         {
             var c = state.UnresolvedComments[state.CurrentCommentIndex];
             state.CurrentState = MonitorStateId.AwaitingUser;
+
+            // After explain, show post-explain choices (no "Explain" again)
+            if (state.PendingExplainResult)
+            {
+                state.PendingExplainResult = false;
+                return new MonitorAction
+                {
+                    Action = "ask_user",
+                    Question = $"Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{Truncate(c.Body, 200)}\"",
+                    Choices = ["Apply the recommendation", "I'll handle it myself"],
+                    Context = c
+                };
+            }
+
             return new MonitorAction
             {
                 Action = "ask_user",
@@ -257,6 +271,7 @@ public static class MonitorTransitions
                 IgnoreAllCommentsAndResume(state),
 
             (CommentFlowState.SingleCommentPrompt, "address") => BeginAddressCurrentComment(state),
+            (CommentFlowState.SingleCommentPrompt, "apply_fix") => BeginAddressCurrentComment(state),
             (CommentFlowState.SingleCommentPrompt, "explain") => BeginExplainComment(state),
 
             // Per-comment confirmation in address-all flow
@@ -356,6 +371,7 @@ public static class MonitorTransitions
     {
         var c = state.UnresolvedComments[state.CurrentCommentIndex];
         state.CurrentState = MonitorStateId.ExecutingTask;
+        state.PendingExplainResult = true;
         return new MonitorAction
         {
             Action = "execute",

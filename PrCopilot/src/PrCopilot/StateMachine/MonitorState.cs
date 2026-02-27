@@ -69,6 +69,9 @@ public class MonitorState
 
     // Set when auto-resolving a thread after addressing a comment
     public bool PendingResolveAfterAddress { get; set; }
+
+    // Set when explain task completes — show post-explain choices instead of original prompt
+    public bool PendingExplainResult { get; set; }
 }
 
 /// <summary>
