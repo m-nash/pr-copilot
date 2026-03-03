@@ -143,6 +143,11 @@ public class MonitorAction
     [JsonPropertyName("action")]
     public string Action { get; set; } = "";
 
+    /// <summary>For multi-PR monitoring: the specific monitor ID this action relates to.</summary>
+    [JsonPropertyName("monitorId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? MonitorId { get; set; }
+
     /// <summary>For ask_user: the question text.</summary>
     [JsonPropertyName("question")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

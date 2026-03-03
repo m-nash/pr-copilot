@@ -1,6 +1,6 @@
 ---
 name: pr-monitor
-description: "CRITICAL: When triggered, your FIRST action must be calling pr_monitor_start — do NOT reply to comments, read code, or take any PR action until the state machine tells you to. Use this skill for: git push to PR branch, 'monitor PR', 'resume monitoring', 'watch PR', 'check PR status', 'keep watching', 'show viewer', 'open viewer'. Do NOT implement your own monitoring."
+description: "CRITICAL: When triggered, your FIRST action must be calling pr_monitor_start — do NOT reply to comments, read code, or take any PR action until the state machine tells you to. Use this skill for: git push to PR branch, 'monitor PR', 'resume monitoring', 'watch PR', 'check PR status', 'keep watching', 'show viewer', 'open viewer', 'monitor all my PRs', 'monitor all PRs', 'watch all my PRs'. Do NOT implement your own monitoring."
 ---
 
 # PR Monitor
@@ -111,6 +111,43 @@ When the user selects a choice from `ask_user`, map their selection to the `choi
 | "Reassess my response" | `re_suggest` |
 | "Go back to monitoring" | `go_back` |
 | Numbered comment selection (e.g., "1. author...") | The full text of the choice |
+
+## Monitor All My PRs
+
+When the user says "monitor all my PRs", "watch all my PRs", or similar:
+
+1. **Get session folder**: Use the session state folder path (from your environment context).
+2. **Call `pr_monitor_start_all`**:
+   ```
+   pr_monitor_start_all(sessionFolder)
+   ```
+   This auto-detects the GitHub username from `gh` CLI auth. If detection fails, it returns an error — ask the user for their GitHub username and retry:
+   ```
+   pr_monitor_start_all(sessionFolder, githubUser="their-username")
+   ```
+   Returns a list of initialized PRs with their `monitor_id`s, titles, and URLs. Each PR gets its own viewer window.
+
+3. **Enter the multi-PR loop**: Call `pr_monitor_next_step(monitorId="all", event="ready")` — this blocks until any PR has a terminal state.
+
+4. **Handle terminal states**: The response includes a `monitorId` field identifying which PR needs attention. Handle it using the specific monitorId:
+   ```
+   → if action == "ask_user": call ask_user, then:
+     pr_monitor_next_step(monitorId=<specific_monitor_id>, event="user_chose", choice=<choice>)
+   → if action == "execute": do the work, then:
+     pr_monitor_next_step(monitorId=<specific_monitor_id>, event=<completion_event>, data=<results>)
+   → if action == "merged": display merge notification
+   → if action == "stop": all PRs done
+   ```
+
+5. **Resume multi-PR monitoring**: After handling a terminal state, the specific PR's response will include `monitorId="all"` with a message to resume. Call:
+   ```
+   pr_monitor_next_step(monitorId="all", event="ready")
+   ```
+   This re-enters the combined poll loop watching all remaining PRs.
+
+6. **Stop all**: To stop monitoring all PRs: `pr_monitor_stop(monitorId="all")`
+
+**Important:** In multi-PR mode, merged PRs are automatically removed from monitoring. When all PRs are merged/closed, the poll loop exits with a "stop" action.
 
 ## Standalone Commands
 

@@ -22,6 +22,7 @@ namespace PrCopilot.Tools;
 public class MonitorFlowTools
 {
     private static readonly ConcurrentDictionary<string, MonitorSession> _sessions = new();
+    private static volatile bool _multiMonitorActive;
     private static readonly JsonSerializerOptions _jsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -175,6 +176,94 @@ public class MonitorFlowTools
         }, _jsonOptions);
     }
 
+    [McpServerTool(Name = "pr_monitor_start_all"), Description("Initialize monitoring for all open PRs authored by or assigned to the current user. Fetches user's PRs, sets up sessions, returns monitor IDs. Call pr_monitor_next_step with monitorId='all' next.")]
+    public async Task<string> PrMonitorStartAll(
+        [Description("Session folder path for log/trigger/debug files")] string sessionFolder,
+        [Description("GitHub username. If not provided, auto-detected from gh CLI auth.")] string? githubUser = null,
+        CancellationToken cancellationToken = default)
+    {
+        DebugLogger.Log("PrMonitorStartAll", $"Called: user={githubUser ?? "(auto-detect)"}, sessionFolder={sessionFolder}");
+
+        // Auto-detect user if not provided
+        if (string.IsNullOrEmpty(githubUser))
+        {
+            try
+            {
+                githubUser = await PrStatusFetcher.FetchCurrentUserAsync();
+                DebugLogger.Log("PrMonitorStartAll", $"Auto-detected user: {githubUser}");
+            }
+            catch
+            {
+                return JsonSerializer.Serialize(new
+                {
+                    action = "error",
+                    message = "Could not detect your GitHub username. Please ask the user for their GitHub username and pass it as the githubUser parameter."
+                }, _jsonOptions);
+            }
+        }
+
+        // Fetch all open PRs
+        var prs = await PrStatusFetcher.FetchUserPrsAsync(githubUser);
+        if (prs.Count == 0)
+        {
+            return JsonSerializer.Serialize(new
+            {
+                action = "stop",
+                message = $"No open PRs found for user '{githubUser}'."
+            }, _jsonOptions);
+        }
+
+        DebugLogger.Log("PrMonitorStartAll", $"Found {prs.Count} open PRs for {githubUser}");
+
+        // Initialize each PR by calling PrMonitorStart
+        var results = new List<object>();
+        var monitorIds = new List<string>();
+        var failures = new List<object>();
+        foreach (var pr in prs)
+        {
+            try
+            {
+                await PrMonitorStart(pr.Owner, pr.Repo, pr.Number, sessionFolder, cancellationToken);
+                var monitorId = $"pr-{pr.Number}";
+                monitorIds.Add(monitorId);
+                results.Add(new
+                {
+                    monitor_id = monitorId,
+                    repo = $"{pr.Owner}/{pr.Repo}",
+                    pr_number = pr.Number,
+                    title = pr.Title,
+                    url = pr.Url
+                });
+                DebugLogger.Log("PrMonitorStartAll", $"Initialized {monitorId}: {pr.Title}");
+            }
+            catch (Exception ex)
+            {
+                DebugLogger.Error("PrMonitorStartAll", ex);
+                failures.Add(new { repo = $"{pr.Owner}/{pr.Repo}", pr_number = pr.Number, error = ex.Message });
+            }
+        }
+
+        if (results.Count == 0)
+        {
+            return JsonSerializer.Serialize(new
+            {
+                action = "stop",
+                message = "Failed to initialize monitoring for any PRs.",
+                failures
+            }, _jsonOptions);
+        }
+
+        _multiMonitorActive = true;
+
+        return JsonSerializer.Serialize(new
+        {
+            monitor_ids = monitorIds,
+            prs = results,
+            failures = failures.Count > 0 ? failures : null,
+            message = $"Monitoring initialized for {results.Count} PR(s). Call pr_monitor_next_step with monitorId='all' and event='ready' to begin."
+        }, _jsonOptions);
+    }
+
     [McpServerTool(Name = "pr_monitor_next_step"), Description("The one tool the agent calls in a loop. Reports the result of the last action and gets the next instruction. May block for minutes/hours when in polling mode (zero tokens burned), or return instantly during active flows.")]
     public async Task<string> PrMonitorNextStep(
         [Description("Monitor ID from pr_monitor_start")] string monitorId,
@@ -184,6 +273,81 @@ public class MonitorFlowTools
         IProgress<string>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        // Handle multi-PR monitoring: monitorId="all" enters combined poll loop
+        if (monitorId == "all")
+        {
+            if (@event != "ready")
+            {
+                return JsonSerializer.Serialize(new MonitorAction
+                {
+                    Action = "stop",
+                    Message = "When using monitorId='all', only event='ready' is supported. Use the specific PR monitorId for other events."
+                }, _jsonOptions);
+            }
+
+            if (_sessions.IsEmpty)
+            {
+                _multiMonitorActive = false;
+                return JsonSerializer.Serialize(new MonitorAction
+                {
+                    Action = "stop",
+                    Message = "No active sessions to monitor. Call pr_monitor_start_all first."
+                }, _jsonOptions);
+            }
+
+            DebugLogger.Log("NextStep", $"Entering multi-PR poll loop ({_sessions.Count} sessions)");
+
+            // Start heartbeat for multi-PR mode
+            var heartbeatSession = _sessions.Values.FirstOrDefault();
+            if (heartbeatSession == null)
+            {
+                _multiMonitorActive = false;
+                return JsonSerializer.Serialize(new MonitorAction
+                {
+                    Action = "stop",
+                    Message = "No active sessions to monitor."
+                }, _jsonOptions);
+            }
+            heartbeatSession.StartHeartbeat(progress);
+
+            try
+            {
+                // Write RESUMING line to all session logs
+                foreach (var (_, s) in _sessions)
+                {
+                    var resumingAction = new MonitorAction { Action = "polling", Message = "Resuming monitoring..." };
+                    await WriteLogEntryAsync(s.State, resumingAction);
+                }
+
+                var action = await PollAllUntilTerminalStateAsync(cancellationToken);
+
+                if (action.Action == "ask_user")
+                {
+                    action.Instructions = "MANDATORY: Call the ask_user tool with the EXACT question and choices above. Do NOT rewrite, rephrase, or add your own choices. Do NOT act on behalf of the user. Wait for the user's selection, then call pr_monitor_next_step with the monitorId from this response, event='user_chose' and choice=<mapped choice value>. After handling, call pr_monitor_next_step with monitorId='all' and event='ready' to resume monitoring all PRs.";
+                }
+
+                await WriteLogEntryAsync(
+                    action.MonitorId != null && _sessions.TryGetValue(action.MonitorId, out var actionSession) ? actionSession.State : heartbeatSession.State,
+                    action);
+
+                return JsonSerializer.Serialize(action, _jsonOptions);
+            }
+            catch (Exception ex)
+            {
+                DebugLogger.Error("NextStep", ex);
+                return JsonSerializer.Serialize(new MonitorAction
+                {
+                    Action = "ask_user",
+                    Question = $"Internal error during multi-PR monitoring: {ex.Message}. What would you like to do?",
+                    Choices = ["Resume monitoring", "Stop monitoring"]
+                }, _jsonOptions);
+            }
+            finally
+            {
+                heartbeatSession.StopHeartbeat();
+            }
+        }
+
         if (!_sessions.TryGetValue(monitorId, out var session))
         {
             DebugLogger.Log("NextStep", $"No session for {monitorId}");
@@ -252,6 +416,20 @@ public class MonitorFlowTools
             // If the state machine says "polling", we block here until a terminal state
             if (action.Action == "polling")
             {
+                // In multi-PR mode, don't block on individual session — redirect to "all"
+                if (_multiMonitorActive && monitorId != "all")
+                {
+                    await WriteLogEntryAsync(state, action);
+                    await PersistIgnoreFileAsync(state);
+                    DebugLogger.Log("NextStep", "Multi-monitor active — redirecting to 'all' polling");
+                    return JsonSerializer.Serialize(new MonitorAction
+                    {
+                        Action = "polling",
+                        MonitorId = "all",
+                        Message = "PR handled. Call pr_monitor_next_step with monitorId='all' and event='ready' to resume monitoring all PRs."
+                    }, _jsonOptions);
+                }
+
                 // Cancel any existing poll loop from a previous tool call (e.g., user hit Esc then resumed)
                 session.CancelPolling();
                 using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, session.PollToken);
@@ -308,6 +486,30 @@ public class MonitorFlowTools
     public string PrMonitorStop(
         [Description("Monitor ID from pr_monitor_start")] string monitorId)
     {
+        // Stop all sessions when monitorId="all"
+        if (monitorId == "all")
+        {
+            var count = _sessions.Count;
+            foreach (var kvp in _sessions)
+            {
+                try
+                {
+                    var line = $"STOPPED|{DateTime.Now:hh:mm tt}|Monitoring stopped by user";
+                    File.AppendAllText(kvp.Value.State.LogFile, line + Environment.NewLine);
+                    kvp.Value.CancelPolling();
+                    kvp.Value.Dispose();
+                }
+                catch { }
+            }
+            _sessions.Clear();
+            _multiMonitorActive = false;
+            return JsonSerializer.Serialize(new MonitorAction
+            {
+                Action = "stop",
+                Message = $"Monitoring stopped for all {count} PR(s)."
+            }, _jsonOptions);
+        }
+
         if (_sessions.TryRemove(monitorId, out var session))
         {
             session.CancelPolling();
@@ -467,6 +669,213 @@ public class MonitorFlowTools
 
         // Cancelled
         return new MonitorAction { Action = "stop", Message = "Monitoring cancelled." };
+    }
+
+    /// <summary>
+    /// Fetches fresh PR data, updates session state, and checks for terminal states.
+    /// Returns a MonitorAction if a terminal state (including merged) is detected, null otherwise.
+    /// </summary>
+    private static async Task<MonitorAction?> RefreshAndCheckTerminalAsync(MonitorState state, CancellationToken cancellationToken)
+    {
+        var prInfo = await PrStatusFetcher.FetchPrInfoAsync(state.Owner, state.Repo, state.PrNumber);
+
+        if (prInfo.IsMerged)
+        {
+            DebugLogger.Log("PollRefresh", $"PR #{state.PrNumber} is merged");
+            var mergedLine = $"STOPPED|{DateTime.Now:hh:mm tt}|🟣 PR #{state.PrNumber} merged successfully";
+            try { await File.AppendAllTextAsync(state.LogFile, mergedLine + Environment.NewLine, cancellationToken); }
+            catch { }
+            state.CurrentState = MonitorStateId.Stopped;
+            return new MonitorAction
+            {
+                Action = "merged",
+                Message = $"🟣 PR #{state.PrNumber} has been merged."
+            };
+        }
+
+        state.HeadSha = prInfo.HeadSha;
+        state.HasMergeConflict = !prInfo.Mergeable && prInfo.MergeableState == "dirty";
+
+        var checkResult = await PrStatusFetcher.FetchCheckRunsAsync(state.Owner, state.Repo, state.HeadSha);
+        state.Checks = checkResult.Counts;
+        state.FailedChecks = checkResult.Failures;
+
+        var reviewResult = await PrStatusFetcher.FetchReviewsAsync(state.Owner, state.Repo, state.PrNumber, state.HeadSha);
+        state.Approvals = reviewResult.Approvals;
+        state.StaleApprovals = reviewResult.StaleApprovals;
+
+        var allComments = await PrStatusFetcher.FetchUnresolvedCommentsAsync(state.Owner, state.Repo, state.PrNumber, state.PrAuthor);
+        var nonIgnored = allComments
+            .Where(c => !state.IgnoredCommentIds.Contains(c.Id))
+            .ToList();
+        var needsAction = nonIgnored.Where(c => !c.IsWaitingForReply).ToList();
+        var waitingForReply = nonIgnored.Where(c => c.IsWaitingForReply).ToList();
+        state.UnresolvedComments = needsAction;
+        state.WaitingForReplyComments = waitingForReply;
+
+        DebugLogger.Log("PollRefresh", $"PR #{state.PrNumber}: {state.Checks.Total} checks ({state.Checks.Failed} failed), {state.Approvals.Count} approvals, {needsAction.Count} needs-action, {waitingForReply.Count} waiting");
+
+        var statusLine = BuildStatusLine(state);
+        await File.AppendAllTextAsync(state.LogFile, statusLine + Environment.NewLine, cancellationToken);
+
+        var terminal = MonitorTransitions.DetectTerminalState(state, needsAction, state.HasMergeConflict);
+        if (terminal.HasValue)
+        {
+            DebugLogger.Log("PollRefresh", $"Terminal: {terminal.Value}");
+            return MonitorTransitions.BuildTerminalAction(state, terminal.Value);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Combined poll loop for multi-PR monitoring. Iterates over all active sessions,
+    /// checks each for terminal states, and returns the first one found.
+    /// </summary>
+    private async Task<MonitorAction> PollAllUntilTerminalStateAsync(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            var activeSessions = _sessions
+                .Where(kvp => kvp.Value.State.CurrentState != MonitorStateId.Stopped)
+                .ToList();
+
+            if (activeSessions.Count == 0)
+            {
+                _multiMonitorActive = false;
+                return new MonitorAction { Action = "stop", Message = "All PRs have been merged or closed. Monitoring complete." };
+            }
+
+            var minSleepSeconds = int.MaxValue;
+
+            foreach (var (mid, sess) in activeSessions)
+            {
+                var st = sess.State;
+                st.PollCount++;
+                st.LastPollTime = DateTime.UtcNow;
+                DebugLogger.Log("PollAll", $"Polling {mid} (#{st.PollCount})");
+
+                try
+                {
+                    var action = await RefreshAndCheckTerminalAsync(st, cancellationToken);
+                    if (action != null)
+                    {
+                        action.MonitorId = mid;
+                        // Remove merged/stopped sessions from the dictionary
+                        if (action.Action == "merged" && _sessions.TryRemove(mid, out var removedSession))
+                        {
+                            removedSession.Dispose();
+                        }
+                        return action;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    DebugLogger.Error("PollAll", ex);
+                    var errorLine = $"ERROR|{DateTime.Now:hh:mm tt}|{ex.Message}";
+                    try { await File.AppendAllTextAsync(st.LogFile, errorLine + Environment.NewLine, cancellationToken); }
+                    catch { }
+                }
+
+                // Check for trigger actions from viewer
+                if (sess.PendingTriggerContent != null && sess.PendingTriggerContent.StartsWith("ACTION|"))
+                {
+                    var threadId = sess.PendingTriggerContent["ACTION|".Length..];
+                    sess.PendingTriggerContent = null;
+                    var comment = st.WaitingForReplyComments.FirstOrDefault(c => c.Id == threadId);
+                    if (comment != null)
+                    {
+                        st.ActiveWaitingComment = comment;
+                        var triggerAction = MonitorTransitions.BuildWaitingCommentAction(st, comment);
+                        triggerAction.MonitorId = mid;
+                        return triggerAction;
+                    }
+                }
+
+                var sleepSeconds = CalculateSleepSeconds(st);
+                if (sleepSeconds < minSleepSeconds)
+                    minSleepSeconds = sleepSeconds;
+            }
+
+            if (minSleepSeconds == int.MaxValue)
+                minSleepSeconds = 60;
+
+            // Write after-hours pause for all sessions if applicable
+            if (IsAfterHours())
+            {
+                foreach (var (_, sess) in activeSessions)
+                {
+                    var st = sess.State;
+                    if (!(st.AfterHoursExtendedUntil.HasValue && st.AfterHoursExtendedUntil.Value > DateTime.Now))
+                    {
+                        var next9am = DateTime.Now.AddSeconds(minSleepSeconds);
+                        var pauseLine = $"PAUSED|{DateTime.Now:hh:mm tt}|After hours — sleeping until {next9am:ddd MMM d, h:mm tt}";
+                        try { await File.AppendAllTextAsync(st.LogFile, pauseLine + Environment.NewLine, cancellationToken); }
+                        catch { }
+                    }
+                }
+            }
+
+            // Clear non-actionable triggers before sleeping
+            foreach (var (_, sess) in activeSessions)
+            {
+                if (sess.PendingTriggerContent != null &&
+                    !sess.PendingTriggerContent.StartsWith("ACTION|") &&
+                    !sess.PendingTriggerContent.StartsWith("EXTEND|"))
+                {
+                    sess.PendingTriggerContent = null;
+                }
+            }
+
+            DebugLogger.Log("PollAll", $"Sleeping {minSleepSeconds}s ({activeSessions.Count} sessions)...");
+
+            // Sleep with interrupts from any session's trigger
+            try
+            {
+                using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(minSleepSeconds));
+                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
+
+                var tasks = new List<Task> { Task.Delay(TimeSpan.FromSeconds(minSleepSeconds), linkedCts.Token) };
+                tasks.AddRange(activeSessions.Select(kvp => kvp.Value.WaitForTriggerAsync(linkedCts.Token)));
+
+                await Task.WhenAny(tasks);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                // Normal timeout
+            }
+            finally
+            {
+                foreach (var (_, sess) in activeSessions)
+                    sess.ResetTriggerWait();
+            }
+
+            // Handle EXTEND triggers for any session
+            foreach (var (_, sess) in activeSessions)
+            {
+                var st = sess.State;
+                if (sess.PendingTriggerContent != null && sess.PendingTriggerContent.StartsWith("EXTEND|"))
+                {
+                    var baseTime = (st.AfterHoursExtendedUntil.HasValue && st.AfterHoursExtendedUntil.Value > DateTime.Now)
+                        ? st.AfterHoursExtendedUntil.Value : DateTime.Now;
+                    st.AfterHoursExtendedUntil = baseTime.AddHours(2);
+                    sess.PendingTriggerContent = null;
+                    var extendLine = $"RESUMING|{DateTime.Now:hh:mm tt}|Monitoring until {st.AfterHoursExtendedUntil.Value:hh:mm tt}";
+                    try { await File.AppendAllTextAsync(st.LogFile, extendLine + Environment.NewLine, cancellationToken); }
+                    catch { }
+                }
+
+                // Clear non-actionable triggers after sleep
+                if (sess.PendingTriggerContent != null &&
+                    !sess.PendingTriggerContent.StartsWith("ACTION|") &&
+                    !sess.PendingTriggerContent.StartsWith("EXTEND|"))
+                {
+                    sess.PendingTriggerContent = null;
+                }
+            }
+        }
+
+        return new MonitorAction { Action = "stop", Message = "Multi-PR monitoring cancelled." };
     }
 
     /// <summary>

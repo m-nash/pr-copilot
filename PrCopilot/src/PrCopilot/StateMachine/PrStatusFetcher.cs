@@ -348,6 +348,32 @@ public static class PrStatusFetcher
     }
 
     /// <summary>
+    /// Fetches all open PRs authored by or assigned to the given user.
+    /// </summary>
+    public static async Task<List<UserPrInfo>> FetchUserPrsAsync(string user)
+    {
+        var prs = new Dictionary<string, UserPrInfo>();
+
+        // Fetch PRs authored by user
+        try
+        {
+            var json = await RunGhAsync($"search prs --author={user} --state=open --json number,title,url,repository --limit 50");
+            ParseSearchResults(json, prs);
+        }
+        catch { /* user may have no authored PRs */ }
+
+        // Fetch PRs assigned to user
+        try
+        {
+            var json = await RunGhAsync($"search prs --assignee={user} --state=open --json number,title,url,repository --limit 50");
+            ParseSearchResults(json, prs);
+        }
+        catch { /* user may have no assigned PRs */ }
+
+        return prs.Values.ToList();
+    }
+
+    /// <summary>
     /// Returns true if the given username is a CI/infrastructure bot that should be filtered.
     /// copilot-pull-request-reviewer[bot] is NOT a CI bot — treat it as human.
     /// </summary>
@@ -380,6 +406,30 @@ public static class PrStatusFetcher
         else if (conclusion == "cancelled")
         {
             counts.Cancelled++;
+        }
+    }
+
+    private static void ParseSearchResults(string json, Dictionary<string, UserPrInfo> prs)
+    {
+        using var doc = JsonDocument.Parse(json);
+        foreach (var item in doc.RootElement.EnumerateArray())
+        {
+            var url = item.GetProperty("url").GetString() ?? "";
+            if (prs.ContainsKey(url)) continue;
+
+            var repo = item.GetProperty("repository");
+            var nameWithOwner = repo.GetProperty("nameWithOwner").GetString() ?? "";
+            var parts = nameWithOwner.Split('/');
+            if (parts.Length != 2) continue;
+
+            prs[url] = new UserPrInfo
+            {
+                Owner = parts[0],
+                Repo = parts[1],
+                Number = item.GetProperty("number").GetInt32(),
+                Title = item.GetProperty("title").GetString() ?? "",
+                Url = url
+            };
         }
     }
 
@@ -433,4 +483,16 @@ public class ReviewResult
 {
     public List<ReviewInfo> Approvals { get; set; } = [];
     public List<ReviewInfo> StaleApprovals { get; set; } = [];
+}
+
+/// <summary>
+/// Info about a PR found via search (for "monitor all my PRs" feature).
+/// </summary>
+public class UserPrInfo
+{
+    public string Owner { get; set; } = "";
+    public string Repo { get; set; } = "";
+    public int Number { get; set; }
+    public string Title { get; set; } = "";
+    public string Url { get; set; } = "";
 }
