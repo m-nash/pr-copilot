@@ -43,14 +43,10 @@ if (args.Contains("--update"))
         // Run --setup with the new binary to re-register
         Console.WriteLine("⚙️  Running setup...");
         var newExe = Path.Combine(AppContext.BaseDirectory, exeName);
-        var setupArgs = "--setup";
-        // Preserve --auto-update in the registration if the user had it
-        if (args.Contains("--auto-update"))
-            setupArgs += " --auto-update";
         var setupProcess = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
         {
             FileName = newExe,
-            Arguments = setupArgs,
+            Arguments = "--setup",
             UseShellExecute = false
         });
         setupProcess?.WaitForExit();
@@ -104,13 +100,17 @@ if (args.Contains("--setup"))
     servers["pr-copilot"] = new JsonObject
     {
         ["command"] = exePath,
-        ["args"] = args.Contains("--auto-update") ? new JsonArray("--auto-update") : new JsonArray(),
+        ["args"] = new JsonArray(),
         ["timeout"] = 3600000
     };
 
     File.WriteAllText(configPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
     Console.WriteLine($"✅ mcp-config.json → {configPath}");
     Console.WriteLine($"   command: {exePath}");
+
+    // 3. Create pr-copilot-config.json with defaults if it doesn't exist
+    ConfigService.EnsureConfigExists();
+    Console.WriteLine($"✅ pr-copilot-config.json → {ConfigService.GetConfigPath()}");
     Console.WriteLine();
     Console.WriteLine("💡 Optional: Install Playwright MCP for full CI rerun automation:");
     Console.WriteLine("   copilot -i \"mcp add playwright -- npx -y @playwright/mcp@latest --browser msedge\"");
@@ -163,7 +163,7 @@ DebugLogger.SetFallbackPath(Path.Combine(copilotDir, "pr-copilot-server.log"));
 DebugLogger.Log("Startup", "MCP server starting");
 
 // --auto-update: check for updates in the background (non-blocking)
-if (args.Contains("--auto-update"))
+if (args.Contains("--auto-update") || ConfigService.AutoUpdate)
 {
     _ = Task.Run(async () =>
     {

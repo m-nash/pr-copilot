@@ -1,26 +1,22 @@
 # Configuration
 
-pr-copilot supports optional configuration through the `args` array in `~/.copilot/mcp-config.json`. The `--setup` command writes this file automatically, but you can also edit it by hand.
+pr-copilot uses a JSON config file at `~/.copilot/pr-copilot-config.json` for settings. The `--setup` command creates this file automatically with sensible defaults.
 
 ## Config File
 
 ```json
 {
-  "mcpServers": {
-    "pr-copilot": {
-      "command": "~/.copilot/mcp-servers/pr-copilot/PrCopilot.exe",
-      "args": ["--auto-update"],
-      "timeout": 3600000
-    }
-  }
+  "autoUpdate": true
 }
 ```
 
-The `args` array is where configuration lives. Arguments listed here are passed to the MCP server every time it starts.
+**Location:** `~/.copilot/pr-copilot-config.json`
+
+The file is created automatically by `--setup` if it doesn't exist. Edit it by hand to change settings.
 
 ## Available Options
 
-### `--auto-update`
+### `autoUpdate` (default: `true`)
 
 Checks for a newer release on GitHub in the background each time the MCP server starts. If a newer version is found:
 
@@ -28,19 +24,21 @@ Checks for a newer release on GitHub in the background each time the MCP server 
 2. The TUI viewer (if running) shows an upgrade banner: `⬆ X.Y.Z available — restart to update`
 3. The new version takes effect on next MCP server restart
 
-**Enable during install:**
-```powershell
-./install.ps1 -AutoUpdate
+Auto-update is **enabled by default** — no extra flags needed during install.
+
+**Disable auto-update:**
+
+Edit `~/.copilot/pr-copilot-config.json`:
+```json
+{
+  "autoUpdate": false
+}
 ```
 
-**Enable on an existing install:**
-```powershell
-~/.copilot/mcp-servers/pr-copilot/PrCopilot.exe --setup --auto-update
-```
+**Re-enable auto-update:**
 
-**Enable by hand** — add `"--auto-update"` to the `args` array in `~/.copilot/mcp-config.json`.
+Set `autoUpdate` back to `true`, or delete the config file (it will be recreated with defaults on next `--setup`).
 
-**Disable** — remove `"--auto-update"` from the `args` array, or re-run `--setup` without it:
-```powershell
-~/.copilot/mcp-servers/pr-copilot/PrCopilot.exe --setup
-```
+## Legacy
+
+The `--auto-update` CLI flag is still supported for backward compatibility but is no longer needed. The config file takes precedence for new installs.
