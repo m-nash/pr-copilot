@@ -4,6 +4,7 @@ using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -39,8 +40,17 @@ public static class MonitorViewer
 
     public static void Run(int prNumber, string logFile, string triggerFile, string? debugFile = null)
     {
-        Console.OutputEncoding = Encoding.UTF8;
-        Application.Init(driverName: "NetDriver");
+        try
+        {
+            Console.OutputEncoding = Encoding.UTF8;
+            Console.InputEncoding = Encoding.UTF8;
+        }
+        catch
+        {
+            // Non-fatal in terminals that don't support changing encoding.
+        }
+
+        InitTerminalGui();
 
         var darkScheme = new ColorScheme
         {
@@ -70,7 +80,7 @@ public static class MonitorViewer
             Normal = new Attribute(Color.DarkGray, Color.Black),
         };
 
-        Console.Title = $"PR Monitor for #{prNumber}";
+        TrySetConsoleTitle($"PR Monitor for #{prNumber}");
 
         var window = new Window
         {
@@ -655,6 +665,54 @@ public static class MonitorViewer
 
         Application.Run(window);
         Application.Shutdown();
+    }
+
+    private static void InitTerminalGui()
+    {
+        var preferredDriver = Environment.GetEnvironmentVariable("PR_COPILOT_TUI_DRIVER");
+        if (!string.IsNullOrWhiteSpace(preferredDriver) && TryInitDriver(preferredDriver))
+            return;
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            if (TryInitDriver("NetDriver"))
+                return;
+        }
+        else
+        {
+            if (TryInitDriver("CursesDriver"))
+                return;
+
+            if (TryInitDriver("NetDriver"))
+                return;
+        }
+
+        Application.Init();
+    }
+
+    private static bool TryInitDriver(string driverName)
+    {
+        try
+        {
+            Application.Init(driverName: driverName);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void TrySetConsoleTitle(string title)
+    {
+        try
+        {
+            Console.Title = title;
+        }
+        catch
+        {
+            // Some terminals and shells may not support setting title.
+        }
     }
 
     /// <summary>
