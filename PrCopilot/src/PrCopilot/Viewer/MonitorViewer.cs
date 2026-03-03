@@ -739,21 +739,23 @@ public static class MonitorViewer
                             {
                                 var passed = checks.GetProperty("passed").GetInt32();
                                 var failed = checks.GetProperty("failed").GetInt32();
-                                var pending = checks.GetProperty("pending").GetInt32();
+                                var inProgress = checks.TryGetProperty("inProgress", out var ip) ? ip.GetInt32() : 0;
+                                var pending = checks.TryGetProperty("pending", out var pnd) ? pnd.GetInt32() : 0;
                                 var total = checks.GetProperty("total").GetInt32();
 
                                 var parts = new List<string>();
                                 if (passed > 0) parts.Add($"✅ {passed} passed");
-                                if (pending > 0) parts.Add($"⏳ {pending} in progress");
+                                if (inProgress > 0) parts.Add($"⏳ {inProgress} in progress");
+                                if (pending > 0) parts.Add($"⏸️ {pending} pending");
                                 if (failed > 0) parts.Add($"❌ {failed} failed");
-                                var queued = total - passed - failed - pending;
+                                var queued = total - passed - failed - inProgress - pending;
                                 if (queued > 0) parts.Add($"⏸️ {queued} queued");
 
                                 ciFrame.Title = $"CI ({passed}/{total})";
                                 ciSummaryLabel.Text = string.Join("  ", parts);
                                 var ciScheme = failed > 0
                                     ? new ColorScheme { Normal = new Attribute(Color.BrightRed, Color.Black) }
-                                    : pending > 0
+                                    : inProgress > 0
                                         ? new ColorScheme { Normal = new Attribute(Color.White, Color.Black) }
                                         : greenScheme;
                                 ciFrame.ColorScheme = ciScheme;

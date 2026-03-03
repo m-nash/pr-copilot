@@ -30,15 +30,16 @@ public static class MonitorTransitions
             return TerminalStateType.MergeConflict;
 
         // 3. CI failure (checked BEFORE approved — failures can never be masked)
-        if (state.Checks.Failed > 0)
+        //    But suppress if we're already waiting to rerun after remaining checks finish
+        if (state.Checks.Failed > 0 && !state.PendingRerunWhenChecksComplete)
             return TerminalStateType.CiFailure;
 
         // 4. CI cancelled
         if (state.Checks.Cancelled > 0)
             return TerminalStateType.CiCancelled;
 
-        // All checks must be complete for the remaining states
-        bool allComplete = state.Checks.Pending == 0 && state.Checks.Queued == 0;
+        // All checks must be complete for the remaining states (ignore legacy pending like checkenforcer)
+        bool allComplete = state.Checks.InProgress == 0 && state.Checks.Queued == 0;
         if (!allComplete)
             return null;
 
@@ -77,6 +78,17 @@ public static class MonitorTransitions
             TerminalStateType.CiPassedCommentsIgnored => BuildCiPassedIgnoredAction(state, timestamp),
             _ => new MonitorAction { Action = "stop", Message = "Unknown terminal state" }
         };
+    }
+
+    /// <summary>
+    /// Called by the poll loop when PendingRerunWhenChecksComplete is set
+    /// and all remaining checks have finished. Triggers the deferred rerun.
+    /// </summary>
+    public static MonitorAction CompletePendingRerun(MonitorState state)
+    {
+        DebugLogger.Log("StateMachine", "All checks complete — executing deferred rerun");
+        state.PendingRerunWhenChecksComplete = false;
+        return BuildRerunAction(state);
     }
 
     /// <summary>
@@ -679,8 +691,22 @@ public static class MonitorTransitions
 
     private static MonitorAction BuildRerunAction(MonitorState state)
     {
+        // If other checks are still running, defer the rerun until they complete
+        // (Ignore legacy pending statuses like checkenforcer — they stay pending until merge)
+        if (state.Checks.InProgress > 0 || state.Checks.Queued > 0)
+        {
+            DebugLogger.Log("StateMachine", $"Deferring rerun — {state.Checks.InProgress} in-progress, {state.Checks.Queued} queued checks remaining");
+            state.PendingRerunWhenChecksComplete = true;
+            state.CurrentState = MonitorStateId.Polling;
+            state.CommentFlow = CommentFlowState.None;
+            state.CiFailureFlow = CiFailureFlowState.None;
+            state.ActiveWaitingComment = null;
+            return new MonitorAction { Action = "polling", Message = "Waiting for remaining checks to complete before rerunning failed jobs..." };
+        }
+
         // Use Playwright (via the agent) to navigate to ADO and click "Rerun failed jobs".
         // Azure DevOps has no API for rerun-failed-only; only the web UI supports it.
+        state.PendingRerunWhenChecksComplete = false;
         var buildUrl = state.FailedChecks.FirstOrDefault()?.Url;
         state.CurrentState = MonitorStateId.ExecutingTask;
         state.CommentFlow = CommentFlowState.None;

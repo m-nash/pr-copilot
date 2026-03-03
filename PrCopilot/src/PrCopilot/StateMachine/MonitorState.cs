@@ -75,6 +75,9 @@ public class MonitorState
 
     // Set when explain task completes — show post-explain choices instead of original prompt
     public bool PendingExplainResult { get; set; }
+
+    // Set when user chooses rerun but other checks are still pending/queued — defer until complete
+    public bool PendingRerunWhenChecksComplete { get; set; }
 }
 
 /// <summary>
@@ -84,6 +87,9 @@ public class CheckRunCounts
 {
     public int Passed { get; set; }
     public int Failed { get; set; }
+    /// <summary>Check runs with status "in_progress" (actively running CI jobs).</summary>
+    public int InProgress { get; set; }
+    /// <summary>Legacy commit statuses with state "pending" (e.g. policy checks like checkenforcer).</summary>
     public int Pending { get; set; }
     public int Queued { get; set; }
     public int Cancelled { get; set; }
