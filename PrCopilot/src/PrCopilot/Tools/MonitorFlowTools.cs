@@ -748,9 +748,9 @@ public class MonitorFlowTools
 
             var minSleepSeconds = int.MaxValue;
 
-            foreach (var (mid, sess) in activeSessions)
+            foreach (var (mid, session) in activeSessions)
             {
-                var st = sess.State;
+                var st = session.State;
                 st.PollCount++;
                 st.LastPollTime = DateTime.UtcNow;
                 DebugLogger.Log("PollAll", $"Polling {mid} (#{st.PollCount})");
@@ -778,10 +778,10 @@ public class MonitorFlowTools
                 }
 
                 // Check for trigger actions from viewer
-                if (sess.PendingTriggerContent != null && sess.PendingTriggerContent.StartsWith("ACTION|"))
+                if (session.PendingTriggerContent != null && session.PendingTriggerContent.StartsWith("ACTION|"))
                 {
-                    var threadId = sess.PendingTriggerContent["ACTION|".Length..];
-                    sess.PendingTriggerContent = null;
+                    var threadId = session.PendingTriggerContent["ACTION|".Length..];
+                    session.PendingTriggerContent = null;
                     var comment = st.WaitingForReplyComments.FirstOrDefault(c => c.Id == threadId);
                     if (comment != null)
                     {
@@ -803,9 +803,9 @@ public class MonitorFlowTools
             // Write after-hours pause for all sessions if applicable
             if (IsAfterHours())
             {
-                foreach (var (_, sess) in activeSessions)
+                foreach (var (_, session) in activeSessions)
                 {
-                    var st = sess.State;
+                    var st = session.State;
                     if (!(st.AfterHoursExtendedUntil.HasValue && st.AfterHoursExtendedUntil.Value > DateTime.Now))
                     {
                         var next9am = DateTime.Now.AddSeconds(minSleepSeconds);
@@ -817,13 +817,13 @@ public class MonitorFlowTools
             }
 
             // Clear non-actionable triggers before sleeping
-            foreach (var (_, sess) in activeSessions)
+            foreach (var (_, session) in activeSessions)
             {
-                if (sess.PendingTriggerContent != null &&
-                    !sess.PendingTriggerContent.StartsWith("ACTION|") &&
-                    !sess.PendingTriggerContent.StartsWith("EXTEND|"))
+                if (session.PendingTriggerContent != null &&
+                    !session.PendingTriggerContent.StartsWith("ACTION|") &&
+                    !session.PendingTriggerContent.StartsWith("EXTEND|"))
                 {
-                    sess.PendingTriggerContent = null;
+                    session.PendingTriggerContent = null;
                 }
             }
 
@@ -846,31 +846,31 @@ public class MonitorFlowTools
             }
             finally
             {
-                foreach (var (_, sess) in activeSessions)
-                    sess.ResetTriggerWait();
+                foreach (var (_, session) in activeSessions)
+                    session.ResetTriggerWait();
             }
 
             // Handle EXTEND triggers for any session
-            foreach (var (_, sess) in activeSessions)
+            foreach (var (_, session) in activeSessions)
             {
-                var st = sess.State;
-                if (sess.PendingTriggerContent != null && sess.PendingTriggerContent.StartsWith("EXTEND|"))
+                var st = session.State;
+                if (session.PendingTriggerContent != null && session.PendingTriggerContent.StartsWith("EXTEND|"))
                 {
                     var baseTime = (st.AfterHoursExtendedUntil.HasValue && st.AfterHoursExtendedUntil.Value > DateTime.Now)
                         ? st.AfterHoursExtendedUntil.Value : DateTime.Now;
                     st.AfterHoursExtendedUntil = baseTime.AddHours(2);
-                    sess.PendingTriggerContent = null;
+                    session.PendingTriggerContent = null;
                     var extendLine = $"RESUMING|{DateTime.Now:hh:mm tt}|Monitoring until {st.AfterHoursExtendedUntil.Value:hh:mm tt}";
                     try { await File.AppendAllTextAsync(st.LogFile, extendLine + Environment.NewLine, cancellationToken); }
                     catch { }
                 }
 
                 // Clear non-actionable triggers after sleep
-                if (sess.PendingTriggerContent != null &&
-                    !sess.PendingTriggerContent.StartsWith("ACTION|") &&
-                    !sess.PendingTriggerContent.StartsWith("EXTEND|"))
+                if (session.PendingTriggerContent != null &&
+                    !session.PendingTriggerContent.StartsWith("ACTION|") &&
+                    !session.PendingTriggerContent.StartsWith("EXTEND|"))
                 {
-                    sess.PendingTriggerContent = null;
+                    session.PendingTriggerContent = null;
                 }
             }
         }
