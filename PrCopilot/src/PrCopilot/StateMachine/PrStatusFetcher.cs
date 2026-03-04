@@ -386,6 +386,16 @@ public static class PrStatusFetcher
         return CiBots.Contains(username);
     }
 
+    /// <summary>
+    /// Returns true if the given username is a bot reviewer (e.g. copilot-pull-request-reviewer[bot]).
+    /// Bot reviewers won't respond to replies, so "waiting for reply" threads from bots
+    /// should be auto-resolved instead of waiting indefinitely.
+    /// </summary>
+    public static bool IsBotReviewer(string username)
+    {
+        return !string.IsNullOrEmpty(username) && username.EndsWith("[bot]", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static void ClassifyCheckRun(string status, string conclusion, CheckRunCounts counts)
     {
         if (status == "queued")
