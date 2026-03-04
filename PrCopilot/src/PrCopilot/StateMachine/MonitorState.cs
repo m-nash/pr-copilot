@@ -89,7 +89,7 @@ public class CheckRunCounts
     public int Failed { get; set; }
     /// <summary>Check runs with status "in_progress" (actively running CI jobs).</summary>
     public int InProgress { get; set; }
-    /// <summary>Legacy commit statuses with state "pending" (e.g. policy checks like checkenforcer).</summary>
+    /// <summary>Legacy commit statuses with state "pending" (e.g. policy enforcement checks).</summary>
     public int Pending { get; set; }
     public int Queued { get; set; }
     public int Cancelled { get; set; }

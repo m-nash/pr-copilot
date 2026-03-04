@@ -139,7 +139,7 @@ public class StateMachineTests
 
         var result = MonitorTransitions.DetectTerminalState(state, [], false);
 
-        // Legacy pending (e.g. checkenforcer) should NOT block terminal state detection
+        // Legacy pending (e.g. policy checks) should NOT block terminal state detection
         Assert.Equal(TerminalStateType.ApprovedCiGreen, result);
     }
 
@@ -809,7 +809,7 @@ public class StateMachineTests
     [Fact]
     public void BuildRerunAction_LegacyPendingOnly_ExecutesImmediately()
     {
-        // Legacy pending (like checkenforcer) should NOT defer the rerun
+        // Legacy pending (like policy checks) should NOT defer the rerun
         var state = CreateState();
         state.CurrentState = MonitorStateId.AwaitingUser;
         state.CiFailureFlow = CiFailureFlowState.CiFailurePrompt;

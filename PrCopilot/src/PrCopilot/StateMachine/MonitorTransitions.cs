@@ -38,7 +38,7 @@ public static class MonitorTransitions
         if (state.Checks.Cancelled > 0)
             return TerminalStateType.CiCancelled;
 
-        // All checks must be complete for the remaining states (ignore legacy pending like checkenforcer)
+        // All checks must be complete for the remaining states (ignore legacy pending policy statuses)
         bool allComplete = state.Checks.InProgress == 0 && state.Checks.Queued == 0;
         if (!allComplete)
             return null;
@@ -692,7 +692,7 @@ public static class MonitorTransitions
     private static MonitorAction BuildRerunAction(MonitorState state)
     {
         // If other checks are still running, defer the rerun until they complete
-        // (Ignore legacy pending statuses like checkenforcer — they stay pending until merge)
+        // (Ignore legacy pending statuses — they stay pending until merge)
         if (state.Checks.InProgress > 0 || state.Checks.Queued > 0)
         {
             DebugLogger.Log("StateMachine", $"Deferring rerun — {state.Checks.InProgress} in-progress, {state.Checks.Queued} queued checks remaining");
