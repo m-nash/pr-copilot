@@ -343,6 +343,9 @@ public static class PrStatusFetcher
 
         return comments;
     }
+
+    /// <summary>
+    /// Resolves a review thread via GraphQL mutation.
     /// Returns true if successfully resolved, false otherwise.
     /// Retries once on failure.
     /// </summary>
