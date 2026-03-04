@@ -193,8 +193,9 @@ public class MonitorFlowTools
                 githubUser = await PrStatusFetcher.FetchCurrentUserAsync();
                 DebugLogger.Log("PrMonitorStartAll", $"Auto-detected user: {githubUser}");
             }
-            catch
+            catch (Exception ex)
             {
+                DebugLogger.Error("PrMonitorStartAll", ex);
                 return JsonSerializer.Serialize(new
                 {
                     action = "error",
@@ -793,6 +794,7 @@ public class MonitorFlowTools
                         if (action.Action == "merged" && _sessions.TryRemove(mid, out var removedSession))
                         {
                             removedSession.Dispose();
+                            lock (_multiMonitorLock) { _multiMonitorIds.Remove(mid); }
                         }
                         return action;
                     }
