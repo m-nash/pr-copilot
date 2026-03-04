@@ -944,4 +944,51 @@ public class StateMachineTests
     }
 
     #endregion
+
+    #region IsBotReviewer
+
+    [Fact]
+    public void IsBotReviewer_CopilotReviewer_ReturnsTrue()
+    {
+        Assert.True(PrStatusFetcher.IsBotReviewer("copilot-pull-request-reviewer[bot]"));
+    }
+
+    [Fact]
+    public void IsBotReviewer_GenericBot_ReturnsTrue()
+    {
+        Assert.True(PrStatusFetcher.IsBotReviewer("some-other-tool[bot]"));
+    }
+
+    [Fact]
+    public void IsBotReviewer_HumanReviewer_ReturnsFalse()
+    {
+        Assert.False(PrStatusFetcher.IsBotReviewer("reviewer1"));
+    }
+
+    [Fact]
+    public void IsBotReviewer_EmptyString_ReturnsFalse()
+    {
+        Assert.False(PrStatusFetcher.IsBotReviewer(""));
+    }
+
+    [Fact]
+    public void IsBotReviewer_Null_ReturnsFalse()
+    {
+        Assert.False(PrStatusFetcher.IsBotReviewer(null!));
+    }
+
+    [Fact]
+    public void IsBotReviewer_CaseInsensitive()
+    {
+        Assert.True(PrStatusFetcher.IsBotReviewer("MyBot[BOT]"));
+    }
+
+    [Fact]
+    public void IsCiBot_CopilotReviewer_ReturnsFalse()
+    {
+        // copilot-pull-request-reviewer[bot] should NOT be filtered as a CI bot
+        Assert.False(PrStatusFetcher.IsCiBot("copilot-pull-request-reviewer[bot]"));
+    }
+
+    #endregion
 }

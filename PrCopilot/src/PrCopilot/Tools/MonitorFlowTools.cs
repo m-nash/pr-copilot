@@ -89,7 +89,7 @@ public class MonitorFlowTools
         var prInfo = await PrStatusFetcher.FetchPrInfoAsync(owner, repo, prNumber);
         var checkResult = await PrStatusFetcher.FetchCheckRunsAsync(owner, repo, prInfo.HeadSha);
         var reviewResult = await PrStatusFetcher.FetchReviewsAsync(owner, repo, prNumber, prInfo.HeadSha);
-        var allComments = await PrStatusFetcher.FetchUnresolvedCommentsAsync(owner, repo, prNumber, prInfo.Author);
+        var allComments = await PrStatusFetcher.FetchAndCleanUnresolvedCommentsAsync(owner, repo, prNumber, prInfo.Author);
 
         // Get the current authenticated GitHub user
         var currentUser = "";
@@ -103,6 +103,7 @@ public class MonitorFlowTools
         }
 
         DebugLogger.Log("PrMonitorStart", $"Fetched: {checkResult.Counts.Total} checks ({checkResult.Counts.Failed} failed), {reviewResult.Approvals.Count} approvals, {allComments.Count} comments");
+
         // Build state
         var state = new MonitorState
         {
@@ -610,7 +611,7 @@ public class MonitorFlowTools
                 state.Approvals = reviewResult.Approvals;
                 state.StaleApprovals = reviewResult.StaleApprovals;
 
-                var allComments = await PrStatusFetcher.FetchUnresolvedCommentsAsync(state.Owner, state.Repo, state.PrNumber, state.PrAuthor);
+                var allComments = await PrStatusFetcher.FetchAndCleanUnresolvedCommentsAsync(state.Owner, state.Repo, state.PrNumber, state.PrAuthor);
 
                 // Filter out ignored comments, then split by waiting-for-reply status
                 var nonIgnored = allComments
@@ -758,7 +759,8 @@ public class MonitorFlowTools
         state.Approvals = reviewResult.Approvals;
         state.StaleApprovals = reviewResult.StaleApprovals;
 
-        var allComments = await PrStatusFetcher.FetchUnresolvedCommentsAsync(state.Owner, state.Repo, state.PrNumber, state.PrAuthor);
+        var allComments = await PrStatusFetcher.FetchAndCleanUnresolvedCommentsAsync(state.Owner, state.Repo, state.PrNumber, state.PrAuthor);
+
         var nonIgnored = allComments
             .Where(c => !state.IgnoredCommentIds.Contains(c.Id))
             .ToList();

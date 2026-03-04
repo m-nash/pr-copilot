@@ -314,6 +314,37 @@ public static class PrStatusFetcher
     }
 
     /// <summary>
+    /// Fetches unresolved comments and auto-resolves any bot reviewer threads where the PR author
+    /// has already replied. Bots (e.g. copilot-pull-request-reviewer[bot]) won't respond to replies,
+    /// so "waiting for reply" threads from bots are resolved proactively to prevent infinite loops.
+    /// </summary>
+    public static async Task<List<CommentInfo>> FetchAndCleanUnresolvedCommentsAsync(string owner, string repo, int prNumber, string prAuthor = "")
+    {
+        var comments = await FetchUnresolvedCommentsAsync(owner, repo, prNumber, prAuthor);
+
+        var botWaiting = comments
+            .Where(c => c.IsWaitingForReply && IsBotReviewer(c.Author))
+            .ToList();
+
+        foreach (var comment in botWaiting)
+        {
+            DebugLogger.Log("BotAutoResolve", $"Auto-resolving bot thread {comment.Id} (author: {comment.Author})");
+            var resolved = await ResolveThreadAsync(comment.Id);
+            if (resolved)
+            {
+                comments.Remove(comment);
+                DebugLogger.Log("BotAutoResolve", $"Resolved bot thread {comment.Id}");
+            }
+            else
+            {
+                DebugLogger.Log("BotAutoResolve", $"Failed to resolve bot thread {comment.Id} — will retry next poll");
+            }
+        }
+
+        return comments;
+    }
+
+    /// <summary>
     /// Resolves a review thread via GraphQL mutation.
     /// Returns true if successfully resolved, false otherwise.
     /// Retries once on failure.
@@ -384,6 +415,16 @@ public static class PrStatusFetcher
             return false;
 
         return CiBots.Contains(username);
+    }
+
+    /// <summary>
+    /// Returns true if the given username is a bot reviewer (e.g. copilot-pull-request-reviewer[bot]).
+    /// Bot reviewers won't respond to replies, so "waiting for reply" threads from bots
+    /// should be auto-resolved instead of waiting indefinitely.
+    /// </summary>
+    public static bool IsBotReviewer(string username)
+    {
+        return !string.IsNullOrEmpty(username) && username.EndsWith("[bot]", StringComparison.OrdinalIgnoreCase);
     }
 
     private static void ClassifyCheckRun(string status, string conclusion, CheckRunCounts counts)
