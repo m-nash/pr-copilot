@@ -89,7 +89,7 @@ public class MonitorFlowTools
         var prInfo = await PrStatusFetcher.FetchPrInfoAsync(owner, repo, prNumber);
         var checkResult = await PrStatusFetcher.FetchCheckRunsAsync(owner, repo, prInfo.HeadSha);
         var reviewResult = await PrStatusFetcher.FetchReviewsAsync(owner, repo, prNumber, prInfo.HeadSha);
-        var allComments = await PrStatusFetcher.FetchUnresolvedCommentsAsync(owner, repo, prNumber, prInfo.Author);
+        var allComments = await PrStatusFetcher.FetchAndCleanUnresolvedCommentsAsync(owner, repo, prNumber, prInfo.Author);
 
         // Get the current authenticated GitHub user
         var currentUser = "";
@@ -103,9 +103,6 @@ public class MonitorFlowTools
         }
 
         DebugLogger.Log("PrMonitorStart", $"Fetched: {checkResult.Counts.Total} checks ({checkResult.Counts.Failed} failed), {reviewResult.Approvals.Count} approvals, {allComments.Count} comments");
-
-        // Auto-resolve bot reviewer threads where PR author already replied (bots won't respond)
-        await AutoResolveBotWaitingThreadsAsync(allComments);
 
         // Build state
         var state = new MonitorState
@@ -614,10 +611,7 @@ public class MonitorFlowTools
                 state.Approvals = reviewResult.Approvals;
                 state.StaleApprovals = reviewResult.StaleApprovals;
 
-                var allComments = await PrStatusFetcher.FetchUnresolvedCommentsAsync(state.Owner, state.Repo, state.PrNumber, state.PrAuthor);
-
-                // Auto-resolve bot reviewer threads where PR author already replied (bots won't respond)
-                await AutoResolveBotWaitingThreadsAsync(allComments);
+                var allComments = await PrStatusFetcher.FetchAndCleanUnresolvedCommentsAsync(state.Owner, state.Repo, state.PrNumber, state.PrAuthor);
 
                 // Filter out ignored comments, then split by waiting-for-reply status
                 var nonIgnored = allComments
@@ -765,10 +759,7 @@ public class MonitorFlowTools
         state.Approvals = reviewResult.Approvals;
         state.StaleApprovals = reviewResult.StaleApprovals;
 
-        var allComments = await PrStatusFetcher.FetchUnresolvedCommentsAsync(state.Owner, state.Repo, state.PrNumber, state.PrAuthor);
-
-        // Auto-resolve bot reviewer threads where PR author already replied (bots won't respond)
-        await AutoResolveBotWaitingThreadsAsync(allComments);
+        var allComments = await PrStatusFetcher.FetchAndCleanUnresolvedCommentsAsync(state.Owner, state.Repo, state.PrNumber, state.PrAuthor);
 
         var nonIgnored = allComments
             .Where(c => !state.IgnoredCommentIds.Contains(c.Id))
@@ -942,33 +933,6 @@ public class MonitorFlowTools
         }
 
         return new MonitorAction { Action = "stop", Message = "Multi-PR monitoring cancelled." };
-    }
-
-    /// <summary>
-    /// Auto-resolve threads authored by bot reviewers where the PR author has already replied.
-    /// Bots (e.g. copilot-pull-request-reviewer[bot]) won't respond to replies, so leaving
-    /// threads in "waiting for reply" state creates an infinite loop. Resolve them proactively.
-    /// </summary>
-    private static async Task AutoResolveBotWaitingThreadsAsync(List<CommentInfo> allComments)
-    {
-        var botWaiting = allComments
-            .Where(c => c.IsWaitingForReply && PrStatusFetcher.IsBotReviewer(c.Author))
-            .ToList();
-
-        foreach (var comment in botWaiting)
-        {
-            DebugLogger.Log("BotAutoResolve", $"Auto-resolving bot thread {comment.Id} (author: {comment.Author})");
-            var (success, _) = await GitHubCliExecutor.ResolveThreadAsync(comment.Id);
-            if (success)
-            {
-                allComments.Remove(comment);
-                DebugLogger.Log("BotAutoResolve", $"Resolved bot thread {comment.Id}");
-            }
-            else
-            {
-                DebugLogger.Log("BotAutoResolve", $"Failed to resolve bot thread {comment.Id} — will retry next poll");
-            }
-        }
     }
 
     /// <summary>
