@@ -840,8 +840,10 @@ public class MonitorFlowTools
         }
     }
 
-    private static string QuoteForShell(string value)
+    internal static string QuoteForShell(string value)
     {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return $"\"{value.Replace("\"", "\\\"")}\"";
         return $"'{value.Replace("'", "'\\''")}'";
     }
 
