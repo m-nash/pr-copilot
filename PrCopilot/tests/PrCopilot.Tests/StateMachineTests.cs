@@ -972,6 +972,12 @@ public class StateMachineTests
     }
 
     [Fact]
+    public void IsBotReviewer_Null_ReturnsFalse()
+    {
+        Assert.False(PrStatusFetcher.IsBotReviewer(null!));
+    }
+
+    [Fact]
     public void IsBotReviewer_CaseInsensitive()
     {
         Assert.True(PrStatusFetcher.IsBotReviewer("MyBot[BOT]"));
