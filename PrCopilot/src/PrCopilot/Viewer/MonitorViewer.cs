@@ -699,6 +699,7 @@ public static class MonitorViewer
         }
         catch
         {
+            try { Application.Shutdown(); } catch { }
             return false;
         }
     }
