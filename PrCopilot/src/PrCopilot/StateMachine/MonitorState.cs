@@ -24,11 +24,12 @@ public class MonitorState
     public string HeadBranch { get; set; } = "";
     public string SessionFolder { get; set; } = "";
 
-    // File paths (derived from session folder + PR number)
-    public string LogFile => Path.Combine(SessionFolder, $"pr-monitor-{PrNumber}.log");
-    public string TriggerFile => Path.Combine(SessionFolder, $"pr-monitor-{PrNumber}.trigger");
-    public string DebugLogFile => Path.Combine(SessionFolder, $"pr-monitor-{PrNumber}.debug.log");
-    public string IgnoreFile => Path.Combine(SessionFolder, $"pr-monitor-{PrNumber}.ignore-comments");
+    // File paths (derived from session folder + owner/repo/PR number to avoid collisions)
+    private string FilePrefix => $"pr-monitor-{Owner}-{Repo}-{PrNumber}";
+    public string LogFile => Path.Combine(SessionFolder, $"{FilePrefix}.log");
+    public string TriggerFile => Path.Combine(SessionFolder, $"{FilePrefix}.trigger");
+    public string DebugLogFile => Path.Combine(SessionFolder, $"{FilePrefix}.debug.log");
+    public string IgnoreFile => Path.Combine(SessionFolder, $"{FilePrefix}.ignore-comments");
 
     // State machine
     public MonitorStateId CurrentState { get; set; } = MonitorStateId.Idle;

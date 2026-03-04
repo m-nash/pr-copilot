@@ -2,6 +2,7 @@
 
 using System.Diagnostics;
 using System.Text.Json;
+using PrCopilot.Services;
 
 namespace PrCopilot.StateMachine;
 
@@ -360,7 +361,7 @@ public static class PrStatusFetcher
             var json = await RunGhAsync($"search prs --author={user} --state=open --json number,title,url,repository --limit 50");
             ParseSearchResults(json, prs);
         }
-        catch { /* user may have no authored PRs */ }
+        catch (Exception ex) { DebugLogger.Error("FetchUserPrs", $"Failed to fetch authored PRs for {user}: {ex.Message}"); }
 
         // Fetch PRs assigned to user
         try
@@ -368,7 +369,7 @@ public static class PrStatusFetcher
             var json = await RunGhAsync($"search prs --assignee={user} --state=open --json number,title,url,repository --limit 50");
             ParseSearchResults(json, prs);
         }
-        catch { /* user may have no assigned PRs */ }
+        catch (Exception ex) { DebugLogger.Error("FetchUserPrs", $"Failed to fetch assigned PRs for {user}: {ex.Message}"); }
 
         return prs.Values.ToList();
     }

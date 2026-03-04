@@ -22,7 +22,8 @@ namespace PrCopilot.Tools;
 public class MonitorFlowTools
 {
     private static readonly ConcurrentDictionary<string, MonitorSession> _sessions = new();
-    private static volatile bool _multiMonitorActive;
+    private static readonly HashSet<string> _multiMonitorIds = new();
+    private static readonly object _multiMonitorLock = new();
     private static readonly JsonSerializerOptions _jsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -59,7 +60,7 @@ public class MonitorFlowTools
         [Description("Session folder path for log/trigger/debug files")] string sessionFolder,
         CancellationToken cancellationToken = default)
     {
-        var monitorId = $"pr-{prNumber}";
+        var monitorId = $"pr-{owner}-{repo}-{prNumber}";
         DebugLogger.Log("PrMonitorStart", $"Called: owner={owner}, repo={repo}, pr={prNumber}");
 
         // If there's already an active session for this PR, reuse it.
@@ -224,7 +225,7 @@ public class MonitorFlowTools
             try
             {
                 await PrMonitorStart(pr.Owner, pr.Repo, pr.Number, sessionFolder, cancellationToken);
-                var monitorId = $"pr-{pr.Number}";
+                var monitorId = $"pr-{pr.Owner}-{pr.Repo}-{pr.Number}";
                 monitorIds.Add(monitorId);
                 results.Add(new
                 {
@@ -253,7 +254,11 @@ public class MonitorFlowTools
             }, _jsonOptions);
         }
 
-        _multiMonitorActive = true;
+        lock (_multiMonitorLock)
+        {
+            foreach (var id in monitorIds)
+                _multiMonitorIds.Add(id);
+        }
 
         return JsonSerializer.Serialize(new
         {
@@ -287,7 +292,7 @@ public class MonitorFlowTools
 
             if (_sessions.IsEmpty)
             {
-                _multiMonitorActive = false;
+                lock (_multiMonitorLock) { _multiMonitorIds.Clear(); }
                 return JsonSerializer.Serialize(new MonitorAction
                 {
                     Action = "stop",
@@ -301,14 +306,34 @@ public class MonitorFlowTools
             var heartbeatSession = _sessions.Values.FirstOrDefault();
             if (heartbeatSession == null)
             {
-                _multiMonitorActive = false;
+                lock (_multiMonitorLock) { _multiMonitorIds.Clear(); }
                 return JsonSerializer.Serialize(new MonitorAction
                 {
                     Action = "stop",
                     Message = "No active sessions to monitor."
                 }, _jsonOptions);
             }
-            heartbeatSession.StartHeartbeat(progress);
+            // Start a standalone heartbeat for multi-PR mode that doesn't depend on any particular session.
+            // This avoids the issue where removing the heartbeat session's PR kills the heartbeat.
+            using var heartbeatCts = new CancellationTokenSource();
+            var heartbeatCt = heartbeatCts.Token;
+            if (progress != null)
+            {
+                DebugLogger.Log("Heartbeat", "Starting multi-PR heartbeat");
+                _ = Task.Run(async () =>
+                {
+                    while (!heartbeatCt.IsCancellationRequested)
+                    {
+                        try
+                        {
+                            await Task.Delay(TimeSpan.FromSeconds(30), heartbeatCt);
+                            progress.Report($"Monitoring {_sessions.Count} PR(s)...");
+                        }
+                        catch (OperationCanceledException) { break; }
+                        catch { }
+                    }
+                }, heartbeatCt);
+            }
 
             try
             {
@@ -344,7 +369,7 @@ public class MonitorFlowTools
             }
             finally
             {
-                heartbeatSession.StopHeartbeat();
+                heartbeatCts.Cancel();
             }
         }
 
@@ -417,7 +442,9 @@ public class MonitorFlowTools
             if (action.Action == "polling")
             {
                 // In multi-PR mode, don't block on individual session — redirect to "all"
-                if (_multiMonitorActive && monitorId != "all")
+                bool isMultiMonitored;
+                lock (_multiMonitorLock) { isMultiMonitored = _multiMonitorIds.Contains(monitorId); }
+                if (isMultiMonitored && monitorId != "all")
                 {
                     await WriteLogEntryAsync(state, action);
                     await PersistIgnoreFileAsync(state);
@@ -502,7 +529,7 @@ public class MonitorFlowTools
                 catch { }
             }
             _sessions.Clear();
-            _multiMonitorActive = false;
+            lock (_multiMonitorLock) { _multiMonitorIds.Clear(); }
             return JsonSerializer.Serialize(new MonitorAction
             {
                 Action = "stop",
@@ -512,6 +539,7 @@ public class MonitorFlowTools
 
         if (_sessions.TryRemove(monitorId, out var session))
         {
+            lock (_multiMonitorLock) { _multiMonitorIds.Remove(monitorId); }
             session.CancelPolling();
             session.Dispose();
             return JsonSerializer.Serialize(new MonitorAction
@@ -742,7 +770,7 @@ public class MonitorFlowTools
 
             if (activeSessions.Count == 0)
             {
-                _multiMonitorActive = false;
+                lock (_multiMonitorLock) { _multiMonitorIds.Clear(); }
                 return new MonitorAction { Action = "stop", Message = "All PRs have been merged or closed. Monitoring complete." };
             }
 
