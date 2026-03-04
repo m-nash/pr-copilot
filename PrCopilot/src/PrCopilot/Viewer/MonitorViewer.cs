@@ -158,7 +158,7 @@ public static class MonitorViewer
             ColorScheme = dimScheme,
             CanFocus = false
         };
-        ciFrame.Border.TextAlignment = Alignment.Center;
+        ciFrame.Border!.TextAlignment = Alignment.Center;
         var ciSummaryLabel = new Label
         {
             Text = "",
@@ -189,7 +189,7 @@ public static class MonitorViewer
             ColorScheme = dimScheme,
             CanFocus = false
         };
-        approvalsFrame.Border.TextAlignment = Alignment.Center;
+        approvalsFrame.Border!.TextAlignment = Alignment.Center;
         var approvalsLabel = new Label
         {
             Text = "",
@@ -221,7 +221,7 @@ public static class MonitorViewer
             ColorScheme = dimScheme,
             CanFocus = false
         };
-        commentsFrame.Border.TextAlignment = Alignment.Center;
+        commentsFrame.Border!.TextAlignment = Alignment.Center;
 
         var commentsListView = new View
         {
@@ -245,7 +245,7 @@ public static class MonitorViewer
             ColorScheme = dimScheme,
             CanFocus = false
         };
-        waitingFrame.Border.TextAlignment = Alignment.Center;
+        waitingFrame.Border!.TextAlignment = Alignment.Center;
 
         var waitingListView = new View
         {
@@ -351,7 +351,7 @@ public static class MonitorViewer
             ColorScheme = dimScheme,
             Visible = false
         };
-        debugFrame.Border.TextAlignment = Alignment.Center;
+        debugFrame.Border!.TextAlignment = Alignment.Center;
 
         var debugListView = new ListView
         {
