@@ -134,7 +134,7 @@ if (args.Contains("--viewer"))
     var prNumber = int.Parse(args[prIdx + 1]);
     var logFile = args[logIdx + 1];
     var triggerFile = args[triggerIdx + 1];
-    Console.Title = $"PrCopilot Viewer #{prNumber}";
+    try { Console.Title = $"PrCopilot Viewer #{prNumber}"; } catch { }
 
     // Write PID file so the MCP server can detect this viewer is running
     var pidFile = logFile + ".viewer.pid";
@@ -155,7 +155,7 @@ if (args.Contains("--viewer"))
 }
 
 // Normal MCP server mode
-Console.Title = "PrCopilot MCP Server";
+try { Console.Title = "PrCopilot MCP Server"; } catch { }
 
 // Set up fallback crash log before anything else
 var copilotDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".copilot");

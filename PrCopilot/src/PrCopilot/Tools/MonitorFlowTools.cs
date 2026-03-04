@@ -1274,20 +1274,24 @@ public class MonitorFlowTools
                 var isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
                 var viewerExe = isWindows ? "PrCopilot.exe" : "PrCopilot";
                 var viewerPath = Path.Combine(AppContext.BaseDirectory, viewerExe);
-                var viewerArgs = $"--viewer --pr {state.PrNumber} " +
-                                 $"--log \"{state.LogFile}\" --trigger \"{state.TriggerFile}\" --debug \"{state.DebugLogFile}\"";
+                var viewerCommand =
+                    $"{QuoteForShell(viewerPath)} --viewer --pr {state.PrNumber} " +
+                    $"--log {QuoteForShell(state.LogFile)} --trigger {QuoteForShell(state.TriggerFile)} --debug {QuoteForShell(state.DebugLogFile)}";
 
                 if (isWindows)
                 {
                     Process.Start(new ProcessStartInfo
                     {
                         FileName = "wt.exe",
-                        Arguments = $"-w 0 new-tab -- \"{viewerPath}\" {viewerArgs}",
+                        Arguments = $"-w 0 new-tab -- {viewerCommand}",
                         UseShellExecute = false,
                         CreateNoWindow = true
                     });
                 }
-                // On macOS the TUI viewer is not yet supported — monitoring works without it
+                else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+                {
+                    StartViewerOnMac(viewerCommand);
+                }
             }
             finally
             {
@@ -1298,6 +1302,51 @@ public class MonitorFlowTools
         {
             // Viewer launch is best-effort — don't crash monitoring if it fails
         }
+    }
+
+    internal static string QuoteForShell(string value)
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return $"\"{value.Replace("\"", "\\\"")}\"";
+        return $"'{value.Replace("'", "'\\''")}'";
+    }
+
+    private static void StartViewerOnMac(string viewerCommand)
+    {
+        var escaped = EscapeAppleScriptString(viewerCommand);
+
+        // Prefer iTerm when installed; otherwise fall back to Terminal.app.
+        if (Directory.Exists("/Applications/iTerm.app"))
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = "osascript",
+                    Arguments = $"-e \"tell application \\\"iTerm\\\" to create window with default profile command \\\"{escaped}\\\"\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                });
+                return;
+            }
+            catch
+            {
+                // Fall through to Terminal.app
+            }
+        }
+
+        Process.Start(new ProcessStartInfo
+        {
+            FileName = "osascript",
+            Arguments = $"-e \"tell application \\\"Terminal\\\" to do script \\\"{escaped}\\\"\"",
+            UseShellExecute = false,
+            CreateNoWindow = true
+        });
+    }
+
+    private static string EscapeAppleScriptString(string value)
+    {
+        return value.Replace("\\", "\\\\").Replace("\"", "\\\"");
     }
 }
 

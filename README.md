@@ -6,7 +6,7 @@ An MCP server that monitors GitHub pull requests through GitHub Copilot CLI. It 
 
 - **Automated PR monitoring** — polls PR status (CI checks, reviews, comments, merge conflicts)
 - **State machine architecture** — deterministic C# logic drives all decisions; the LLM agent is a thin executor
-- **TUI dashboard** (Windows only) — live Terminal.Gui viewer with CI status, comments, approvals, progress bars, and deep links
+- **TUI dashboard** — live Terminal.Gui viewer with CI status, comments, approvals, progress bars, and deep links
 - **Comment handling** — address, explain, or ignore review comments one-by-one or in batch
 - **CI failure investigation** — analyze failed check logs, suggest fixes, rerun failed jobs via Azure DevOps
 - **Auto-merge** — squash merge when approved + CI green (with admin override option)
@@ -22,10 +22,10 @@ An MCP server that monitors GitHub pull requests through GitHub Copilot CLI. It 
 | Platform | MCP Server | TUI Viewer |
 |----------|-----------|------------|
 | Windows (x64) | ✅ | ✅ Requires [Windows Terminal](https://aka.ms/terminal) |
-| macOS (x64) | ✅ | ❌ Not yet supported |
-| macOS (Apple Silicon) | ✅ | ❌ Not yet supported |
+| macOS (x64) | ✅ | ✅ Launches in iTerm (if installed) or Terminal.app |
+| macOS (Apple Silicon) | ✅ | ✅ Launches in iTerm (if installed) or Terminal.app |
 
-The MCP server and all PR monitoring features work on both platforms. The TUI dashboard viewer (a separate window showing live CI/review status) currently requires Windows with Windows Terminal installed. On macOS, monitoring works entirely through the Copilot CLI conversation.
+The MCP server and all PR monitoring features work on both platforms. The TUI dashboard viewer opens in a separate terminal window (Windows Terminal on Windows, iTerm/Terminal.app on macOS).
 
 ### For building from source
 
@@ -184,3 +184,12 @@ dotnet test PrCopilot/PrCopilot.slnx
 ./Install-Debug.ps1
 # Then restart your Copilot CLI session
 ```
+
+### Manual macOS viewer QA (iTerm)
+
+```bash
+chmod +x scripts/manual-viewer-mac-test.sh
+./scripts/manual-viewer-mac-test.sh
+```
+
+The script launches the viewer and feeds realistic `STATUS|`, `TERMINAL|`, `RESUMING|`, and `STOPPED|` log lines so a human can validate live UI updates, section resizing/color changes, terminal-state freeze behavior, and auto-close on stop.
