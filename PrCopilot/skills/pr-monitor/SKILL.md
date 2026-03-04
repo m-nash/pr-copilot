@@ -181,3 +181,4 @@ When replying to review comments on the PR (via `gh api .../replies`), always us
 - **Session-scoped** — monitoring only lasts for the current Copilot CLI session.
 - **Trust the state machine** — do NOT improvise state flow. Do NOT add extra questions, skip steps, or interpret the context. Execute exactly what `pr_monitor_next_step` tells you.
 - **CI failure investigation** — when the state machine tells you to investigate, fetch logs, analyze, and report back. Always include your findings. If you have a suggested fix, include it in `data.suggested_fix`.
+- **NEVER use `/azp run` or `/azp rerun` comments** to trigger CI reruns. These PR comments are not reliable, may trigger unintended pipelines, and bypass the state machine's deferred rerun logic. Always use the Playwright browser automation (via `rerun_via_browser` task) or the state machine's built-in mechanisms to rerun failed jobs.

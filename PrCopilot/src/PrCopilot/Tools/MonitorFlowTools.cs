@@ -343,6 +343,7 @@ public class MonitorFlowTools
             // Re-fetch all PR data
             try
             {
+                var previousHeadSha = state.HeadSha;
                 var prInfo = await PrStatusFetcher.FetchPrInfoAsync(state.Owner, state.Repo, state.PrNumber);
 
                 // Check if PR has been merged (by us or someone else)
@@ -362,6 +363,13 @@ public class MonitorFlowTools
 
                 state.HeadSha = prInfo.HeadSha;
                 state.HasMergeConflict = !prInfo.Mergeable && prInfo.MergeableState == "dirty";
+
+                // New commit pushed — cancel any deferred rerun (CI restarts fresh)
+                if (state.PendingRerunWhenChecksComplete && !string.Equals(previousHeadSha, state.HeadSha, StringComparison.OrdinalIgnoreCase))
+                {
+                    DebugLogger.Log("PollLoop", $"New commit detected ({previousHeadSha[..7]} → {state.HeadSha[..7]}) — cancelling deferred rerun");
+                    state.PendingRerunWhenChecksComplete = false;
+                }
 
                 var checkResult = await PrStatusFetcher.FetchCheckRunsAsync(state.Owner, state.Repo, state.HeadSha);
                 state.Checks = checkResult.Counts;
@@ -388,11 +396,28 @@ public class MonitorFlowTools
                 var statusLine = BuildStatusLine(state);
                 await File.AppendAllTextAsync(state.LogFile, statusLine + Environment.NewLine, cancellationToken);
 
+                // Check for deferred rerun: user chose rerun while checks were still in progress
+                // (Ignore legacy pending statuses — only actual CI jobs matter)
+                if (state.PendingRerunWhenChecksComplete && state.Checks.InProgress == 0 && state.Checks.Queued == 0)
+                {
+                    // Safeguard: if failures resolved themselves (e.g., flaky test passed on re-poll), resume normal monitoring
+                    if (state.Checks.Failed == 0)
+                    {
+                        DebugLogger.Log("PollLoop", "Deferred rerun cancelled — no failures remain");
+                        state.PendingRerunWhenChecksComplete = false;
+                    }
+                    else
+                    {
+                        DebugLogger.Log("PollLoop", "All checks complete — triggering deferred rerun");
+                        return MonitorTransitions.CompletePendingRerun(state);
+                    }
+                }
+
                 // Check for terminal state — only needs-action comments trigger it
                 var terminal = MonitorTransitions.DetectTerminalState(state, needsAction, state.HasMergeConflict);
                 if (terminal.HasValue)
                 {
-                    DebugLogger.Log("PollLoop", $"Terminal state detected: {terminal.Value} (checks: {state.Checks.Passed}p/{state.Checks.Failed}f/{state.Checks.Pending}q, approvals: {state.Approvals.Count}, comments: {needsAction.Count}, conflict: {state.HasMergeConflict})");
+                    DebugLogger.Log("PollLoop", $"Terminal state detected: {terminal.Value} (checks: {state.Checks.Passed}p/{state.Checks.Failed}f/{state.Checks.InProgress}ip/{state.Checks.Pending}pnd/{state.Checks.Queued}q, approvals: {state.Approvals.Count}, comments: {needsAction.Count}, conflict: {state.HasMergeConflict})");
                     return MonitorTransitions.BuildTerminalAction(state, terminal.Value);
                 }
             }
@@ -668,7 +693,7 @@ public class MonitorFlowTools
 
         // Adaptive polling: shorter when checks are in progress, longer when all complete
         var checks = state.Checks;
-        if (checks.Pending > 0 || checks.Queued > 0)
+        if (checks.InProgress > 0 || checks.Queued > 0)
             return 60; // Checks still running — poll every minute
         if (checks.Total == 0)
             return 30; // No checks yet — poll more frequently
@@ -702,7 +727,7 @@ public class MonitorFlowTools
 
         var statusObj = new
         {
-            checks = new { c.Passed, c.Failed, c.Pending, c.Queued, c.Cancelled, c.Total, failures = state.FailedChecks.Select(f => new { f.Name, f.Reason, f.Url }).ToList() },
+            checks = new { c.Passed, c.Failed, c.InProgress, c.Pending, c.Queued, c.Cancelled, c.Total, failures = state.FailedChecks.Select(f => new { f.Name, f.Reason, f.Url }).ToList() },
             approvals = approvalNames,
             stale_approvals = staleNames,
             unresolved = unresolvedSummary,

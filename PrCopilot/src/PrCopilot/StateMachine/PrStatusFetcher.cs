@@ -367,7 +367,7 @@ public static class PrStatusFetcher
         }
         else if (status == "in_progress")
         {
-            counts.Pending++;
+            counts.InProgress++;
         }
         else if (conclusion is "success" or "skipped" or "neutral")
         {

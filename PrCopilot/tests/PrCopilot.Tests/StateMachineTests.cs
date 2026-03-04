@@ -119,15 +119,28 @@ public class StateMachineTests
     }
 
     [Fact]
-    public void DetectTerminalState_ChecksPending_ReturnsNull()
+    public void DetectTerminalState_ChecksInProgress_ReturnsNull()
     {
         var state = CreateState();
-        state.Checks = new CheckRunCounts { Passed = 3, Pending = 2, Total = 5 };
+        state.Checks = new CheckRunCounts { Passed = 3, InProgress = 2, Total = 5 };
         state.Approvals = [new ReviewInfo { Author = "approver", State = "APPROVED" }];
 
         var result = MonitorTransitions.DetectTerminalState(state, [], false);
 
         Assert.Null(result);
+    }
+
+    [Fact]
+    public void DetectTerminalState_LegacyPendingOnly_DoesNotBlockTerminal()
+    {
+        var state = CreateState();
+        state.Checks = new CheckRunCounts { Passed = 4, Pending = 1, Total = 5 };
+        state.Approvals = [new ReviewInfo { Author = "approver", State = "APPROVED" }];
+
+        var result = MonitorTransitions.DetectTerminalState(state, [], false);
+
+        // Legacy pending (e.g. policy checks) should NOT block terminal state detection
+        Assert.Equal(TerminalStateType.ApprovedCiGreen, result);
     }
 
     [Fact]
@@ -755,6 +768,179 @@ public class StateMachineTests
 
         Assert.Equal("execute", applyAction.Action);
         Assert.Equal("address_comment", applyAction.Task);
+    }
+
+    #endregion
+
+    #region Deferred Rerun (pending checks)
+
+    [Fact]
+    public void BuildRerunAction_WithInProgressChecks_DefersToPolling()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.CiFailureFlow = CiFailureFlowState.CiFailurePrompt;
+        state.Checks = new CheckRunCounts { Passed = 2, Failed = 1, InProgress = 2, Total = 5 };
+        state.FailedChecks = [new FailedCheckInfo { Name = "build", Conclusion = "failure", Url = "https://dev.azure.com/build/1" }];
+
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "rerun", null);
+
+        Assert.Equal("polling", action.Action);
+        Assert.True(state.PendingRerunWhenChecksComplete);
+        Assert.Equal(MonitorStateId.Polling, state.CurrentState);
+        Assert.Equal(CiFailureFlowState.None, state.CiFailureFlow);
+    }
+
+    [Fact]
+    public void BuildRerunAction_WithQueuedChecks_DefersToPolling()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.CiFailureFlow = CiFailureFlowState.CiFailurePrompt;
+        state.Checks = new CheckRunCounts { Passed = 2, Failed = 1, Queued = 1, Total = 4 };
+        state.FailedChecks = [new FailedCheckInfo { Name = "build", Conclusion = "failure", Url = "https://dev.azure.com/build/1" }];
+
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "rerun", null);
+
+        Assert.Equal("polling", action.Action);
+        Assert.True(state.PendingRerunWhenChecksComplete);
+    }
+
+    [Fact]
+    public void BuildRerunAction_LegacyPendingOnly_ExecutesImmediately()
+    {
+        // Legacy pending (like policy checks) should NOT defer the rerun
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.CiFailureFlow = CiFailureFlowState.CiFailurePrompt;
+        state.Checks = new CheckRunCounts { Passed = 3, Failed = 2, Pending = 1, Total = 6 };
+        state.FailedChecks = [new FailedCheckInfo { Name = "build", Conclusion = "failure", Url = "https://dev.azure.com/build/1" }];
+
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "rerun", null);
+
+        Assert.Equal("execute", action.Action);
+        Assert.Equal("rerun_via_browser", action.Task);
+        Assert.False(state.PendingRerunWhenChecksComplete);
+    }
+
+    [Fact]
+    public void BuildRerunAction_NoPendingChecks_ExecutesImmediately()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.CiFailureFlow = CiFailureFlowState.CiFailurePrompt;
+        SetChecksFailed(state);
+
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "rerun", null);
+
+        Assert.Equal("execute", action.Action);
+        Assert.Equal("rerun_via_browser", action.Task);
+        Assert.False(state.PendingRerunWhenChecksComplete);
+        Assert.Equal(MonitorStateId.ExecutingTask, state.CurrentState);
+    }
+
+    [Fact]
+    public void DetectTerminalState_SuppressesCiFailure_WhenPendingRerun()
+    {
+        var state = CreateState();
+        SetChecksFailed(state);
+        state.PendingRerunWhenChecksComplete = true;
+
+        var result = MonitorTransitions.DetectTerminalState(state, [], false);
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public void DetectTerminalState_CiFailure_WhenNotPendingRerun()
+    {
+        var state = CreateState();
+        SetChecksFailed(state);
+        state.PendingRerunWhenChecksComplete = false;
+
+        var result = MonitorTransitions.DetectTerminalState(state, [], false);
+
+        Assert.Equal(TerminalStateType.CiFailure, result);
+    }
+
+    [Fact]
+    public void CompletePendingRerun_ClearsFlag_ReturnsExecute()
+    {
+        var state = CreateState();
+        state.PendingRerunWhenChecksComplete = true;
+        state.Checks = new CheckRunCounts { Passed = 4, Failed = 1, Total = 5 };
+        state.FailedChecks = [new FailedCheckInfo { Name = "build", Conclusion = "failure", Url = "https://dev.azure.com/build/1" }];
+
+        var action = MonitorTransitions.CompletePendingRerun(state);
+
+        Assert.False(state.PendingRerunWhenChecksComplete);
+        Assert.Equal("execute", action.Action);
+        Assert.Equal("rerun_via_browser", action.Task);
+        Assert.Equal(MonitorStateId.ExecutingTask, state.CurrentState);
+    }
+
+    [Fact]
+    public void RerunFromInvestigationResults_WithPendingChecks_DefersToPolling()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.CiFailureFlow = CiFailureFlowState.InvestigationResults;
+        state.Checks = new CheckRunCounts { Passed = 2, Failed = 1, InProgress = 1, Total = 4 };
+        state.FailedChecks = [new FailedCheckInfo { Name = "build", Conclusion = "failure", Url = "https://dev.azure.com/build/1" }];
+
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "rerun", null);
+
+        Assert.Equal("polling", action.Action);
+        Assert.True(state.PendingRerunWhenChecksComplete);
+    }
+
+    [Fact]
+    public void TopLevelRerunFailed_WithPendingChecks_DefersToPolling()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.Checks = new CheckRunCounts { Passed = 2, Failed = 1, InProgress = 1, Total = 4 };
+        state.FailedChecks = [new FailedCheckInfo { Name = "build", Conclusion = "failure", Url = "https://dev.azure.com/build/1" }];
+
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "rerun_failed", null);
+
+        Assert.Equal("polling", action.Action);
+        Assert.True(state.PendingRerunWhenChecksComplete);
+    }
+
+    [Fact]
+    public void DetectTerminalState_PendingRerunWithNewCommit_FlagShouldBeCleared()
+    {
+        // Simulates what the poll loop does: new SHA means flag should be cleared
+        // (The actual clearing happens in MonitorFlowTools, but verify the state machine
+        // still detects CiFailure normally once the flag is cleared)
+        var state = CreateState();
+        SetChecksFailed(state);
+        state.PendingRerunWhenChecksComplete = true;
+
+        // While flag is set, CiFailure is suppressed
+        Assert.Null(MonitorTransitions.DetectTerminalState(state, [], false));
+
+        // After poll loop clears flag (new commit detected), CiFailure fires again
+        state.PendingRerunWhenChecksComplete = false;
+        Assert.Equal(TerminalStateType.CiFailure, MonitorTransitions.DetectTerminalState(state, [], false));
+    }
+
+    [Fact]
+    public void DetectTerminalState_PendingRerunNoFailures_ResumeNormalDetection()
+    {
+        // Simulates what the poll loop does: failures resolved, flag cleared,
+        // normal terminal state detection resumes
+        var state = CreateState();
+        state.PendingRerunWhenChecksComplete = true;
+        state.Checks = new CheckRunCounts { Passed = 5, Total = 5 };
+        state.Approvals = [new ReviewInfo { Author = "approver", State = "APPROVED" }];
+
+        // Poll loop would clear the flag since Failed == 0, then DetectTerminalState runs normally
+        state.PendingRerunWhenChecksComplete = false;
+        var result = MonitorTransitions.DetectTerminalState(state, [], false);
+
+        Assert.Equal(TerminalStateType.ApprovedCiGreen, result);
     }
 
     #endregion
