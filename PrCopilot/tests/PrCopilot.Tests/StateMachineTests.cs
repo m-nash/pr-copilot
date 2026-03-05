@@ -372,6 +372,50 @@ public class StateMachineTests
     }
 
     [Fact]
+    public void BuildTerminalAction_ApprovedCiGreen_HasChoiceMap()
+    {
+        var state = CreateState();
+        SetChecksAllGreen(state);
+        state.Approvals = [new ReviewInfo { Author = "alice", State = "APPROVED" }];
+
+        var action = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.ApprovedCiGreen);
+        MonitorTransitions.AttachChoiceMap(action);
+
+        Assert.NotNull(action.ChoiceMap);
+        Assert.Equal("merge", action.ChoiceMap["Merge the PR"]);
+        Assert.Equal("wait_for_approver", action.ChoiceMap["Wait for another approver"]);
+        Assert.Equal("resume", action.ChoiceMap["Resume monitoring"]);
+        Assert.Equal("handle_myself", action.ChoiceMap["I'll handle it myself"]);
+    }
+
+    [Theory]
+    [InlineData(TerminalStateType.ApprovedCiGreen)]
+    [InlineData(TerminalStateType.CiFailure)]
+    [InlineData(TerminalStateType.CiCancelled)]
+    [InlineData(TerminalStateType.MergeConflict)]
+    [InlineData(TerminalStateType.CiPassedCommentsIgnored)]
+    public void BuildTerminalAction_AllStates_ChoiceMapCoversAllChoices(TerminalStateType terminal)
+    {
+        var state = CreateState();
+        SetChecksAllGreen(state);
+        state.Approvals = [new ReviewInfo { Author = "alice", State = "APPROVED" }];
+        if (terminal == TerminalStateType.CiFailure)
+        {
+            SetChecksFailed(state);
+        }
+        if (terminal == TerminalStateType.CiCancelled)
+            state.Checks = new CheckRunCounts { Passed = 5, Cancelled = 1, Total = 6 };
+
+        var action = MonitorTransitions.BuildTerminalAction(state, terminal);
+        MonitorTransitions.AttachChoiceMap(action);
+
+        Assert.NotNull(action.Choices);
+        Assert.NotNull(action.ChoiceMap);
+        foreach (var choice in action.Choices)
+            Assert.True(action.ChoiceMap.ContainsKey(choice), $"Choice '{choice}' missing from ChoiceMap");
+    }
+
+    [Fact]
     public void WaitForApprover_EndToEnd_BlocksThenFiresOnNewApproval()
     {
         // 1. Start with approved + CI green

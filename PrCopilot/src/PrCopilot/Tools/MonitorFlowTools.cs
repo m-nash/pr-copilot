@@ -348,7 +348,8 @@ public class MonitorFlowTools
 
                 if (action.Action == "ask_user")
                 {
-                    action.Instructions = "MANDATORY: Call the ask_user tool with the EXACT question and choices above. Do NOT rewrite, rephrase, or add your own choices. Do NOT act on behalf of the user. Wait for the user's selection, then call pr_monitor_next_step with the monitorId from this response, event='user_chose' and choice=<mapped choice value>. After handling, call pr_monitor_next_step with monitorId='all' and event='ready' to resume monitoring all PRs.";
+                    MonitorTransitions.AttachChoiceMap(action);
+                    action.Instructions = "MANDATORY: Call the ask_user tool with the EXACT question and choices above. Do NOT rewrite, rephrase, or add your own choices. Do NOT act on behalf of the user. Wait for the user's selection, then call pr_monitor_next_step with the monitorId from this response, event='user_chose' and choice set to the EXACT value from the choice_map for the selected option. After handling, call pr_monitor_next_step with monitorId='all' and event='ready' to resume monitoring all PRs.";
                 }
 
                 await WriteLogEntryAsync(
@@ -402,7 +403,10 @@ public class MonitorFlowTools
                 {
                     var triggerAction = MonitorTransitions.BuildWaitingCommentAction(state, comment);
                     if (triggerAction.Action == "ask_user")
-                        triggerAction.Instructions = "MANDATORY: Call the ask_user tool with the EXACT question and choices above. Do NOT rewrite, rephrase, or add your own choices. Do NOT act on behalf of the user. Wait for the user's selection, then call pr_monitor_next_step with event='user_chose' and choice=<mapped choice value>.";
+                    {
+                        MonitorTransitions.AttachChoiceMap(triggerAction);
+                        triggerAction.Instructions = "MANDATORY: Call the ask_user tool with the EXACT question and choices above. Do NOT rewrite, rephrase, or add your own choices. Do NOT act on behalf of the user. Wait for the user's selection, then call pr_monitor_next_step with event='user_chose' and choice set to the EXACT value from the choice_map for the selected option.";
+                    }
                     await WriteLogEntryAsync(state, triggerAction);
                     DebugLogger.Log("NextStep", $"Returning trigger action: {triggerAction.Action}");
                     return JsonSerializer.Serialize(triggerAction, _jsonOptions);
@@ -487,7 +491,8 @@ public class MonitorFlowTools
             // so the LLM cannot skip the ask_user step or rewrite the choices
             if (action.Action == "ask_user")
             {
-                action.Instructions = "MANDATORY: Call the ask_user tool with the EXACT question and choices above. Do NOT rewrite, rephrase, or add your own choices. Do NOT act on behalf of the user. Wait for the user's selection, then call pr_monitor_next_step with event='user_chose' and choice=<mapped choice value>.";
+                MonitorTransitions.AttachChoiceMap(action);
+                action.Instructions = "MANDATORY: Call the ask_user tool with the EXACT question and choices above. Do NOT rewrite, rephrase, or add your own choices. Do NOT act on behalf of the user. Wait for the user's selection, then call pr_monitor_next_step with event='user_chose' and choice set to the EXACT value from the choice_map for the selected option.";
             }
 
             return JsonSerializer.Serialize(action, _jsonOptions);

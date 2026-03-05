@@ -165,6 +165,11 @@ public class MonitorAction
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public List<string>? Choices { get; set; }
 
+    /// <summary>For ask_user: maps each choice display text to its exact choice value for pr_monitor_next_step.</summary>
+    [JsonPropertyName("choice_map")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Dictionary<string, string>? ChoiceMap { get; set; }
+
     /// <summary>For execute: the task type (address_comment, investigate_ci_failure, etc.)</summary>
     [JsonPropertyName("task")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
