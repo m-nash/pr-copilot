@@ -1,6 +1,10 @@
 <Project>
   <PropertyGroup>
     <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <ArtifactsPath>$(MSBuildThisFileDirectory)..\artifacts</ArtifactsPath>
   </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="StyleCop.Analyzers" Version="1.2.0-beta.556" PrivateAssets="all" />
+  </ItemGroup>
 </Project>

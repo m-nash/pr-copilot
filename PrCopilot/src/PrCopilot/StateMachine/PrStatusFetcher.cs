@@ -50,7 +50,7 @@ public static class PrStatusFetcher
     public static async Task<PrInfo> FetchPrInfoAsync(string owner, string repo, int prNumber)
     {
         var json = await RunGhAsync(
-            $"api repos/{owner}/{repo}/pulls/{prNumber} --jq \"{{title: .title, sha: .head.sha, head_branch: .head.ref, url: .html_url, author: .user.login, mergeable: .mergeable, mergeable_state: .mergeable_state, state: .state, merged: .merged}}\"");
+            $"api repos/{owner}/{repo}/pulls/{prNumber} --jq \"{{title: .title, sha: .head.sha, head_branch: .head.ref, base_branch: .base.ref, url: .html_url, author: .user.login, mergeable: .mergeable, mergeable_state: .mergeable_state, state: .state, merged: .merged}}\"");
 
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
@@ -60,6 +60,7 @@ public static class PrStatusFetcher
             Title = root.GetProperty("title").GetString() ?? "",
             HeadSha = root.GetProperty("sha").GetString() ?? "",
             HeadBranch = root.TryGetProperty("head_branch", out var hb) ? hb.GetString() ?? "" : "",
+            BaseBranch = root.TryGetProperty("base_branch", out var bb) ? bb.GetString() ?? "" : "",
             Url = root.GetProperty("url").GetString() ?? "",
             Author = root.TryGetProperty("author", out var a) ? a.GetString() ?? "" : "",
             Mergeable = root.TryGetProperty("mergeable", out var m) && m.ValueKind == JsonValueKind.True,
@@ -162,36 +163,39 @@ public static class PrStatusFetcher
     public static async Task<ReviewResult> FetchReviewsAsync(string owner, string repo, int prNumber, string headSha)
     {
         var json = await RunGhAsync(
-            $"api \"repos/{owner}/{repo}/pulls/{prNumber}/reviews?per_page=100\" --jq \"[.[] | {{user: .user.login, state: .state, commit_id: .commit_id}}]\"");
+            $"api \"repos/{owner}/{repo}/pulls/{prNumber}/reviews?per_page=100\" --jq \"[.[] | {{user: .user.login, state: .state, commit_id: .commit_id, submitted_at: .submitted_at}}]\"");
 
         using var doc = JsonDocument.Parse(json);
         var reviews = doc.RootElement;
 
         // De-duplicate by user: latest review wins
-        var latestByUser = new Dictionary<string, (string state, string commitId)>(StringComparer.OrdinalIgnoreCase);
+        var latestByUser = new Dictionary<string, (string state, string commitId, DateTime submittedAt)>(StringComparer.OrdinalIgnoreCase);
         foreach (var r in reviews.EnumerateArray())
         {
             var user = r.GetProperty("user").GetString() ?? "";
             var state = r.GetProperty("state").GetString() ?? "";
             var commitId = r.GetProperty("commit_id").GetString() ?? "";
+            var submittedAt = r.TryGetProperty("submitted_at", out var sa) && sa.ValueKind == JsonValueKind.String
+                ? DateTime.Parse(sa.GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind)
+                : DateTime.MinValue;
 
             // Skip CI bots (but NOT copilot-pull-request-reviewer[bot])
             if (IsCiBot(user))
                 continue;
 
             // Latest review wins (array is chronological)
-            latestByUser[user] = (state, commitId);
+            latestByUser[user] = (state, commitId, submittedAt);
         }
 
         var approvals = new List<ReviewInfo>();
         var staleApprovals = new List<ReviewInfo>();
 
-        foreach (var (user, (state, commitId)) in latestByUser)
+        foreach (var (user, (state, commitId, submittedAt)) in latestByUser)
         {
             if (state != "APPROVED")
                 continue;
 
-            var review = new ReviewInfo { Author = user, State = state };
+            var review = new ReviewInfo { Author = user, State = state, SubmittedAt = submittedAt };
 
             if (string.Equals(commitId, headSha, StringComparison.OrdinalIgnoreCase))
             {
@@ -237,6 +241,7 @@ public static class PrStatusFetcher
                       lastReply: comments(last: 1) {
                         nodes {
                           author { login }
+                          createdAt
                         }
                       }
                     }
@@ -279,12 +284,16 @@ public static class PrStatusFetcher
             // Determine if PR author is the last replier
             var lastReplyAuthor = "";
             var isWaitingForReply = false;
+            DateTime? lastReplyAt = null;
             if (thread.TryGetProperty("lastReply", out var lastReply))
             {
                 var lastNodes = lastReply.GetProperty("nodes");
                 if (lastNodes.GetArrayLength() > 0)
                 {
                     lastReplyAuthor = lastNodes[0].GetProperty("author").GetProperty("login").GetString() ?? "";
+                    if (lastNodes[0].TryGetProperty("createdAt", out var ca) && ca.ValueKind == JsonValueKind.String)
+                        lastReplyAt = DateTime.Parse(ca.GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind);
+
                     // If PR author is the last commenter and there are replies (totalCount > 1),
                     // the ball is in the reviewer's court
                     if (totalCount > 1 && !string.IsNullOrEmpty(prAuthor) &&
@@ -308,6 +317,7 @@ public static class PrStatusFetcher
                 IsResolved = false,
                 IsWaitingForReply = isWaitingForReply,
                 LastReplyAuthor = lastReplyAuthor,
+                LastReplyAt = lastReplyAt,
                 ReplyCount = totalCount - 1
             });
         }
@@ -319,8 +329,11 @@ public static class PrStatusFetcher
     /// Fetches unresolved comments and auto-resolves any bot reviewer threads where the PR author
     /// has already replied. Bots (e.g. copilot-pull-request-reviewer[bot]) won't respond to replies,
     /// so "waiting for reply" threads from bots are resolved proactively to prevent infinite loops.
+    /// Also auto-resolves waiting-for-reply threads whose original author has approved the PR
+    /// AFTER we replied — approval after our reply implies acceptance.
     /// </summary>
-    public static async Task<List<CommentInfo>> FetchAndCleanUnresolvedCommentsAsync(string owner, string repo, int prNumber, string prAuthor = "")
+    public static async Task<List<CommentInfo>> FetchAndCleanUnresolvedCommentsAsync(
+        string owner, string repo, int prNumber, string prAuthor = "", IReadOnlyList<ReviewInfo>? approvals = null)
     {
         var comments = await FetchUnresolvedCommentsAsync(owner, repo, prNumber, prAuthor);
 
@@ -340,6 +353,35 @@ public static class PrStatusFetcher
             else
             {
                 DebugLogger.Log("BotAutoResolve", $"Failed to resolve bot thread {comment.Id} — will retry next poll");
+            }
+        }
+
+        // Auto-resolve waiting-for-reply threads from reviewers who approved AFTER we replied.
+        // If the reviewer approved after seeing our reply, that's implicit acceptance.
+        // If they approved before we replied, they haven't seen our response yet — don't auto-resolve.
+        if (approvals != null && approvals.Count > 0)
+        {
+            var approvedWaiting = comments
+                .Where(c => c.IsWaitingForReply && c.LastReplyAt.HasValue)
+                .Select(c => (comment: c, approval: approvals.FirstOrDefault(
+                    a => string.Equals(a.Author, c.Author, StringComparison.OrdinalIgnoreCase))))
+                .Where(x => x.approval != null && x.comment.LastReplyAt!.Value <= x.approval.SubmittedAt)
+                .Select(x => x.comment)
+                .ToList();
+
+            foreach (var comment in approvedWaiting)
+            {
+                DebugLogger.Log("ApprovalAutoResolve", $"Auto-resolving thread {comment.Id} (author: {comment.Author} approved after our reply)");
+                var resolved = await ResolveThreadAsync(comment.Id);
+                if (resolved)
+                {
+                    comments.Remove(comment);
+                    DebugLogger.Log("ApprovalAutoResolve", $"Resolved thread {comment.Id}");
+                }
+                else
+                {
+                    DebugLogger.Log("ApprovalAutoResolve", $"Failed to resolve thread {comment.Id} — will retry next poll");
+                }
             }
         }
 
@@ -379,6 +421,40 @@ public static class PrStatusFetcher
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Checks whether the given branch requires all review conversations to be resolved before merging.
+    /// Uses the repository rulesets API, which is accessible to anyone with read access.
+    /// Returns false on API failure (permissions, older GH Enterprise, etc.).
+    /// </summary>
+    public static async Task<bool> FetchRequiresConversationResolutionAsync(string owner, string repo, string branch)
+    {
+        try
+        {
+            var json = await RunGhAsync($"api repos/{owner}/{repo}/rules/branches/{branch}");
+            using var doc = JsonDocument.Parse(json);
+
+            foreach (var rule in doc.RootElement.EnumerateArray())
+            {
+                if (rule.TryGetProperty("type", out var type) &&
+                    type.GetString() == "pull_request" &&
+                    rule.TryGetProperty("parameters", out var parameters) &&
+                    parameters.TryGetProperty("required_review_thread_resolution", out var required) &&
+                    required.ValueKind == JsonValueKind.True)
+                {
+                    DebugLogger.Log("BranchRules", $"Conversation resolution required for {owner}/{repo}:{branch}");
+                    return true;
+                }
+            }
+
+            return false;
+        }
+        catch (Exception ex)
+        {
+            DebugLogger.Log("BranchRules", $"Could not fetch rulesets for {owner}/{repo}:{branch}: {ex.Message} — defaulting to false");
+            return false;
+        }
     }
 
     /// <summary>
@@ -512,41 +588,4 @@ public static class PrStatusFetcher
 
         return output.Trim();
     }
-}
-
-public class PrInfo
-{
-    public string Title { get; set; } = "";
-    public string HeadSha { get; set; } = "";
-    public string HeadBranch { get; set; } = "";
-    public string Url { get; set; } = "";
-    public string Author { get; set; } = "";
-    public bool Mergeable { get; set; }
-    public string MergeableState { get; set; } = "";
-    public bool IsMerged { get; set; }
-    public string State { get; set; } = ""; // open, closed, merged
-}
-
-public class CheckRunResult
-{
-    public CheckRunCounts Counts { get; set; } = new();
-    public List<FailedCheckInfo> Failures { get; set; } = [];
-}
-
-public class ReviewResult
-{
-    public List<ReviewInfo> Approvals { get; set; } = [];
-    public List<ReviewInfo> StaleApprovals { get; set; } = [];
-}
-
-/// <summary>
-/// Info about a PR found via search (for "monitor all my PRs" feature).
-/// </summary>
-public class UserPrInfo
-{
-    public string Owner { get; set; } = "";
-    public string Repo { get; set; } = "";
-    public int Number { get; set; }
-    public string Title { get; set; } = "";
-    public string Url { get; set; } = "";
 }

@@ -835,10 +835,19 @@ public static class MonitorTransitions
     private static MonitorAction BuildApprovedAction(MonitorState state, string timestamp)
     {
         var approvers = string.Join(", ", state.Approvals.Select(a => a.Author));
+        var question = $"[{timestamp}] ✅ PR #{state.PrNumber} is approved by {approvers} and CI is green! ({state.Checks.Passed}/{state.Checks.Total} passed)";
+
+        // Warn if repo requires conversation resolution and there are still unresolved threads
+        if (state.RequiresConversationResolution && state.WaitingForReplyComments.Count > 0)
+        {
+            var waitingAuthors = string.Join(", ", state.WaitingForReplyComments.Select(c => c.Author).Distinct());
+            question += $" ⚠️ {state.WaitingForReplyComments.Count} unresolved conversation(s) from {waitingAuthors} may block merging (repo policy).";
+        }
+
         return new MonitorAction
         {
             Action = "ask_user",
-            Question = $"[{timestamp}] ✅ PR #{state.PrNumber} is approved by {approvers} and CI is green! ({state.Checks.Passed}/{state.Checks.Total} passed)",
+            Question = question,
             Choices = ["Merge the PR", "Wait for another approver", "Resume monitoring", "I'll handle it myself"]
         };
     }
