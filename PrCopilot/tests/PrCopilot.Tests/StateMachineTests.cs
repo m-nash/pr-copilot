@@ -416,6 +416,157 @@ public class StateMachineTests
     }
 
     [Fact]
+    public void AllActionBuilders_EveryChoiceString_ExistsInChoiceValueMap()
+    {
+        // Collect all choice strings produced by every action builder.
+        // This catches drift between display text and ChoiceValueMap.
+        var allChoices = new HashSet<string>();
+        var state = CreateState();
+
+        // Terminal states
+        foreach (var terminal in Enum.GetValues<TerminalStateType>())
+        {
+            ResetState(state);
+            SetChecksAllGreen(state);
+            state.Approvals = [new ReviewInfo { Author = "alice", State = "APPROVED" }];
+            if (terminal == TerminalStateType.CiFailure) SetChecksFailed(state);
+            if (terminal == TerminalStateType.CiCancelled)
+                state.Checks = new CheckRunCounts { Passed = 5, Cancelled = 1, Total = 6 };
+            if (terminal == TerminalStateType.NewComment)
+            {
+                state.UnresolvedComments = [MakeComment()];
+                continue; // NewComment triggers comment flow, covered below
+            }
+
+            var action = MonitorTransitions.BuildTerminalAction(state, terminal);
+            if (action.Choices != null) allChoices.UnionWith(action.Choices);
+        }
+
+        // Single comment flow
+        ResetState(state);
+        state.UnresolvedComments = [MakeComment()];
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        var commentAction = MonitorTransitions.ProcessEvent(state, "ready", null, null);
+        // Simulate terminal detection → new comment → BuildCommentAction (1 comment)
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.CurrentCommentIndex = 0;
+        // The BuildCommentAction for 1 comment gives: Address/Explain/Handle
+        if (commentAction.Choices != null) allChoices.UnionWith(commentAction.Choices);
+
+        // Multi comment flow
+        ResetState(state);
+        state.UnresolvedComments = [MakeComment("c1"), MakeComment("c2", "reviewer2", "src/Other.cs")];
+        state.CurrentState = MonitorStateId.Polling;
+        // Trigger NewComment via ProcessEvent
+        var multiAction = MonitorTransitions.ProcessEvent(state, "ready", null, null);
+        if (multiAction.Choices != null) allChoices.UnionWith(multiAction.Choices);
+
+        // Address-all iterating flow
+        ResetState(state);
+        state.UnresolvedComments = [MakeComment("c1"), MakeComment("c2", "reviewer2", "src/Other.cs")];
+        state.CommentFlow = CommentFlowState.MultiCommentPrompt;
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        var addressAllAction = MonitorTransitions.ProcessEvent(state, "user_chose", "address_all", null);
+        if (addressAllAction.Choices != null) allChoices.UnionWith(addressAllAction.Choices);
+
+        // Pick-comment flow (numbered choices are dynamic — only capture the static "I'll handle them myself")
+        ResetState(state);
+        state.UnresolvedComments = [MakeComment("c1"), MakeComment("c2", "reviewer2", "src/Other.cs")];
+        state.CommentFlow = CommentFlowState.MultiCommentPrompt;
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        var pickAction = MonitorTransitions.ProcessEvent(state, "user_chose", "address_specific", null);
+        if (pickAction.Choices != null)
+        {
+            foreach (var c in pickAction.Choices)
+            {
+                // Skip numbered dynamic choices (e.g., "1. reviewer1: ...")
+                if (!char.IsDigit(c[0]))
+                    allChoices.Add(c);
+            }
+        }
+
+        // PickRemaining flow (Address next comment / I'll handle the rest myself)
+        ResetState(state);
+        state.UnresolvedComments = [MakeComment("c1"), MakeComment("c2", "reviewer2", "src/Other.cs")];
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.CurrentCommentIndex = 0;
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        var remainingAction = MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
+        if (remainingAction.Choices != null) allChoices.UnionWith(remainingAction.Choices);
+
+        // Waiting-for-reply comment
+        ResetState(state);
+        var waitingComment = MakeComment("w1", "reviewer1", "src/File.cs");
+        var waitingAction = MonitorTransitions.BuildWaitingCommentAction(state, waitingComment);
+        if (waitingAction.Choices != null) allChoices.UnionWith(waitingAction.Choices);
+
+        // CI failure flow
+        ResetState(state);
+        SetChecksFailed(state);
+        state.CiFailureFlow = CiFailureFlowState.CiFailurePrompt;
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        // BuildCiFailureAction is private, but it's triggered through BuildTerminalAction for CiFailure
+        var ciAction = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.CiFailure);
+        if (ciAction.Choices != null) allChoices.UnionWith(ciAction.Choices);
+
+        // Investigation results (with suggested fix)
+        ResetState(state);
+        SetChecksFailed(state);
+        state.CiFailureFlow = CiFailureFlowState.Investigating;
+        state.CurrentState = MonitorStateId.Investigating;
+        state.SuggestedFix = "Fix the null ref";
+        var investigateAction = MonitorTransitions.ProcessEvent(state, "investigation_complete", null, null);
+        if (investigateAction.Choices != null) allChoices.UnionWith(investigateAction.Choices);
+
+        // Investigation results (duplicate_artifact)
+        ResetState(state);
+        SetChecksFailed(state);
+        state.CiFailureFlow = CiFailureFlowState.Investigating;
+        state.CurrentState = MonitorStateId.Investigating;
+        state.IssueType = "duplicate_artifact";
+        var dupAction = MonitorTransitions.ProcessEvent(state, "investigation_complete", null, null);
+        if (dupAction.Choices != null) allChoices.UnionWith(dupAction.Choices);
+
+        // Unrecognized choice fallback
+        ResetState(state);
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        var unrecognizedAction = MonitorTransitions.ProcessEvent(state, "user_chose", "bogus_choice", null);
+        if (unrecognizedAction.Choices != null) allChoices.UnionWith(unrecognizedAction.Choices);
+
+        // Now assert every collected choice exists in ChoiceValueMap
+        foreach (var choice in allChoices)
+        {
+            var action = new MonitorAction { Action = "ask_user", Choices = [choice] };
+            MonitorTransitions.AttachChoiceMap(action);
+            Assert.True(
+                action.ChoiceMap != null && action.ChoiceMap.ContainsKey(choice),
+                $"Choice '{choice}' is produced by an action builder but has no entry in ChoiceValueMap");
+        }
+    }
+
+    private static void ResetState(MonitorState state)
+    {
+        state.CurrentState = MonitorStateId.Polling;
+        state.CommentFlow = CommentFlowState.None;
+        state.CiFailureFlow = CiFailureFlowState.None;
+        state.ActiveWaitingComment = null;
+        state.UnresolvedComments = [];
+        state.WaitingForReplyComments = [];
+        state.IgnoredCommentIds = [];
+        state.CurrentCommentIndex = 0;
+        state.InvestigationFindings = null;
+        state.SuggestedFix = null;
+        state.IssueType = null;
+        state.NeedsAdditionalApproval = false;
+        state.ApprovalCountAtMergeFailure = 0;
+        state.Approvals = [];
+        state.StaleApprovals = [];
+        state.FailedChecks = [];
+        state.HasMergeConflict = false;
+        state.Checks = new CheckRunCounts();
+    }
+
+    [Fact]
     public void WaitForApprover_EndToEnd_BlocksThenFiresOnNewApproval()
     {
         // 1. Start with approved + CI green

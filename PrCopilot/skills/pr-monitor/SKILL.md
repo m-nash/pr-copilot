@@ -109,12 +109,15 @@ Fallback table (only if `choice_map` is missing):
 | "Show me the failed job logs" | `show_logs` |
 | "Re-run failed jobs" | `rerun` |
 | "Re-run cancelled jobs" | `rerun_failed` |
+| "Run a new build" | `run_new` |
 | "Apply the suggested fix" / "Apply the recommendation" | `apply_fix` |
 | "Ignore and resume monitoring" | `ignore` |
 | "Resume monitoring" | `resume` |
+| "Stop monitoring" | `stop` |
 | "Merge the PR" | `merge` |
 | "Force merge (--admin)" | `merge_admin` |
 | "Wait for another approver" | `wait_for_approver` |
+| "Resolve the conflict (rebase)" | `rebase` |
 | "I'll handle it myself" / "I'll handle..." | `handle_myself` |
 | "Address next comment" | `continue` |
 | "Skip this comment" | `skip` |

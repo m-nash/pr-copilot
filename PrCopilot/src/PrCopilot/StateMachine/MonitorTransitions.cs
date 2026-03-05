@@ -104,6 +104,7 @@ public static class MonitorTransitions
         ["Explain and suggest what to do"] = "explain",
         ["Apply the recommendation"] = "apply_fix",
         ["I'll handle the comments myself"] = "handle_myself",
+        ["I'll handle them myself"] = "handle_myself",
         ["Skip this comment"] = "skip",
         ["Done — resume monitoring"] = "done",
         ["Address next comment"] = "continue",
