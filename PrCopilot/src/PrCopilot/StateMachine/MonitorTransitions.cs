@@ -772,7 +772,7 @@ public static class MonitorTransitions
         {
             Action = "ask_user",
             Question = $"[{timestamp}] ✅ PR #{state.PrNumber} is approved by {approvers} and CI is green! ({state.Checks.Passed}/{state.Checks.Total} passed)",
-            Choices = ["Merge the PR", "Resume monitoring", "I'll handle it myself"]
+            Choices = ["Merge the PR", "Wait for another approver", "Resume monitoring", "I'll handle it myself"]
         };
     }
 
