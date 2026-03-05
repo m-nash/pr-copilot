@@ -24,7 +24,7 @@ public static class UpdateService
     /// Checks for a newer release and installs it if available.
     /// Returns the new version tag if updated, or null if already up to date.
     /// </summary>
-    public static async Task<string?> CheckAndApplyUpdate(Action<string>? log = null)
+    public static async Task<string?> CheckAndApplyUpdate(Action<string>? log = null, bool force = false)
     {
         log ??= _ => { };
 
@@ -53,7 +53,7 @@ public static class UpdateService
         }
 
         // Skip auto-update for local dev builds to avoid overwriting uncommitted changes
-        if (currentVersion.Contains("-dev."))
+        if (!force && currentVersion.Contains("-dev."))
         {
             log($"Skipping update — running dev build ({currentVersion}).");
             return null;
