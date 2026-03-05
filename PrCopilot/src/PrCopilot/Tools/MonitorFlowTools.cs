@@ -34,6 +34,17 @@ public class MonitorFlowTools
     };
 
     /// <summary>
+    /// Serialize a MonitorAction, automatically attaching choice_map for ask_user actions.
+    /// Use this instead of calling JsonSerializer.Serialize directly.
+    /// </summary>
+    private static string SerializeAction(MonitorAction action)
+    {
+        if (action.Action == "ask_user")
+            MonitorTransitions.AttachChoiceMap(action);
+        return JsonSerializer.Serialize(action, _jsonOptions);
+    }
+
+    /// <summary>
     /// Write STOPPED lines to all active session logs so viewers close gracefully.
     /// Called from IHostApplicationLifetime.ApplicationStopping.
     /// </summary>
@@ -300,21 +311,21 @@ public class MonitorFlowTools
         {
             if (@event != "ready")
             {
-                return JsonSerializer.Serialize(new MonitorAction
+                return SerializeAction(new MonitorAction
                 {
                     Action = "stop",
                     Message = "When using monitorId='all', only event='ready' is supported. Use the specific PR monitorId for other events."
-                }, _jsonOptions);
+                });
             }
 
             if (_sessions.IsEmpty)
             {
                 lock (_multiMonitorLock) { _multiMonitorIds.Clear(); }
-                return JsonSerializer.Serialize(new MonitorAction
+                return SerializeAction(new MonitorAction
                 {
                     Action = "stop",
                     Message = "No active sessions to monitor. Call pr_monitor_start_all first."
-                }, _jsonOptions);
+                });
             }
 
             DebugLogger.Log("NextStep", $"Entering multi-PR poll loop ({_sessions.Count} sessions)");
@@ -324,11 +335,11 @@ public class MonitorFlowTools
             if (heartbeatSession == null)
             {
                 lock (_multiMonitorLock) { _multiMonitorIds.Clear(); }
-                return JsonSerializer.Serialize(new MonitorAction
+                return SerializeAction(new MonitorAction
                 {
                     Action = "stop",
                     Message = "No active sessions to monitor."
-                }, _jsonOptions);
+                });
             }
             // Start a standalone heartbeat for multi-PR mode that doesn't depend on any particular session.
             using var multiPrHeartbeat = new HeartbeatManager();
@@ -348,24 +359,24 @@ public class MonitorFlowTools
 
                 if (action.Action == "ask_user")
                 {
-                    action.Instructions = "MANDATORY: Call the ask_user tool with the EXACT question and choices above. Do NOT rewrite, rephrase, or add your own choices. Do NOT act on behalf of the user. Wait for the user's selection, then call pr_monitor_next_step with the monitorId from this response, event='user_chose' and choice=<mapped choice value>. After handling, call pr_monitor_next_step with monitorId='all' and event='ready' to resume monitoring all PRs.";
+                    action.Instructions = "MANDATORY: Call the ask_user tool with the EXACT question and choices above. Do NOT rewrite, rephrase, or add your own choices. Do NOT act on behalf of the user. Wait for the user's selection, then call pr_monitor_next_step with the monitorId from this response, event='user_chose' and choice set to the EXACT value from the choice_map for the selected option. After handling, call pr_monitor_next_step with monitorId='all' and event='ready' to resume monitoring all PRs.";
                 }
 
                 await WriteLogEntryAsync(
                     action.MonitorId != null && _sessions.TryGetValue(action.MonitorId, out var actionSession) ? actionSession.State : heartbeatSession.State,
                     action);
 
-                return JsonSerializer.Serialize(action, _jsonOptions);
+                return SerializeAction(action);
             }
             catch (Exception ex)
             {
                 DebugLogger.Error("NextStep", ex);
-                return JsonSerializer.Serialize(new MonitorAction
+                return SerializeAction(new MonitorAction
                 {
                     Action = "ask_user",
                     Question = $"Internal error during multi-PR monitoring: {ex.Message}. What would you like to do?",
                     Choices = ["Resume monitoring", "Stop monitoring"]
-                }, _jsonOptions);
+                });
             }
             finally
             {
@@ -376,11 +387,11 @@ public class MonitorFlowTools
         if (!_sessions.TryGetValue(monitorId, out var session))
         {
             DebugLogger.Log("NextStep", $"No session for {monitorId}");
-            return JsonSerializer.Serialize(new MonitorAction
+            return SerializeAction(new MonitorAction
             {
                 Action = "stop",
                 Message = $"No active session for {monitorId}. Call pr_monitor_start first."
-            }, _jsonOptions);
+            });
         }
 
         try
@@ -402,10 +413,12 @@ public class MonitorFlowTools
                 {
                     var triggerAction = MonitorTransitions.BuildWaitingCommentAction(state, comment);
                     if (triggerAction.Action == "ask_user")
-                        triggerAction.Instructions = "MANDATORY: Call the ask_user tool with the EXACT question and choices above. Do NOT rewrite, rephrase, or add your own choices. Do NOT act on behalf of the user. Wait for the user's selection, then call pr_monitor_next_step with event='user_chose' and choice=<mapped choice value>.";
+                    {
+                        triggerAction.Instructions = "MANDATORY: Call the ask_user tool with the EXACT question and choices above. Do NOT rewrite, rephrase, or add your own choices. Do NOT act on behalf of the user. Wait for the user's selection, then call pr_monitor_next_step with event='user_chose' and choice set to the EXACT value from the choice_map for the selected option.";
+                    }
                     await WriteLogEntryAsync(state, triggerAction);
                     DebugLogger.Log("NextStep", $"Returning trigger action: {triggerAction.Action}");
-                    return JsonSerializer.Serialize(triggerAction, _jsonOptions);
+                    return SerializeAction(triggerAction);
                 }
                 session.PendingTriggerContent = null;
             }
@@ -449,12 +462,12 @@ public class MonitorFlowTools
                     await WriteLogEntryAsync(state, action);
                     await PersistIgnoreFileAsync(state);
                     DebugLogger.Log("NextStep", "Multi-monitor active — redirecting to 'all' polling");
-                    return JsonSerializer.Serialize(new MonitorAction
+                    return SerializeAction(new MonitorAction
                     {
                         Action = "polling",
                         MonitorId = "all",
                         Message = "PR handled. Call pr_monitor_next_step with monitorId='all' and event='ready' to resume monitoring all PRs."
-                    }, _jsonOptions);
+                    });
                 }
 
                 // Cancel any existing poll loop from a previous tool call (e.g., user hit Esc then resumed)
@@ -473,7 +486,7 @@ public class MonitorFlowTools
                 if (action.Action == "stop" && !cancellationToken.IsCancellationRequested)
                 {
                     DebugLogger.Log("NextStep", "Poll replaced by new call — exiting silently");
-                    return JsonSerializer.Serialize(action, _jsonOptions);
+                    return SerializeAction(action);
                 }
             }
 
@@ -487,20 +500,20 @@ public class MonitorFlowTools
             // so the LLM cannot skip the ask_user step or rewrite the choices
             if (action.Action == "ask_user")
             {
-                action.Instructions = "MANDATORY: Call the ask_user tool with the EXACT question and choices above. Do NOT rewrite, rephrase, or add your own choices. Do NOT act on behalf of the user. Wait for the user's selection, then call pr_monitor_next_step with event='user_chose' and choice=<mapped choice value>.";
+                action.Instructions = "MANDATORY: Call the ask_user tool with the EXACT question and choices above. Do NOT rewrite, rephrase, or add your own choices. Do NOT act on behalf of the user. Wait for the user's selection, then call pr_monitor_next_step with event='user_chose' and choice set to the EXACT value from the choice_map for the selected option.";
             }
 
-            return JsonSerializer.Serialize(action, _jsonOptions);
+            return SerializeAction(action);
         }
         catch (Exception ex)
         {
             DebugLogger.Error("NextStep", ex);
-            return JsonSerializer.Serialize(new MonitorAction
+            return SerializeAction(new MonitorAction
             {
                 Action = "ask_user",
                 Question = $"Internal error: {ex.Message}. What would you like to do?",
                 Choices = ["Resume monitoring", "Stop monitoring"]
-            }, _jsonOptions);
+            });
         }
         finally
         {
@@ -530,11 +543,11 @@ public class MonitorFlowTools
             }
             _sessions.Clear();
             lock (_multiMonitorLock) { _multiMonitorIds.Clear(); }
-            return JsonSerializer.Serialize(new MonitorAction
+            return SerializeAction(new MonitorAction
             {
                 Action = "stop",
                 Message = $"Monitoring stopped for all {count} PR(s)."
-            }, _jsonOptions);
+            });
         }
 
         if (_sessions.TryRemove(monitorId, out var session))
@@ -542,18 +555,18 @@ public class MonitorFlowTools
             lock (_multiMonitorLock) { _multiMonitorIds.Remove(monitorId); }
             session.CancelPolling();
             session.Dispose();
-            return JsonSerializer.Serialize(new MonitorAction
+            return SerializeAction(new MonitorAction
             {
                 Action = "stop",
                 Message = $"Monitoring stopped for {monitorId}."
-            }, _jsonOptions);
+            });
         }
 
-        return JsonSerializer.Serialize(new MonitorAction
+        return SerializeAction(new MonitorAction
         {
             Action = "stop",
             Message = $"No active session for {monitorId}."
-        }, _jsonOptions);
+        });
     }
 
     /// <summary>

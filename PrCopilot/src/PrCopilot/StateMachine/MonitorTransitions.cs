@@ -81,6 +81,73 @@ public static class MonitorTransitions
     }
 
     /// <summary>
+    /// Maps every choice display text to the exact value the agent must pass back
+    /// in pr_monitor_next_step. Attached to ask_user actions so the LLM doesn't
+    /// need to look up SKILL.md for the mapping.
+    /// </summary>
+    private static readonly Dictionary<string, string> ChoiceValueMap = new()
+    {
+        // Terminal-level choices (ProcessUserChoice)
+        ["Merge the PR"] = "merge",
+        ["Force merge (--admin)"] = "merge_admin",
+        ["Wait for another approver"] = "wait_for_approver",
+        ["Resume monitoring"] = "resume",
+        ["Stop monitoring"] = "stop",
+        ["I'll handle it myself"] = "handle_myself",
+        ["Re-run cancelled jobs"] = "rerun_failed",
+        ["Resolve the conflict (rebase)"] = "rebase",
+
+        // Comment flow choices (ProcessCommentChoice)
+        ["Address all comments"] = "address_all",
+        ["Address a specific comment"] = "address_specific",
+        ["Address this comment"] = "address",
+        ["Explain and suggest what to do"] = "explain",
+        ["Apply the recommendation"] = "apply_fix",
+        ["I'll handle the comments myself"] = "handle_myself",
+        ["I'll handle them myself"] = "handle_myself",
+        ["Skip this comment"] = "skip",
+        ["Done — resume monitoring"] = "done",
+        ["Address next comment"] = "continue",
+        ["I'll handle the rest myself"] = "done",
+
+        // CI failure flow choices (ProcessCiFailureChoice)
+        ["Investigate the failures"] = "investigate",
+        ["Show me the failed job logs"] = "show_logs",
+        ["Re-run failed jobs"] = "rerun",
+        ["Apply the suggested fix"] = "apply_fix",
+        ["Ignore and resume monitoring"] = "ignore",
+        ["Run a new build"] = "run_new",
+
+        // Waiting-for-reply comment choices (ProcessWaitingCommentChoice)
+        ["Resolve this thread"] = "resolve",
+        ["Follow up with more context"] = "follow_up",
+        ["Reassess my response"] = "re_suggest",
+        ["Go back to monitoring"] = "go_back",
+    };
+
+    /// <summary>
+    /// Populates ChoiceMap on an ask_user action so the response includes
+    /// the exact choice values the agent should pass back.
+    /// </summary>
+    public static void AttachChoiceMap(MonitorAction action)
+    {
+        if (action.Choices == null || action.Choices.Count == 0)
+            return;
+
+        var map = new Dictionary<string, string>();
+        foreach (var choice in action.Choices)
+        {
+            if (ChoiceValueMap.TryGetValue(choice, out var value))
+                map[choice] = value;
+            else
+                DebugLogger.Log("StateMachine", $"WARNING: Choice \"{choice}\" has no entry in ChoiceValueMap — it will be missing from choice_map");
+        }
+
+        if (map.Count > 0)
+            action.ChoiceMap = map;
+    }
+
+    /// <summary>
     /// Called by the poll loop when PendingRerunWhenChecksComplete is set
     /// and all remaining checks have finished. Triggers the deferred rerun.
     /// </summary>
@@ -652,7 +719,7 @@ public static class MonitorTransitions
             if (state.SuggestedFix != null)
                 choices.Add("Apply the suggested fix");
             choices.Add("Ignore and resume monitoring");
-            choices.Add("Re-run the failed jobs");
+            choices.Add("Re-run failed jobs");
             choices.Add("I'll handle it myself");
         }
 

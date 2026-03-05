@@ -84,7 +84,20 @@ call pr_monitor_next_step(monitor_id, event, choice, data)
 
 ### Choice Mapping
 
-When the user selects a choice from `ask_user`, map their selection to the `choice` field:
+**IMPORTANT:** Every `ask_user` response includes a `choice_map` dictionary that maps each choice display text to its exact `choice` value. **Always use the `choice_map` from the response** — do NOT invent or abbreviate choice values.
+
+Example response:
+```json
+{
+  "action": "ask_user",
+  "question": "...",
+  "choices": ["Merge the PR", "Wait for another approver"],
+  "choice_map": {"Merge the PR": "merge", "Wait for another approver": "wait_for_approver"}
+}
+```
+When the user selects "Wait for another approver", look up `choice_map["Wait for another approver"]` → use `"wait_for_approver"` as the `choice` parameter.
+
+Fallback table (only if `choice_map` is missing):
 
 | User selection | choice value |
 |----------------|-------------|
@@ -94,13 +107,17 @@ When the user selects a choice from `ask_user`, map their selection to the `choi
 | "Explain and suggest what to do" | `explain` |
 | "Investigate the failures" | `investigate` |
 | "Show me the failed job logs" | `show_logs` |
-| "Re-run failed jobs" / "Re-run cancelled jobs" | `rerun` |
-| "Apply the suggested fix" | `apply_fix` |
+| "Re-run failed jobs" | `rerun` |
+| "Re-run cancelled jobs" | `rerun_failed` |
+| "Run a new build" | `run_new` |
+| "Apply the suggested fix" / "Apply the recommendation" | `apply_fix` |
 | "Ignore and resume monitoring" | `ignore` |
 | "Resume monitoring" | `resume` |
+| "Stop monitoring" | `stop` |
 | "Merge the PR" | `merge` |
 | "Force merge (--admin)" | `merge_admin` |
 | "Wait for another approver" | `wait_for_approver` |
+| "Resolve the conflict (rebase)" | `rebase` |
 | "I'll handle it myself" / "I'll handle..." | `handle_myself` |
 | "Address next comment" | `continue` |
 | "Skip this comment" | `skip` |
