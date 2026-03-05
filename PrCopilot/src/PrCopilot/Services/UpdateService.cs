@@ -52,6 +52,13 @@ public static class UpdateService
             return null;
         }
 
+        // Skip auto-update for local dev builds to avoid overwriting uncommitted changes
+        if (currentVersion.Contains("-dev."))
+        {
+            log($"Skipping update — running dev build ({currentVersion}).");
+            return null;
+        }
+
         log($"New version available: {tagName} (current: {currentVersion})");
 
         var rid = RuntimeInformation.RuntimeIdentifier;

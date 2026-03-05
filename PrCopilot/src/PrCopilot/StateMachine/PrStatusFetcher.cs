@@ -562,6 +562,7 @@ public static class PrStatusFetcher
             Arguments = arguments,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            RedirectStandardInput = true, // isolate child from parent's MCP stdin pipe
             UseShellExecute = false,
             CreateNoWindow = true
         };
@@ -577,15 +578,32 @@ public static class PrStatusFetcher
         }
 
         process.Start();
-        var output = await process.StandardOutput.ReadToEndAsync();
-        var error = await process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync();
+        process.StandardInput.Close(); // signal EOF so gh doesn't wait on stdin
 
-        if (process.ExitCode != 0)
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        try
         {
-            throw new InvalidOperationException($"gh CLI failed (exit {process.ExitCode}): {error}");
-        }
+            var outputTask = process.StandardOutput.ReadToEndAsync(cts.Token);
+            var errorTask = process.StandardError.ReadToEndAsync(cts.Token);
+            await Task.WhenAll(outputTask, errorTask);
+            await process.WaitForExitAsync(cts.Token);
 
-        return output.Trim();
+            var output = outputTask.Result;
+            var error = errorTask.Result;
+
+            if (process.ExitCode != 0)
+            {
+                throw new InvalidOperationException($"gh CLI failed (exit {process.ExitCode}): {error}");
+            }
+
+            return output.Trim();
+        }
+        catch (OperationCanceledException)
+        {
+            var label = arguments.Length > 60 ? arguments[..60] + "..." : arguments;
+            DebugLogger.Error("RunGhAsync", $"TIMEOUT after 30s: gh {label} (pid {process.Id}, exited={process.HasExited})");
+            try { process.Kill(); } catch { }
+            throw new TimeoutException($"gh CLI timed out after 30s: gh {label}");
+        }
     }
 }

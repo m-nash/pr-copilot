@@ -91,6 +91,7 @@ public static class GitHubCliExecutor
                 Arguments = arguments,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
+                RedirectStandardInput = true, // isolate child from parent's MCP stdin pipe
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
@@ -99,9 +100,26 @@ public static class GitHubCliExecutor
             if (process == null)
                 return (false, "Failed to start gh process");
 
-            var stdout = await process.StandardOutput.ReadToEndAsync();
-            var stderr = await process.StandardError.ReadToEndAsync();
-            await process.WaitForExitAsync();
+            process.StandardInput.Close(); // signal EOF so gh doesn't wait on stdin
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            var stdoutTask = process.StandardOutput.ReadToEndAsync(cts.Token);
+            var stderrTask = process.StandardError.ReadToEndAsync(cts.Token);
+
+            try
+            {
+                await Task.WhenAll(stdoutTask, stderrTask);
+                await process.WaitForExitAsync(cts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                DebugLogger.Error("GhCli", $"TIMEOUT after 30s: gh {arguments}");
+                try { process.Kill(); } catch { }
+                return (false, $"gh CLI timed out after 30s");
+            }
+
+            var stdout = stdoutTask.Result;
+            var stderr = stderrTask.Result;
 
             var success = process.ExitCode == 0;
             var output = success ? stdout.Trim() : $"{stderr.Trim()} {stdout.Trim()}".Trim();
