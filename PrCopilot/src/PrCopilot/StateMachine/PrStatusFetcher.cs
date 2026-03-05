@@ -35,10 +35,12 @@ public static class PrStatusFetcher
 
     /// <summary>
     /// Fetches the authenticated GitHub user's login name.
+    /// Uses the user's own gh CLI auth (keyring) by stripping any injected tokens
+    /// from the Copilot CLI host, which would otherwise authenticate as "Copilot".
     /// </summary>
     public static async Task<string> FetchCurrentUserAsync()
     {
-        var login = await RunGhAsync("api user --jq .login");
+        var login = await RunGhAsync("api user --jq .login", stripTokenEnv: true);
         return login.Trim();
     }
 
@@ -475,7 +477,7 @@ public static class PrStatusFetcher
         }
     }
 
-    private static async Task<string> RunGhAsync(string arguments)
+    private static async Task<string> RunGhAsync(string arguments, bool stripTokenEnv = false)
     {
         using var process = new Process();
         process.StartInfo = new ProcessStartInfo
@@ -487,6 +489,16 @@ public static class PrStatusFetcher
             UseShellExecute = false,
             CreateNoWindow = true
         };
+
+        if (stripTokenEnv)
+        {
+            // The Copilot CLI host injects GITHUB_TOKEN (from GITHUB_COPILOT_GITHUB_TOKEN)
+            // into MCP server child processes. This token authenticates as "Copilot" (the app),
+            // not the actual user. Strip these so `gh` falls back to the user's keyring auth.
+            var env = process.StartInfo.Environment;
+            env.Remove("GITHUB_TOKEN");
+            env.Remove("GH_TOKEN");
+        }
 
         process.Start();
         var output = await process.StandardOutput.ReadToEndAsync();
