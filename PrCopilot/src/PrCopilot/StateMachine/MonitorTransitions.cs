@@ -716,7 +716,7 @@ public static class MonitorTransitions
             if (state.SuggestedFix != null)
                 choices.Add("Apply the suggested fix");
             choices.Add("Ignore and resume monitoring");
-            choices.Add("Re-run the failed jobs");
+            choices.Add("Re-run failed jobs");
             choices.Add("I'll handle it myself");
         }
 
