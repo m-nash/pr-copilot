@@ -68,10 +68,16 @@ public class HeartbeatTests
     {
         var state = CreateState();
 
+        var before = DateTime.Now;
         var message = HeartbeatManager.BuildHeartbeatMessage(state);
+        var after = DateTime.Now;
 
-        var expected = DateTime.Now.ToString("h:mm:ss tt");
-        Assert.Contains(expected, message);
+        // Accept either the before or after timestamp to avoid flakiness at second boundaries
+        var beforeStr = before.ToString("h:mm:ss tt");
+        var afterStr = after.ToString("h:mm:ss tt");
+        Assert.True(
+            message.Contains(beforeStr) || message.Contains(afterStr),
+            $"Expected message to contain '{beforeStr}' or '{afterStr}', but was: {message}");
     }
 
     [Fact]
