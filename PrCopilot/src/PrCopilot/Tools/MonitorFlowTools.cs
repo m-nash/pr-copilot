@@ -611,11 +611,7 @@ public class MonitorFlowTools
 
                 var allComments = await PrStatusFetcher.FetchAndCleanUnresolvedCommentsAsync(state.Owner, state.Repo, state.PrNumber, state.PrAuthor);
 
-                // Prune stale ignored IDs — comments resolved on GitHub are no longer in allComments
-                var currentCommentIds = new HashSet<string>(allComments.Select(c => c.Id));
-                var pruned = state.IgnoredCommentIds.RemoveAll(id => !currentCommentIds.Contains(id));
-                if (pruned > 0)
-                    DebugLogger.Log("PollLoop", $"Pruned {pruned} stale ignored comment IDs (resolved on GitHub)");
+                PruneResolvedIgnoredComments(state, allComments, "PollLoop");
 
                 // Filter out ignored comments, then split by waiting-for-reply status
                 var nonIgnored = allComments
@@ -765,11 +761,7 @@ public class MonitorFlowTools
 
         var allComments = await PrStatusFetcher.FetchAndCleanUnresolvedCommentsAsync(state.Owner, state.Repo, state.PrNumber, state.PrAuthor);
 
-        // Prune stale ignored IDs — comments resolved on GitHub are no longer in allComments
-        var currentCommentIds = new HashSet<string>(allComments.Select(c => c.Id));
-        var pruned = state.IgnoredCommentIds.RemoveAll(id => !currentCommentIds.Contains(id));
-        if (pruned > 0)
-            DebugLogger.Log("PollRefresh", $"Pruned {pruned} stale ignored comment IDs (resolved on GitHub)");
+        PruneResolvedIgnoredComments(state, allComments, "PollRefresh");
 
         var nonIgnored = allComments
             .Where(c => !state.IgnoredCommentIds.Contains(c.Id))
@@ -1149,6 +1141,18 @@ public class MonitorFlowTools
         if (checks.Total == 0)
             return 30; // No checks yet — poll more frequently
         return 120; // All checks complete — poll every 2 minutes
+    }
+
+    /// <summary>
+    /// Remove ignored comment IDs that no longer appear in the current unresolved comments from GitHub.
+    /// This prevents stale CiPassedCommentsIgnored prompts when comments have been resolved.
+    /// </summary>
+    private static void PruneResolvedIgnoredComments(MonitorState state, List<CommentInfo> allComments, string logContext)
+    {
+        var currentCommentIds = new HashSet<string>(allComments.Select(c => c.Id));
+        var pruned = state.IgnoredCommentIds.RemoveAll(id => !currentCommentIds.Contains(id));
+        if (pruned > 0)
+            DebugLogger.Log(logContext, $"Pruned {pruned} stale ignored comment IDs (resolved on GitHub)");
     }
 
     private static string BuildStatusLine(MonitorState state)
