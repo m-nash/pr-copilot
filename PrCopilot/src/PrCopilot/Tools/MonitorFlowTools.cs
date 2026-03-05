@@ -6,6 +6,8 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using ModelContextProtocol;
+using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 using PrCopilot.Services;
 using PrCopilot.StateMachine;
@@ -277,9 +279,22 @@ public class MonitorFlowTools
         [Description("Event: ready, user_chose, comment_addressed, fix_applied, investigation_complete, push_completed, task_complete")] string @event,
         [Description("User's choice (for user_chose events)")] string? choice = null,
         [Description("Event data as JSON string (findings, suggested_fix, etc.)")] string? data = null,
-        IProgress<string>? progress = null,
+        McpServer server = null!,
+        RequestContext<CallToolRequestParams> context = null!,
         CancellationToken cancellationToken = default)
     {
+        // Debug: log what the client actually sent us
+        var progressToken = context?.Params?.ProgressToken;
+        DebugLogger.Log("NextStep", $"ProgressToken from client: {(progressToken.HasValue ? progressToken.Value.ToString() : "NONE")}");
+        if (context?.Params?.Meta != null)
+        {
+            DebugLogger.Log("NextStep", $"Meta keys: {string.Join(", ", context.Params.Meta.Select(kv => kv.Key))}");
+        }
+        else
+        {
+            DebugLogger.Log("NextStep", "Meta: null (client sent no _meta)");
+        }
+
         // Handle multi-PR monitoring: monitorId="all" enters combined poll loop
         if (monitorId == "all")
         {
@@ -316,26 +331,9 @@ public class MonitorFlowTools
                 }, _jsonOptions);
             }
             // Start a standalone heartbeat for multi-PR mode that doesn't depend on any particular session.
-            // This avoids the issue where removing the heartbeat session's PR kills the heartbeat.
-            using var heartbeatCts = new CancellationTokenSource();
-            var heartbeatCt = heartbeatCts.Token;
-            if (progress != null)
-            {
-                DebugLogger.Log("Heartbeat", "Starting multi-PR heartbeat");
-                _ = Task.Run(async () =>
-                {
-                    while (!heartbeatCt.IsCancellationRequested)
-                    {
-                        try
-                        {
-                            await Task.Delay(TimeSpan.FromSeconds(30), heartbeatCt);
-                            progress.Report($"Monitoring {_sessions.Count} PR(s)...");
-                        }
-                        catch (OperationCanceledException) { break; }
-                        catch { }
-                    }
-                }, heartbeatCt);
-            }
+            using var multiPrHeartbeat = new HeartbeatManager();
+            if (server != null)
+                multiPrHeartbeat.StartForMultiPr(server, () => _sessions.Count, progressToken);
 
             try
             {
@@ -371,7 +369,7 @@ public class MonitorFlowTools
             }
             finally
             {
-                heartbeatCts.Cancel();
+                multiPrHeartbeat.Stop();
             }
         }
 
@@ -391,7 +389,7 @@ public class MonitorFlowTools
             DebugLogger.Log("NextStep", $"Called: event={@event}, choice={choice ?? "null"}, state={state.CurrentState}");
 
             // Start session-level heartbeat to keep MCP client alive
-            session.StartHeartbeat(progress);
+            session.StartHeartbeat(server, progressToken);
             // Check for pending viewer action (captured by FileSystemWatcher even when not polling)
             if (session.PendingTriggerContent != null && session.PendingTriggerContent.StartsWith("ACTION|") &&
                 state.ActiveWaitingComment == null && @event != "user_chose")
@@ -613,6 +611,8 @@ public class MonitorFlowTools
 
                 var allComments = await PrStatusFetcher.FetchAndCleanUnresolvedCommentsAsync(state.Owner, state.Repo, state.PrNumber, state.PrAuthor);
 
+                PruneResolvedIgnoredComments(state, allComments, "PollLoop");
+
                 // Filter out ignored comments, then split by waiting-for-reply status
                 var nonIgnored = allComments
                     .Where(c => !state.IgnoredCommentIds.Contains(c.Id))
@@ -760,6 +760,8 @@ public class MonitorFlowTools
         state.StaleApprovals = reviewResult.StaleApprovals;
 
         var allComments = await PrStatusFetcher.FetchAndCleanUnresolvedCommentsAsync(state.Owner, state.Repo, state.PrNumber, state.PrAuthor);
+
+        PruneResolvedIgnoredComments(state, allComments, "PollRefresh");
 
         var nonIgnored = allComments
             .Where(c => !state.IgnoredCommentIds.Contains(c.Id))
@@ -1141,6 +1143,18 @@ public class MonitorFlowTools
         return 120; // All checks complete — poll every 2 minutes
     }
 
+    /// <summary>
+    /// Remove ignored comment IDs that no longer appear in the current unresolved comments from GitHub.
+    /// This prevents stale CiPassedCommentsIgnored prompts when comments have been resolved.
+    /// </summary>
+    private static void PruneResolvedIgnoredComments(MonitorState state, List<CommentInfo> allComments, string logContext)
+    {
+        var currentCommentIds = new HashSet<string>(allComments.Select(c => c.Id));
+        var pruned = state.IgnoredCommentIds.RemoveAll(id => !currentCommentIds.Contains(id));
+        if (pruned > 0)
+            DebugLogger.Log(logContext, $"Pruned {pruned} stale ignored comment IDs (resolved on GitHub)");
+    }
+
     private static string BuildStatusLine(MonitorState state)
     {
         var c = state.Checks;
@@ -1456,58 +1470,16 @@ internal class MonitorSession : IDisposable
     }
 
     // --- Session-level heartbeat for MCP keepalive ---
-    private CancellationTokenSource? _heartbeatCts;
+    private readonly HeartbeatManager _heartbeat = new();
 
-    /// <summary>
-    /// Start sending progress heartbeats every 30s. Keeps the MCP client connection alive
-    /// during long-running pr_monitor_next_step calls. Call once per tool invocation.
-    /// </summary>
-    public void StartHeartbeat(IProgress<string>? progress)
-    {
-        StopHeartbeat();
-        if (progress == null)
-        {
-            DebugLogger.Log("Heartbeat", "No progress token — heartbeat disabled");
-            return;
-        }
-        DebugLogger.Log("Heartbeat", "Starting 30s heartbeat");
-        _heartbeatCts = new CancellationTokenSource();
-        var ct = _heartbeatCts.Token;
-        _ = Task.Run(async () =>
-        {
-            while (!ct.IsCancellationRequested)
-            {
-                try
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(30), ct);
-                    var stateDesc = State.CurrentState switch
-                    {
-                        MonitorStateId.Polling => $"Polling PR #{State.PrNumber}... poll #{State.PollCount}",
-                        MonitorStateId.AwaitingUser => $"Waiting for user input on PR #{State.PrNumber}",
-                        MonitorStateId.ExecutingTask => $"Executing task on PR #{State.PrNumber}",
-                        _ => $"Monitoring PR #{State.PrNumber}"
-                    };
-                    progress.Report(stateDesc);
-                }
-                catch (OperationCanceledException) { break; }
-                catch { /* swallow unexpected errors in heartbeat */ }
-            }
-        }, ct);
-    }
+    public void StartHeartbeat(McpServer? server, ProgressToken? progressToken = null)
+        => _heartbeat.StartForPr(server, State, progressToken);
 
-    /// <summary>Stop the heartbeat timer.</summary>
-    public void StopHeartbeat()
-    {
-        if (_heartbeatCts != null)
-            DebugLogger.Log("Heartbeat", "Stopping heartbeat");
-        _heartbeatCts?.Cancel();
-        _heartbeatCts?.Dispose();
-        _heartbeatCts = null;
-    }
+    public void StopHeartbeat() => _heartbeat.Stop();
 
     public void Dispose()
     {
-        StopHeartbeat();
+        _heartbeat.Dispose();
         _triggerWatcher?.Dispose();
         _pollCts?.Dispose();
     }

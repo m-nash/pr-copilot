@@ -8,6 +8,8 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Console;
+using ModelContextProtocol.Protocol;
+using ModelContextProtocol.Server;
 using PrCopilot.Services;
 using PrCopilot.Tools;
 using PrCopilot.Viewer;
@@ -206,6 +208,13 @@ try
     builder.Services.AddMcpServer()
         .WithStdioServerTransport()
         .WithToolsFromAssembly();
+
+    // Declare logging capability so clients accept our notifications/message heartbeats
+    builder.Services.Configure<McpServerOptions>(options =>
+    {
+        options.Capabilities ??= new();
+        options.Capabilities.Logging ??= new();
+    });
 
     var app = builder.Build();
 
