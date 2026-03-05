@@ -138,6 +138,8 @@ public static class MonitorTransitions
         {
             if (ChoiceValueMap.TryGetValue(choice, out var value))
                 map[choice] = value;
+            else
+                DebugLogger.Log("StateMachine", $"WARNING: Choice \"{choice}\" has no entry in ChoiceValueMap — it will be missing from choice_map");
         }
 
         if (map.Count > 0)
