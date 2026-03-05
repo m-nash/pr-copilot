@@ -244,6 +244,31 @@ public class StateMachineTests
         Assert.Null(result);
     }
 
+    [Fact]
+    public void DetectTerminalState_CiPassedWithIgnoredComments_AllResolved_ReturnsNull()
+    {
+        var state = CreateState();
+        SetChecksAllGreen(state);
+        // After pruning, the ignored comments list is empty — no terminal state
+        state.IgnoredCommentIds = [];
+
+        var result = MonitorTransitions.DetectTerminalState(state, [], false);
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public void DetectTerminalState_CiPassedNoIgnoredComments_NoApproval_ReturnsNull()
+    {
+        var state = CreateState();
+        SetChecksAllGreen(state);
+        // CI green, no approvals, no ignored comments — keep monitoring
+
+        var result = MonitorTransitions.DetectTerminalState(state, [], false);
+
+        Assert.Null(result);
+    }
+
     #endregion
 
     #region BuildTerminalAction
