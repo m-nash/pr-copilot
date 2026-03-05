@@ -564,6 +564,7 @@ public class StateMachineTests
         state.FailedChecks = [];
         state.HasMergeConflict = false;
         state.Checks = new CheckRunCounts();
+        state.RequiresConversationResolution = false;
     }
 
     [Fact]
@@ -595,7 +596,7 @@ public class StateMachineTests
         Assert.Equal(TerminalStateType.ApprovedCiGreen, terminal);
 
         // 5. The new terminal action should still include "Wait for another approver"
-        var newAction = MonitorTransitions.BuildTerminalAction(state, terminal.Value);
+        var newAction = MonitorTransitions.BuildTerminalAction(state, terminal!.Value);
         Assert.NotNull(newAction.Choices);
         Assert.Contains("Wait for another approver", newAction.Choices);
     }
@@ -1287,6 +1288,80 @@ public class StateMachineTests
     {
         // copilot-pull-request-reviewer[bot] should NOT be filtered as a CI bot
         Assert.False(PrStatusFetcher.IsCiBot("copilot-pull-request-reviewer[bot]"));
+    }
+
+    #endregion
+
+    #region ApprovalAutoResolve
+
+    [Fact]
+    public void BuildApprovedAction_NoConversationRequirement_OffersMerge()
+    {
+        var state = CreateState();
+        SetChecksAllGreen(state);
+        state.Approvals = [new ReviewInfo { Author = "alice", State = "APPROVED" }];
+        state.RequiresConversationResolution = false;
+        state.WaitingForReplyComments = [MakeComment("w1", "bob")];
+
+        var action = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.ApprovedCiGreen);
+
+        Assert.NotNull(action.Choices);
+        Assert.Contains("Merge the PR", action.Choices);
+    }
+
+    [Fact]
+    public void BuildApprovedAction_ConversationRequired_NoWaiting_NoWarning()
+    {
+        var state = CreateState();
+        SetChecksAllGreen(state);
+        state.Approvals = [new ReviewInfo { Author = "alice", State = "APPROVED" }];
+        state.RequiresConversationResolution = true;
+        state.WaitingForReplyComments = [];
+
+        var action = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.ApprovedCiGreen);
+
+        Assert.NotNull(action.Choices);
+        Assert.Contains("Merge the PR", action.Choices);
+        Assert.DoesNotContain("unresolved conversation", action.Question!);
+    }
+
+    [Fact]
+    public void BuildApprovedAction_ConversationRequired_WithWaiting_WarnsButOffersMerge()
+    {
+        var state = CreateState();
+        SetChecksAllGreen(state);
+        state.Approvals = [new ReviewInfo { Author = "alice", State = "APPROVED" }];
+        state.RequiresConversationResolution = true;
+        state.WaitingForReplyComments = [MakeComment("w1", "bob")];
+
+        var action = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.ApprovedCiGreen);
+
+        Assert.NotNull(action.Choices);
+        Assert.Contains("Merge the PR", action.Choices);
+        Assert.Contains("bob", action.Question!);
+        Assert.Contains("unresolved conversation", action.Question!);
+    }
+
+    [Fact]
+    public void BuildApprovedAction_ConversationRequired_MultipleWaitingAuthors_ShowsAllAuthors()
+    {
+        var state = CreateState();
+        SetChecksAllGreen(state);
+        state.Approvals = [new ReviewInfo { Author = "alice", State = "APPROVED" }];
+        state.RequiresConversationResolution = true;
+        state.WaitingForReplyComments =
+        [
+            MakeComment("w1", "bob"),
+            MakeComment("w2", "carol"),
+            MakeComment("w3", "bob") // duplicate author
+        ];
+
+        var action = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.ApprovedCiGreen);
+
+        Assert.NotNull(action.Question);
+        Assert.Contains("3 unresolved conversation(s)", action.Question);
+        Assert.Contains("bob", action.Question);
+        Assert.Contains("carol", action.Question);
     }
 
     #endregion
