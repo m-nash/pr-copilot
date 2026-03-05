@@ -359,6 +359,85 @@ public class StateMachineTests
     }
 
     [Fact]
+    public void BuildTerminalAction_ApprovedCiGreen_IncludesWaitForAnotherApprover()
+    {
+        var state = CreateState();
+        SetChecksAllGreen(state);
+        state.Approvals = [new ReviewInfo { Author = "alice", State = "APPROVED" }];
+
+        var action = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.ApprovedCiGreen);
+
+        Assert.NotNull(action.Choices);
+        Assert.Contains("Wait for another approver", action.Choices);
+    }
+
+    [Fact]
+    public void WaitForApprover_EndToEnd_BlocksThenFiresOnNewApproval()
+    {
+        // 1. Start with approved + CI green
+        var state = CreateState();
+        SetChecksAllGreen(state);
+        state.Approvals = [new ReviewInfo { Author = "alice", State = "APPROVED" }];
+
+        // Terminal state fires
+        var terminal = MonitorTransitions.DetectTerminalState(state, [], false);
+        Assert.Equal(TerminalStateType.ApprovedCiGreen, terminal);
+
+        // 2. User chooses "wait_for_approver"
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "wait_for_approver", null);
+        Assert.Equal("polling", action.Action);
+        Assert.True(state.NeedsAdditionalApproval);
+        Assert.Equal(1, state.ApprovalCountAtMergeFailure);
+
+        // 3. Same approver still there — should NOT trigger terminal state
+        terminal = MonitorTransitions.DetectTerminalState(state, [], false);
+        Assert.Null(terminal);
+
+        // 4. New approver arrives — should trigger terminal state again
+        state.Approvals.Add(new ReviewInfo { Author = "bob", State = "APPROVED" });
+        terminal = MonitorTransitions.DetectTerminalState(state, [], false);
+        Assert.Equal(TerminalStateType.ApprovedCiGreen, terminal);
+
+        // 5. The new terminal action should still include "Wait for another approver"
+        var newAction = MonitorTransitions.BuildTerminalAction(state, terminal.Value);
+        Assert.NotNull(newAction.Choices);
+        Assert.Contains("Wait for another approver", newAction.Choices);
+    }
+
+    [Fact]
+    public void WaitForApprover_MultipleRounds_CountIncrements()
+    {
+        var state = CreateState();
+        SetChecksAllGreen(state);
+        state.Approvals = [new ReviewInfo { Author = "alice", State = "APPROVED" }];
+
+        // Round 1: wait for approver
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        MonitorTransitions.ProcessEvent(state, "user_chose", "wait_for_approver", null);
+        Assert.Equal(1, state.ApprovalCountAtMergeFailure);
+
+        // Bob approves → fires again
+        state.Approvals.Add(new ReviewInfo { Author = "bob", State = "APPROVED" });
+        var terminal = MonitorTransitions.DetectTerminalState(state, [], false);
+        Assert.Equal(TerminalStateType.ApprovedCiGreen, terminal);
+
+        // Round 2: wait for yet another approver
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        MonitorTransitions.ProcessEvent(state, "user_chose", "wait_for_approver", null);
+        Assert.Equal(2, state.ApprovalCountAtMergeFailure);
+
+        // Same 2 approvers — blocked
+        terminal = MonitorTransitions.DetectTerminalState(state, [], false);
+        Assert.Null(terminal);
+
+        // Charlie approves → fires again
+        state.Approvals.Add(new ReviewInfo { Author = "charlie", State = "APPROVED" });
+        terminal = MonitorTransitions.DetectTerminalState(state, [], false);
+        Assert.Equal(TerminalStateType.ApprovedCiGreen, terminal);
+    }
+
+    [Fact]
     public void BuildTerminalAction_CiCancelled_ReturnsAskUser()
     {
         var state = CreateState();
