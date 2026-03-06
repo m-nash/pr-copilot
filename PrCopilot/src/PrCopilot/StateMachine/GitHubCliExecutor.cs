@@ -95,6 +95,8 @@ public static class GitHubCliExecutor
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
+            psi.Environment["GH_PROMPT_DISABLED"] = "1";
+            psi.Environment["GH_NO_UPDATE_NOTIFIER"] = "1";
 
             using var process = Process.Start(psi);
             if (process == null)
