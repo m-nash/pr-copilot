@@ -100,7 +100,9 @@ public class MonitorFlowTools
 
         // Fetch all PR data
         var prInfo = await PrStatusFetcher.FetchPrInfoAsync(owner, repo, prNumber);
+
         var checkResult = await PrStatusFetcher.FetchCheckRunsAsync(owner, repo, prInfo.HeadSha);
+
         var reviewResult = await PrStatusFetcher.FetchReviewsAsync(owner, repo, prNumber, prInfo.HeadSha);
         var allComments = await PrStatusFetcher.FetchAndCleanUnresolvedCommentsAsync(owner, repo, prNumber, prInfo.Author, reviewResult.Approvals);
 

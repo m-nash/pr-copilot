@@ -39,7 +39,7 @@ if (args.Contains("--version"))
 if (args.Contains("--update"))
 {
     Console.WriteLine("🔍 Checking for latest release...");
-    var tag = await UpdateService.CheckAndApplyUpdate(msg => Console.WriteLine($"  {msg}"));
+    var tag = await UpdateService.CheckAndApplyUpdate(msg => Console.WriteLine($"  {msg}"), force: true);
     if (tag != null)
     {
         // Run --setup with the new binary to re-register
