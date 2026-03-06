@@ -566,6 +566,8 @@ public static class PrStatusFetcher
             UseShellExecute = false,
             CreateNoWindow = true
         };
+        process.StartInfo.Environment["GH_PROMPT_DISABLED"] = "1";
+        process.StartInfo.Environment["GH_NO_UPDATE_NOTIFIER"] = "1";
 
         if (stripTokenEnv)
         {
