@@ -107,18 +107,6 @@ public class StateMachineTests
     }
 
     [Fact]
-    public void DetectTerminalState_CiPassedWithIgnoredComments_ReturnsCiPassedCommentsIgnored()
-    {
-        var state = CreateState();
-        SetChecksAllGreen(state);
-        state.IgnoredCommentIds = ["c1", "c2"];
-
-        var result = MonitorTransitions.DetectTerminalState(state, [], false);
-
-        Assert.Equal(TerminalStateType.CiPassedCommentsIgnored, result);
-    }
-
-    [Fact]
     public void DetectTerminalState_ChecksInProgress_ReturnsNull()
     {
         var state = CreateState();
@@ -245,19 +233,6 @@ public class StateMachineTests
     }
 
     [Fact]
-    public void DetectTerminalState_CiPassedWithIgnoredComments_AllResolved_ReturnsNull()
-    {
-        var state = CreateState();
-        SetChecksAllGreen(state);
-        // After pruning, the ignored comments list is empty — no terminal state
-        state.IgnoredCommentIds = [];
-
-        var result = MonitorTransitions.DetectTerminalState(state, [], false);
-
-        Assert.Null(result);
-    }
-
-    [Fact]
     public void DetectTerminalState_CiPassedNoIgnoredComments_NoApproval_ReturnsNull()
     {
         var state = CreateState();
@@ -267,6 +242,69 @@ public class StateMachineTests
         var result = MonitorTransitions.DetectTerminalState(state, [], false);
 
         Assert.Null(result);
+    }
+
+    [Fact]
+    public void DetectTerminalState_ReviewerRepliedToWaitingComment_ReturnsReviewerReplied()
+    {
+        var state = CreateState();
+        SetChecksAllGreen(state);
+        var comment = MakeComment("c1");
+        comment.IsWaitingForReply = false; // was waiting, reviewer replied
+        comment.LastReplyAuthor = "reviewer1";
+        state.WaitingForReplyComments = [comment];
+        state.PrAuthor = "pr-author";
+        state.CurrentUser = "current-user";
+
+        var result = MonitorTransitions.DetectTerminalState(state, [], false);
+
+        Assert.Equal(TerminalStateType.ReviewerReplied, result);
+        Assert.Equal(comment, state.RepliedComment);
+    }
+
+    [Fact]
+    public void DetectTerminalState_PrAuthorRepliedToWaitingComment_DoesNotTrigger()
+    {
+        var state = CreateState();
+        SetChecksAllGreen(state);
+        var comment = MakeComment("c1");
+        comment.IsWaitingForReply = false;
+        comment.LastReplyAuthor = "pr-author"; // PR author replied, not a reviewer
+        state.WaitingForReplyComments = [comment];
+        state.PrAuthor = "pr-author";
+        state.CurrentUser = "current-user";
+
+        var result = MonitorTransitions.DetectTerminalState(state, [], false);
+
+        Assert.NotEqual(TerminalStateType.ReviewerReplied, result);
+    }
+
+    [Fact]
+    public void DetectTerminalState_CommentStillWaitingForReply_DoesNotTrigger()
+    {
+        var state = CreateState();
+        SetChecksAllGreen(state);
+        var comment = MakeComment("c1");
+        comment.IsWaitingForReply = true; // still waiting
+        comment.LastReplyAuthor = "current-user";
+        state.WaitingForReplyComments = [comment];
+        state.PrAuthor = "pr-author";
+        state.CurrentUser = "current-user";
+
+        var result = MonitorTransitions.DetectTerminalState(state, [], false);
+
+        Assert.NotEqual(TerminalStateType.ReviewerReplied, result);
+    }
+
+    [Fact]
+    public void BuildReviewerRepliedAction_NullRepliedComment_FallsBackToPolling()
+    {
+        var state = CreateState();
+        state.RepliedComment = null;
+
+        var action = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.ReviewerReplied);
+
+        Assert.Equal("polling", action.Action);
     }
 
     #endregion
@@ -372,20 +410,21 @@ public class StateMachineTests
     }
 
     [Fact]
-    public void BuildTerminalAction_ApprovedCiGreen_HasChoiceMap()
+    public void BuildTerminalAction_ApprovedCiGreen_ChoicesHaveMappedValues()
     {
         var state = CreateState();
         SetChecksAllGreen(state);
         state.Approvals = [new ReviewInfo { Author = "alice", State = "APPROVED" }];
 
         var action = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.ApprovedCiGreen);
-        MonitorTransitions.AttachChoiceMap(action);
 
-        Assert.NotNull(action.ChoiceMap);
-        Assert.Equal("merge", action.ChoiceMap["Merge the PR"]);
-        Assert.Equal("wait_for_approver", action.ChoiceMap["Wait for another approver"]);
-        Assert.Equal("resume", action.ChoiceMap["Resume monitoring"]);
-        Assert.Equal("handle_myself", action.ChoiceMap["I'll handle it myself"]);
+        Assert.NotNull(action.Choices);
+        // Verify each choice has an entry in ChoiceValueMap (used by ElicitationHelper)
+        Assert.True(MonitorTransitions.ChoiceValueMap.ContainsKey("Merge the PR"));
+        Assert.Equal("merge", MonitorTransitions.ChoiceValueMap["Merge the PR"]);
+        Assert.Equal("wait_for_approver", MonitorTransitions.ChoiceValueMap["Wait for another approver"]);
+        Assert.Equal("resume", MonitorTransitions.ChoiceValueMap["Resume monitoring"]);
+        Assert.Equal("handle_myself", MonitorTransitions.ChoiceValueMap["I'll handle it myself"]);
     }
 
     [Theory]
@@ -393,8 +432,7 @@ public class StateMachineTests
     [InlineData(TerminalStateType.CiFailure)]
     [InlineData(TerminalStateType.CiCancelled)]
     [InlineData(TerminalStateType.MergeConflict)]
-    [InlineData(TerminalStateType.CiPassedCommentsIgnored)]
-    public void BuildTerminalAction_AllStates_ChoiceMapCoversAllChoices(TerminalStateType terminal)
+    public void BuildTerminalAction_AllStates_AllChoicesExistInValueMap(TerminalStateType terminal)
     {
         var state = CreateState();
         SetChecksAllGreen(state);
@@ -407,12 +445,10 @@ public class StateMachineTests
             state.Checks = new CheckRunCounts { Passed = 5, Cancelled = 1, Total = 6 };
 
         var action = MonitorTransitions.BuildTerminalAction(state, terminal);
-        MonitorTransitions.AttachChoiceMap(action);
 
         Assert.NotNull(action.Choices);
-        Assert.NotNull(action.ChoiceMap);
         foreach (var choice in action.Choices)
-            Assert.True(action.ChoiceMap.ContainsKey(choice), $"Choice '{choice}' missing from ChoiceMap");
+            Assert.True(MonitorTransitions.ChoiceValueMap.ContainsKey(choice), $"Choice '{choice}' missing from ChoiceValueMap");
     }
 
     [Fact]
@@ -436,6 +472,10 @@ public class StateMachineTests
             {
                 state.UnresolvedComments = [MakeComment()];
                 continue; // NewComment triggers comment flow, covered below
+            }
+            if (terminal == TerminalStateType.ReviewerReplied)
+            {
+                state.RepliedComment = MakeComment();
             }
 
             var action = MonitorTransitions.BuildTerminalAction(state, terminal);
@@ -500,6 +540,14 @@ public class StateMachineTests
         var waitingAction = MonitorTransitions.BuildWaitingCommentAction(state, waitingComment);
         if (waitingAction.Choices != null) allChoices.UnionWith(waitingAction.Choices);
 
+        // Manual handling flow (handle_myself → "let me know when done")
+        ResetState(state);
+        state.UnresolvedComments = [MakeComment()];
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        var manualAction = MonitorTransitions.ProcessEvent(state, "user_chose", "handle_myself", null);
+        if (manualAction.Choices != null) allChoices.UnionWith(manualAction.Choices);
+
         // CI failure flow
         ResetState(state);
         SetChecksFailed(state);
@@ -536,10 +584,8 @@ public class StateMachineTests
         // Now assert every collected choice exists in ChoiceValueMap
         foreach (var choice in allChoices)
         {
-            var action = new MonitorAction { Action = "ask_user", Choices = [choice] };
-            MonitorTransitions.AttachChoiceMap(action);
             Assert.True(
-                action.ChoiceMap != null && action.ChoiceMap.ContainsKey(choice),
+                MonitorTransitions.ChoiceValueMap.ContainsKey(choice),
                 $"Choice '{choice}' is produced by an action builder but has no entry in ChoiceValueMap");
         }
     }
@@ -552,7 +598,6 @@ public class StateMachineTests
         state.ActiveWaitingComment = null;
         state.UnresolvedComments = [];
         state.WaitingForReplyComments = [];
-        state.IgnoredCommentIds = [];
         state.CurrentCommentIndex = 0;
         state.InvestigationFindings = null;
         state.SuggestedFix = null;
@@ -645,20 +690,6 @@ public class StateMachineTests
         Assert.Contains("cancelled", action.Question, StringComparison.OrdinalIgnoreCase);
     }
 
-    [Fact]
-    public void BuildTerminalAction_CiPassedIgnored_ReturnsAskUser()
-    {
-        var state = CreateState();
-        SetChecksAllGreen(state);
-        state.IgnoredCommentIds = ["c1"];
-
-        var action = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.CiPassedCommentsIgnored);
-
-        Assert.Equal("ask_user", action.Action);
-        Assert.Contains("CI is green", action.Question);
-        Assert.Contains("ignored", action.Question, StringComparison.OrdinalIgnoreCase);
-    }
-
     #endregion
 
     #region ProcessEvent — Core Transitions
@@ -707,7 +738,7 @@ public class StateMachineTests
     #region ProcessEvent — Comment Flow Choices
 
     [Fact]
-    public void ProcessEvent_UserChoice_HandleMyself_CommentFlow_StopsMonitoring()
+    public void ProcessEvent_UserChoice_HandleMyself_CommentFlow_WaitsForManualHandling()
     {
         var state = CreateState();
         state.CurrentState = MonitorStateId.AwaitingUser;
@@ -716,9 +747,84 @@ public class StateMachineTests
 
         var action = MonitorTransitions.ProcessEvent(state, "user_chose", "handle_myself", null);
 
-        // handle_myself in comment flow ignores comments and resumes polling
+        // handle_myself transitions to WaitingForManualHandling — no ignoring
+        Assert.Equal("ask_user", action.Action);
+        Assert.Equal(CommentFlowState.WaitingForManualHandling, state.CommentFlow);
+        Assert.NotNull(action.Choices);
+        Assert.Contains("Done, continue monitoring", action.Choices);
+        Assert.Contains("Stop monitoring", action.Choices);
+    }
+
+    [Fact]
+    public void ProcessEvent_UserChoice_HandleMyself_MultiComment_WaitsForManualHandling()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.CommentFlow = CommentFlowState.MultiCommentPrompt;
+        state.UnresolvedComments = [MakeComment("c1"), MakeComment("c2"), MakeComment("c3")];
+
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "handle_myself", null);
+
+        // Multi-comment handle_myself also waits — no ignoring
+        Assert.Equal("ask_user", action.Action);
+        Assert.Equal(CommentFlowState.WaitingForManualHandling, state.CommentFlow);
+    }
+
+    [Fact]
+    public void ProcessEvent_UserChoice_DoneHandling_ResumesPolling()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.CommentFlow = CommentFlowState.WaitingForManualHandling;
+        state.UnresolvedComments = [MakeComment()];
+
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "done_handling", null);
+
         Assert.Equal("polling", action.Action);
-        Assert.Contains("c1", state.IgnoredCommentIds);
+    }
+
+    [Fact]
+    public void ProcessEvent_UserChoice_StopFromManualHandling_StopsMonitoring()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.CommentFlow = CommentFlowState.WaitingForManualHandling;
+
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "stop", null);
+
+        Assert.Equal("stop", action.Action);
+    }
+
+    [Fact]
+    public void ProcessEvent_CommentAddressed_FromExecutingTask_AdvancesCommentFlow()
+    {
+        // Freeform Path B: agent executed custom instruction, calls comment_addressed
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.UnresolvedComments = [MakeComment("c1"), MakeComment("c2")];
+        state.CurrentCommentIndex = 0;
+
+        var action = MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
+
+        // Should advance comment flow (resolve thread or show remaining)
+        Assert.NotEqual("stop", action.Action);
+    }
+
+    [Fact]
+    public void ProcessEvent_UserChose_FromExecutingTask_FreeformPathA()
+    {
+        // Freeform Path A: agent mapped freeform text back to a choice
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.UnresolvedComments = [MakeComment()];
+
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "address", null);
+
+        // Should process the choice normally (begin addressing the comment)
+        Assert.Equal("execute", action.Action);
+        Assert.Equal(MonitorStateId.ExecutingTask, state.CurrentState);
     }
 
     [Fact]
@@ -781,6 +887,100 @@ public class StateMachineTests
         Assert.Equal("execute", action.Action);
         Assert.Equal("explain_comment", action.Task);
         Assert.Equal(MonitorStateId.ExecutingTask, state.CurrentState);
+    }
+
+    [Fact]
+    public void ProcessEvent_ExplainAll_BeginsExplainFlow()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.CommentFlow = CommentFlowState.MultiCommentPrompt;
+        state.UnresolvedComments = [MakeComment("c1"), MakeComment("c2", "reviewer2", "src/Other.cs")];
+
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "explain_all", null);
+
+        Assert.Equal("execute", action.Action);
+        Assert.Equal("explain_comment", action.Task);
+        Assert.Equal(CommentFlowState.ExplainAllIterating, state.CommentFlow);
+        Assert.Equal(0, state.CurrentCommentIndex);
+    }
+
+    [Fact]
+    public void ProcessEvent_ExplainAll_TaskComplete_ShowsPerCommentChoices()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.ExplainAllIterating;
+        state.PendingExplainResult = true;
+        state.UnresolvedComments = [MakeComment("c1"), MakeComment("c2", "reviewer2", "src/Other.cs")];
+        state.CurrentCommentIndex = 0;
+
+        var action = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        Assert.Equal("ask_user", action.Action);
+        Assert.Contains("Apply the recommendation", action.Choices!);
+        Assert.Contains("Skip this comment", action.Choices!);
+        Assert.Contains("Done — resume monitoring", action.Choices!);
+    }
+
+    [Fact]
+    public void ProcessEvent_ExplainAll_Skip_AdvancesToNextComment()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.CommentFlow = CommentFlowState.ExplainAllIterating;
+        state.UnresolvedComments = [MakeComment("c1"), MakeComment("c2", "reviewer2", "src/Other.cs")];
+        state.CurrentCommentIndex = 0;
+
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "skip", null);
+
+        // Should emit explain for the second comment
+        Assert.Equal("execute", action.Action);
+        Assert.Equal("explain_comment", action.Task);
+        Assert.Equal(1, state.CurrentCommentIndex);
+    }
+
+    [Fact]
+    public void ProcessEvent_ExplainAll_SkipLastComment_ResumesPolling()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.CommentFlow = CommentFlowState.ExplainAllIterating;
+        state.UnresolvedComments = [MakeComment("c1")];
+        state.CurrentCommentIndex = 0;
+
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "skip", null);
+
+        Assert.Equal("polling", action.Action);
+    }
+
+    [Fact]
+    public void ProcessEvent_ExplainAll_ApplyFix_BeginsAddressComment()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.CommentFlow = CommentFlowState.ExplainAllIterating;
+        state.UnresolvedComments = [MakeComment("c1"), MakeComment("c2", "reviewer2", "src/Other.cs")];
+        state.CurrentCommentIndex = 0;
+
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "apply_fix", null);
+
+        Assert.Equal("execute", action.Action);
+        Assert.Equal("address_comment", action.Task);
+        Assert.Equal(MonitorStateId.ExecutingTask, state.CurrentState);
+    }
+
+    [Fact]
+    public void ProcessEvent_ExplainAll_Done_ResumesPolling()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.CommentFlow = CommentFlowState.ExplainAllIterating;
+        state.UnresolvedComments = [MakeComment("c1"), MakeComment("c2", "reviewer2", "src/Other.cs")];
+
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "done", null);
+
+        Assert.Equal("polling", action.Action);
     }
 
     #endregion

@@ -25,16 +25,26 @@ public static class MonitorTransitions
         if (newComments.Count > 0)
             return TerminalStateType.NewComment;
 
-        // 2. Merge conflict
+        // 2. Reviewer replied to a comment we previously replied to
+        // Check if any waiting-for-reply comment got a reviewer response (LastReplyAuthor changed)
+        var repliedComment = state.WaitingForReplyComments.FirstOrDefault(c =>
+            !c.IsWaitingForReply && !string.IsNullOrEmpty(c.LastReplyAuthor) && c.LastReplyAuthor != state.PrAuthor && c.LastReplyAuthor != state.CurrentUser);
+        if (repliedComment != null)
+        {
+            state.RepliedComment = repliedComment;
+            return TerminalStateType.ReviewerReplied;
+        }
+
+        // 3. Merge conflict
         if (hasMergeConflict)
             return TerminalStateType.MergeConflict;
 
-        // 3. CI failure (checked BEFORE approved — failures can never be masked)
+        // 4. CI failure (checked BEFORE approved — failures can never be masked)
         //    But suppress if we're already waiting to rerun after remaining checks finish
         if (state.Checks.Failed > 0 && !state.PendingRerunWhenChecksComplete)
             return TerminalStateType.CiFailure;
 
-        // 4. CI cancelled
+        // 5. CI cancelled
         if (state.Checks.Cancelled > 0)
             return TerminalStateType.CiCancelled;
 
@@ -43,17 +53,13 @@ public static class MonitorTransitions
         if (!allComplete)
             return null;
 
-        // 5. Approved + CI green (but skip if we need more approvals than we have)
+        // 6. Approved + CI green (but skip if we need more approvals than we have)
         if (state.Approvals.Count > 0 && state.Checks.Failed == 0)
         {
             if (state.NeedsAdditionalApproval && state.Approvals.Count <= state.ApprovalCountAtMergeFailure)
                 return null; // Don't re-trigger until we get more approvals
             return TerminalStateType.ApprovedCiGreen;
         }
-
-        // 6. CI passed, all comments previously ignored
-        if (state.Checks.Failed == 0 && state.IgnoredCommentIds.Count > 0)
-            return TerminalStateType.CiPassedCommentsIgnored;
 
         return null;
     }
@@ -71,21 +77,21 @@ public static class MonitorTransitions
         return terminal switch
         {
             TerminalStateType.NewComment => BuildCommentAction(state, timestamp),
+            TerminalStateType.ReviewerReplied => BuildReviewerRepliedAction(state, timestamp),
             TerminalStateType.MergeConflict => BuildMergeConflictAction(state, timestamp),
             TerminalStateType.CiFailure => BuildCiFailureAction(state, timestamp),
             TerminalStateType.CiCancelled => BuildCiCancelledAction(state, timestamp),
             TerminalStateType.ApprovedCiGreen => BuildApprovedAction(state, timestamp),
-            TerminalStateType.CiPassedCommentsIgnored => BuildCiPassedIgnoredAction(state, timestamp),
             _ => new MonitorAction { Action = "stop", Message = "Unknown terminal state" }
         };
     }
 
     /// <summary>
     /// Maps every choice display text to the exact value the agent must pass back
-    /// in pr_monitor_next_step. Attached to ask_user actions so the LLM doesn't
-    /// need to look up SKILL.md for the mapping.
+    /// in pr_monitor_next_step. Used by elicitation to build enum schemas and
+    /// as fallback for choice_map in legacy ask_user flow.
     /// </summary>
-    private static readonly Dictionary<string, string> ChoiceValueMap = new()
+    internal static readonly Dictionary<string, string> ChoiceValueMap = new()
     {
         // Terminal-level choices (ProcessUserChoice)
         ["Merge the PR"] = "merge",
@@ -99,6 +105,7 @@ public static class MonitorTransitions
 
         // Comment flow choices (ProcessCommentChoice)
         ["Address all comments"] = "address_all",
+        ["Explain each one by one"] = "explain_all",
         ["Address a specific comment"] = "address_specific",
         ["Address this comment"] = "address",
         ["Explain and suggest what to do"] = "explain",
@@ -110,42 +117,19 @@ public static class MonitorTransitions
         ["Address next comment"] = "continue",
         ["I'll handle the rest myself"] = "done",
 
+        // Manual handling flow choices
+        ["Done, continue monitoring"] = "done_handling",
+
         // CI failure flow choices (ProcessCiFailureChoice)
         ["Investigate the failures"] = "investigate",
-        ["Show me the failed job logs"] = "show_logs",
         ["Re-run failed jobs"] = "rerun",
-        ["Apply the suggested fix"] = "apply_fix",
-        ["Ignore and resume monitoring"] = "ignore",
+        ["Apply the recommendation"] = "apply_fix",
         ["Run a new build"] = "run_new",
 
         // Waiting-for-reply comment choices (ProcessWaitingCommentChoice)
         ["Resolve this thread"] = "resolve",
-        ["Follow up with more context"] = "follow_up",
-        ["Reassess my response"] = "re_suggest",
         ["Go back to monitoring"] = "go_back",
     };
-
-    /// <summary>
-    /// Populates ChoiceMap on an ask_user action so the response includes
-    /// the exact choice values the agent should pass back.
-    /// </summary>
-    public static void AttachChoiceMap(MonitorAction action)
-    {
-        if (action.Choices == null || action.Choices.Count == 0)
-            return;
-
-        var map = new Dictionary<string, string>();
-        foreach (var choice in action.Choices)
-        {
-            if (ChoiceValueMap.TryGetValue(choice, out var value))
-                map[choice] = value;
-            else
-                DebugLogger.Log("StateMachine", $"WARNING: Choice \"{choice}\" has no entry in ChoiceValueMap — it will be missing from choice_map");
-        }
-
-        if (map.Count > 0)
-            action.ChoiceMap = map;
-    }
 
     /// <summary>
     /// Called by the poll loop when PendingRerunWhenChecksComplete is set
@@ -172,6 +156,9 @@ public static class MonitorTransitions
 
             // User made a choice
             (MonitorStateId.AwaitingUser, "user_chose") => ProcessUserChoice(state, choice, data),
+
+            // Freeform Path A: agent mapped freeform text back to a choice
+            (MonitorStateId.ExecutingTask, "user_chose") => ProcessUserChoice(state, choice, data),
 
             // LLM finished addressing a comment
             (MonitorStateId.ExecutingTask, "comment_addressed") => ProcessCommentAddressed(state, data),
@@ -209,7 +196,28 @@ public static class MonitorTransitions
             return AdvanceAfterCommentAddressed(state);
         }
 
-        // If we were in a comment flow (e.g. explain_comment), return to the comment prompt
+        // Explain-all flow: after explaining, show per-comment choices
+        if (state.CommentFlow == CommentFlowState.ExplainAllIterating &&
+            state.PendingExplainResult &&
+            state.CurrentCommentIndex < state.UnresolvedComments.Count)
+        {
+            state.PendingExplainResult = false;
+            var c = state.UnresolvedComments[state.CurrentCommentIndex];
+            state.CurrentState = MonitorStateId.AwaitingUser;
+            return new MonitorAction
+            {
+                Action = "ask_user",
+                Question = $"Comment ({state.CurrentCommentIndex + 1}/{state.UnresolvedComments.Count}) from {c.Author} on {c.FilePath}:{c.Line}: \"{Truncate(c.Body, 200)}\"",
+                Choices = ["Apply the recommendation", "Skip this comment", "Done — resume monitoring"],
+                Context = c
+            };
+        }
+
+        // Explain-all flow: task_complete after freeform action (not an explain) — advance to next
+        if (state.CommentFlow == CommentFlowState.ExplainAllIterating)
+            return AdvanceExplainAll(state);
+
+        // Single comment flow: after explain, show post-explain choices
         if (state.CommentFlow == CommentFlowState.SingleCommentPrompt &&
             state.CurrentCommentIndex < state.UnresolvedComments.Count)
         {
@@ -294,7 +302,6 @@ public static class MonitorTransitions
         return choice switch
         {
             "investigate" => BeginInvestigation(state),
-            "show_logs" => BuildShowLogsAction(state),
             "rerun_failed" => BuildRerunAction(state),
             "handle_myself" => StopMonitoring(state),
             "resume" => TransitionToPolling(state),
@@ -311,6 +318,31 @@ public static class MonitorTransitions
     }
 
     #region Comment Flow
+
+    private static MonitorAction BuildReviewerRepliedAction(MonitorState state, string timestamp)
+    {
+        if (state.RepliedComment is null)
+            return TransitionToPolling(state);
+
+        var comment = state.RepliedComment;
+        // Route directly to SingleCommentPrompt — same choices as a new comment.
+        // Overwrites UnresolvedComments with just this comment; other unresolved comments
+        // will be re-discovered on the next poll after this one is handled.
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.UnresolvedComments = [comment];
+        state.CurrentCommentIndex = 0;
+
+        // Remove from waiting list since we're handling the reply now
+        state.WaitingForReplyComments.RemoveAll(c => c.Id == comment.Id);
+
+        return new MonitorAction
+        {
+            Action = "ask_user",
+            Question = $"[{timestamp}] 💬 {comment.LastReplyAuthor} replied to your comment on {comment.FilePath}:{comment.Line}: \"{Truncate(comment.Body, 100)}\"",
+            Choices = ["Address this comment", "Explain and suggest what to do", "I'll handle it myself"],
+            Context = comment
+        };
+    }
 
     private static MonitorAction BuildCommentAction(MonitorState state, string timestamp)
     {
@@ -335,7 +367,7 @@ public static class MonitorTransitions
         {
             Action = "ask_user",
             Question = $"[{timestamp}] 💬 PR #{state.PrNumber} has {comments.Count} unresolved comments: {summary}",
-            Choices = ["Address all comments", "Address a specific comment", "I'll handle the comments myself"],
+            Choices = ["Address all comments", "Explain each one by one", "Address a specific comment", "I'll handle the comments myself"],
             Context = comments
         };
     }
@@ -345,9 +377,12 @@ public static class MonitorTransitions
         return (state.CommentFlow, choice) switch
         {
             (CommentFlowState.MultiCommentPrompt, "address_all") => BeginAddressAll(state),
+            (CommentFlowState.MultiCommentPrompt, "explain_all") => BeginExplainAll(state),
             (CommentFlowState.MultiCommentPrompt, "address_specific") => BeginPickComment(state),
-            (CommentFlowState.MultiCommentPrompt or CommentFlowState.SingleCommentPrompt, "handle_myself") =>
-                IgnoreAllCommentsAndResume(state),
+            (CommentFlowState.MultiCommentPrompt, "handle_myself") =>
+                WaitForManualHandling(state),
+            (CommentFlowState.SingleCommentPrompt, "handle_myself") =>
+                WaitForManualHandling(state),
 
             (CommentFlowState.SingleCommentPrompt, "address") => BeginAddressCurrentComment(state),
             (CommentFlowState.SingleCommentPrompt, "apply_fix") => BeginAddressCurrentComment(state),
@@ -358,9 +393,17 @@ public static class MonitorTransitions
             (CommentFlowState.AddressAllIterating, "skip") => SkipAndAdvanceComment(state),
             (CommentFlowState.AddressAllIterating, "done") => TransitionToPolling(state),
 
+            // Per-comment confirmation in explain-all flow
+            (CommentFlowState.ExplainAllIterating, "apply_fix") => BeginAddressCurrentComment(state),
+            (CommentFlowState.ExplainAllIterating, "skip") => AdvanceExplainAll(state),
+            (CommentFlowState.ExplainAllIterating, "done") => TransitionToPolling(state),
+
             (CommentFlowState.PickComment, _) => HandlePickedComment(state, choice),
             (CommentFlowState.PickRemaining, "continue") => ContinueToNextComment(state),
             (CommentFlowState.PickRemaining, "done") => TransitionToPolling(state),
+
+            (CommentFlowState.WaitingForManualHandling, "done_handling") => TransitionToPolling(state),
+            (CommentFlowState.WaitingForManualHandling, "stop") => StopMonitoring(state),
 
             _ => TransitionToPolling(state)
         };
@@ -400,6 +443,35 @@ public static class MonitorTransitions
         return TransitionToPolling(state);
     }
 
+    private static MonitorAction BeginExplainAll(MonitorState state)
+    {
+        state.CommentFlow = CommentFlowState.ExplainAllIterating;
+        state.CurrentCommentIndex = 0;
+        return EmitExplainForCurrentComment(state);
+    }
+
+    private static MonitorAction EmitExplainForCurrentComment(MonitorState state)
+    {
+        var c = state.UnresolvedComments[state.CurrentCommentIndex];
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.PendingExplainResult = true;
+        return new MonitorAction
+        {
+            Action = "execute",
+            Task = "explain_comment",
+            Instructions = $"Read and explain this review comment ({state.CurrentCommentIndex + 1}/{state.UnresolvedComments.Count}). Recommend whether to implement the change or push back. ONLY analyze THIS SPECIFIC comment — do NOT address, reply to, or fix any other comments. DO NOT make any code changes, DO NOT commit, DO NOT push, DO NOT reply to the comment thread — ONLY explain and recommend. Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{c.Body}\". URL: {c.Url}. After explaining, call pr_monitor_next_step with event=task_complete.",
+            Context = c
+        };
+    }
+
+    private static MonitorAction AdvanceExplainAll(MonitorState state)
+    {
+        state.CurrentCommentIndex++;
+        if (state.CurrentCommentIndex < state.UnresolvedComments.Count)
+            return EmitExplainForCurrentComment(state);
+        return TransitionToPolling(state);
+    }
+
     private static MonitorAction BeginPickComment(MonitorState state)
     {
         state.CommentFlow = CommentFlowState.PickComment;
@@ -420,7 +492,7 @@ public static class MonitorTransitions
     private static MonitorAction HandlePickedComment(MonitorState state, string? choice)
     {
         if (choice == "handle_myself")
-            return IgnoreAllCommentsAndResume(state);
+            return WaitForManualHandling(state);
 
         // Parse the comment index from "1. author: ..."
         if (int.TryParse(choice?.Split('.').FirstOrDefault(), out int idx) && idx > 0 && idx <= state.UnresolvedComments.Count)
@@ -455,7 +527,7 @@ public static class MonitorTransitions
         {
             Action = "execute",
             Task = "explain_comment",
-            Instructions = $"Read and explain this review comment. Recommend whether to implement the change or push back. ONLY analyze THIS SPECIFIC comment — do NOT address, reply to, or fix any other comments. Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{c.Body}\". URL: {c.Url}. After explaining, call pr_monitor_next_step with event=task_complete.",
+            Instructions = $"Read and explain this review comment. Recommend whether to implement the change or push back. ONLY analyze THIS SPECIFIC comment — do NOT address, reply to, or fix any other comments. DO NOT make any code changes, DO NOT commit, DO NOT push, DO NOT reply to the comment thread — ONLY explain and recommend. Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{c.Body}\". URL: {c.Url}. After explaining, call pr_monitor_next_step with event=task_complete.",
             Context = c
         };
     }
@@ -474,7 +546,7 @@ public static class MonitorTransitions
         {
             Action = "execute",
             Task = "address_comment",
-            Instructions = $"Read the comment, implement the fix. ONLY address THIS SPECIFIC comment — do NOT address, reply to, or fix any other comments. STOP and present your changes to the user for review before committing — use ask_user to show what you changed and ask for approval. Only commit/push after the user approves (honor user's custom instructions for git workflow). After pushing, reply in the thread, then call pr_monitor_next_step with event=comment_addressed. Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{c.Body}\". URL: {c.Url}.{CopilotFooter(state)}",
+            Instructions = $"Read the comment, implement the fix. ONLY address THIS SPECIFIC comment — do NOT address, reply to, or fix any other comments. STOP and present your changes to the user for review before committing — use ask_user to show what you changed and ask for approval. Only commit/push after the user approves (honor user's custom instructions for git workflow). After pushing, reply in the thread with what was changed and link the commit (use `git rev-parse HEAD` to get the SHA, then format as {state.Owner}/{state.Repo}@SHA), then call pr_monitor_next_step with event=comment_addressed. Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{c.Body}\". URL: {c.Url}.{CopilotFooter(state)}",
             Context = c
         };
     }
@@ -517,6 +589,10 @@ public static class MonitorTransitions
             return TransitionToPolling(state);
         }
 
+        // Explain-all flow: after addressing a comment, advance to explain the next one
+        if (state.CommentFlow == CommentFlowState.ExplainAllIterating)
+            return AdvanceExplainAll(state);
+
         // Single comment addressed — check for remaining
         state.CommentFlow = CommentFlowState.PickRemaining;
         var remaining = state.UnresolvedComments
@@ -536,15 +612,16 @@ public static class MonitorTransitions
         };
     }
 
-    private static MonitorAction IgnoreAllCommentsAndResume(MonitorState state)
+    private static MonitorAction WaitForManualHandling(MonitorState state)
     {
-        // Add all current unresolved comment IDs to the ignore list
-        foreach (var c in state.UnresolvedComments)
+        state.CommentFlow = CommentFlowState.WaitingForManualHandling;
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        return new MonitorAction
         {
-            if (!state.IgnoredCommentIds.Contains(c.Id))
-                state.IgnoredCommentIds.Add(c.Id);
-        }
-        return TransitionToPolling(state);
+            Action = "ask_user",
+            Question = "Let me know when you're done handling the comment(s).",
+            Choices = ["Done, continue monitoring", "Stop monitoring"]
+        };
     }
 
     private static MonitorAction ContinueToNextComment(MonitorState state)
@@ -585,7 +662,7 @@ public static class MonitorTransitions
         {
             Action = "ask_user",
             Question = $"[{timestamp}] ⏳ Waiting comment from {comment.Author} on {comment.FilePath}:{comment.Line}: \"{Truncate(comment.Body, 150)}\" — You replied, ball is in reviewer's court.",
-            Choices = ["Resolve this thread", "Follow up with more context", "Reassess my response", "Go back to monitoring"],
+            Choices = ["Resolve this thread", "Go back to monitoring"],
             Context = comment
         };
     }
@@ -597,8 +674,6 @@ public static class MonitorTransitions
         var result = choice switch
         {
             "resolve" => BuildResolveThreadAction(state, comment),
-            "follow_up" => BuildFollowUpAction(state, comment),
-            "re_suggest" => BuildReSuggestAction(state, comment),
             "go_back" or "resume" => ClearWaitingAndResume(state),
             _ => ClearWaitingAndResume(state)
         };
@@ -614,30 +689,6 @@ public static class MonitorTransitions
             Action = "auto_execute",
             Task = "resolve_thread",
             Message = $"Resolving thread {comment.Id}...",
-            Context = comment
-        };
-    }
-
-    private static MonitorAction BuildFollowUpAction(MonitorState state, CommentInfo comment)
-    {
-        state.CurrentState = MonitorStateId.ExecutingTask;
-        return new MonitorAction
-        {
-            Action = "execute",
-            Task = "follow_up_comment",
-            Instructions = $"Read the full thread context and write a follow-up reply to move the conversation forward. ONLY address THIS SPECIFIC comment thread — do NOT reply to or modify any other threads. STOP and present your draft reply to the user for approval before posting. Comment from {comment.Author} on {comment.FilePath}:{comment.Line}: \"{comment.Body}\". URL: {comment.Url}. After posting, call pr_monitor_next_step with event=task_complete.{CopilotFooter(state)}",
-            Context = comment
-        };
-    }
-
-    private static MonitorAction BuildReSuggestAction(MonitorState state, CommentInfo comment)
-    {
-        state.CurrentState = MonitorStateId.ExecutingTask;
-        return new MonitorAction
-        {
-            Action = "execute",
-            Task = "re_suggest_change",
-            Instructions = $"Read the full thread context including the reviewer's original comment and your previous reply. ONLY analyze THIS SPECIFIC comment thread — do NOT address, reply to, or modify any other threads. Critically reassess whether the reviewer has a valid point that you dismissed too quickly. Consider: should you actually implement the change? Is your previous reply defensible? Be honest and self-critical. Present your reassessment to the user with a recommendation: either implement the change, revise your reply, or confirm the current reply is correct. STOP and present your analysis to the user before taking any action. Comment from {comment.Author} on {comment.FilePath}:{comment.Line}: \"{comment.Body}\". URL: {comment.Url}. After the user decides, call pr_monitor_next_step with event=task_complete.{CopilotFooter(state)}",
             Context = comment
         };
     }
@@ -661,7 +712,7 @@ public static class MonitorTransitions
         {
             Action = "ask_user",
             Question = $"[{timestamp}] ❌ PR #{state.PrNumber} has CI failures. Failed: {failedNames}. {c.Passed}/{c.Total} passed, {c.Failed} failed.",
-            Choices = ["Investigate the failures", "Show me the failed job logs", "Re-run failed jobs", "I'll handle it myself"],
+            Choices = ["Investigate the failures", "Re-run failed jobs", "I'll handle it myself"],
             Context = new { state.FailedChecks, state.Checks }
         };
     }
@@ -671,12 +722,10 @@ public static class MonitorTransitions
         return (state.CiFailureFlow, choice) switch
         {
             (CiFailureFlowState.CiFailurePrompt, "investigate") => BeginInvestigation(state),
-            (CiFailureFlowState.CiFailurePrompt, "show_logs") => BuildShowLogsAction(state),
             (CiFailureFlowState.CiFailurePrompt, "rerun") => BuildRerunAction(state),
             (CiFailureFlowState.CiFailurePrompt, "handle_myself") => StopMonitoring(state),
 
             (CiFailureFlowState.InvestigationResults, "apply_fix") => BeginApplyFix(state),
-            (CiFailureFlowState.InvestigationResults, "ignore") => TransitionToPolling(state),
             (CiFailureFlowState.InvestigationResults, "rerun") => BuildRerunAction(state),
             (CiFailureFlowState.InvestigationResults, "run_new") => BuildRunNewAction(state),
             (CiFailureFlowState.InvestigationResults, "handle_myself") => StopMonitoring(state),
@@ -694,9 +743,10 @@ public static class MonitorTransitions
             Action = "execute",
             Task = "investigate_ci_failure",
             Instructions = "Fetch logs for the failed jobs, analyze root cause, then call pr_monitor_next_step with event=investigation_complete and data containing:\n" +
-                "- data.findings: your analysis of what went wrong\n" +
+                "- data.findings: your analysis of what went wrong (include links to the relevant log pages you found)\n" +
                 "- data.suggested_fix: (optional) a suggested code fix if applicable\n" +
-                "- data.issue_type: set to \"duplicate_artifact\" if the failure is due to artifacts already existing from a previous run attempt, otherwise set to \"code\" for code/test failures or \"unknown\"",
+                "- data.issue_type: set to \"duplicate_artifact\" if the failure is due to artifacts already existing from a previous run attempt, otherwise set to \"code\" for code/test failures or \"unknown\"\n" +
+                "IMPORTANT: Ignoring the failure is NEVER an option — even if you think the failure is infrastructure-related, you must suggest a resolution (rerun, code fix, config change, etc.).",
             Context = new { state.FailedChecks }
         };
     }
@@ -717,8 +767,7 @@ public static class MonitorTransitions
         else
         {
             if (state.SuggestedFix != null)
-                choices.Add("Apply the suggested fix");
-            choices.Add("Ignore and resume monitoring");
+                choices.Add("Apply the recommendation");
             choices.Add("Re-run failed jobs");
             choices.Add("I'll handle it myself");
         }
@@ -741,18 +790,6 @@ public static class MonitorTransitions
             Task = "apply_fix",
             Instructions = $"Apply the suggested fix: {state.SuggestedFix}. STOP and present your changes to the user for review before committing — use ask_user to show what you changed and ask for approval. Only commit/push after the user approves (honor user's custom instructions for git workflow). Then call pr_monitor_next_step with event=push_completed.",
             Context = new { state.SuggestedFix, state.FailedChecks }
-        };
-    }
-
-    private static MonitorAction BuildShowLogsAction(MonitorState state)
-    {
-        state.CurrentState = MonitorStateId.ExecutingTask;
-        return new MonitorAction
-        {
-            Action = "execute",
-            Task = "show_logs",
-            Instructions = "Fetch and display the failed job logs for the user to review. Then call pr_monitor_next_step with event=task_complete.",
-            Context = new { state.FailedChecks }
         };
     }
 
@@ -852,16 +889,6 @@ public static class MonitorTransitions
         };
     }
 
-    private static MonitorAction BuildCiPassedIgnoredAction(MonitorState state, string timestamp)
-    {
-        return new MonitorAction
-        {
-            Action = "ask_user",
-            Question = $"[{timestamp}] 🟢 PR #{state.PrNumber} CI is green ({state.Checks.Passed}/{state.Checks.Total} passed). Previously ignored comments are still unresolved.",
-            Choices = ["Resume monitoring", "I'll handle it myself"]
-        };
-    }
-
     private static MonitorAction BuildMergeAction(MonitorState state)
     {
         DebugLogger.Log("StateMachine", $"Auto-merging PR #{state.PrNumber}");
@@ -910,6 +937,6 @@ public static class MonitorTransitions
     /// <summary>
     /// Footer instruction for AI-generated comment replies so reviewers know it's bot-assisted.
     /// </summary>
-    private static string CopilotFooter(MonitorState state) =>
+    internal static string CopilotFooter(MonitorState state) =>
         $" IMPORTANT: Append this footer to the END of every comment reply you post (after a blank line and ---): '\\n---\\n🤖 {state.CurrentUser}-copilot'";
 }

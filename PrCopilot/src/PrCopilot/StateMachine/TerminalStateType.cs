@@ -11,6 +11,9 @@ public enum TerminalStateType
     /// <summary>New unresolved review comment (highest priority).</summary>
     NewComment,
 
+    /// <summary>A reviewer replied to a comment we previously replied to.</summary>
+    ReviewerReplied,
+
     /// <summary>Merge conflict detected.</summary>
     MergeConflict,
 
@@ -21,8 +24,5 @@ public enum TerminalStateType
     CiCancelled,
 
     /// <summary>PR is approved and CI is green (only if no failures/cancellations).</summary>
-    ApprovedCiGreen,
-
-    /// <summary>CI passed but all comments were previously ignored.</summary>
-    CiPassedCommentsIgnored
+    ApprovedCiGreen
 }

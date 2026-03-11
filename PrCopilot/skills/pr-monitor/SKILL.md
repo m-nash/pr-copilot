@@ -22,20 +22,22 @@ The state machine decides what to do. You are a thin executor. Call the tools an
 
 This skill uses a **state machine architecture**: the `pr-copilot` MCP server manages all state flow deterministically in C#. The main agent is a thin executor — it calls one tool in a loop and does whatever it's told.
 
-**The agent NEVER makes state flow decisions.** The C# state machine handles: what to ask the user, which comment to address next, when to poll, when to stop. The agent handles what it's good at: understanding code, implementing fixes, writing replies, analyzing logs.
+**The agent NEVER makes state flow decisions.** The C# state machine handles: what to ask the user (via MCP elicitation — directly to the client, bypassing the LLM), which comment to address next, when to poll, when to stop. The agent handles what it's good at: understanding code, implementing fixes, writing replies, analyzing logs.
 
 ## How It Works
 
 ```
 1. Call pr_monitor_start → get monitor_id (viewer auto-launches)
-2. Call pr_monitor_next_step(event="ready") → may block for hours (polling) or return instantly
+2. Call pr_monitor_next_step(event="ready") → may block for hours (polling + user interaction)
 3. Response tells you exactly what to do:
-   - action: "ask_user" → call ask_user with the provided question/choices
    - action: "execute" → do the task described in instructions
    - action: "stop" → monitoring is done
-4. After each action, call pr_monitor_next_step with the result
+   - action: "merged" → PR was merged
+4. After executing a task, call pr_monitor_next_step with the completion event
 5. Repeat forever
 ```
+
+**Note:** User interaction (choices, questions) is handled inside the tool call via MCP elicitation. The server presents choices directly to the client — the agent never sees or relays user choices. This means `pr_monitor_next_step` may block for extended periods while polling AND while waiting for user input.
 
 ## Starting or Resuming Monitoring
 
@@ -60,74 +62,41 @@ When triggered:
 After calling `pr_monitor_start`, the agent enters an infinite loop:
 
 ```
-call pr_monitor_next_step(monitor_id, event, choice, data)
-  → if action == "ask_user": call ask_user with the question/choices
-       → then call pr_monitor_next_step(monitor_id, event="user_chose", choice=<user's choice>)
+call pr_monitor_next_step(monitor_id, event, data)
   → if action == "execute": do the work described in instructions
        → then call pr_monitor_next_step(monitor_id, event=<completion event>, data=<results>)
   → if action == "stop": monitoring is done, tell the user
   → if action == "merged": PR was merged — display "🟣 PR merged" and stop (do NOT call pr_monitor_next_step again)
 ```
 
-**Important:** `pr_monitor_next_step` may **block for minutes or hours** when the state machine is in polling mode (zero tokens burned — identical to the old `wait_for_terminal_state`). When a terminal state is detected, it returns with the next instruction. During active flows (addressing comments, investigating failures), it returns instantly.
+**Important:** `pr_monitor_next_step` may **block for minutes or hours** when the state machine is in polling mode or waiting for user input via elicitation (zero tokens burned). When a terminal state is detected and the user makes a choice, the tool returns with the next instruction. During active flows (addressing comments, investigating failures), it returns instantly.
 
 ### Event Types
 
 | Event | When to send | Additional fields |
 |-------|-------------|-------------------|
 | `ready` | After `pr_monitor_start`, or after resuming | — |
-| `user_chose` | User made a choice from ask_user | `choice`: the user's selection |
 | `comment_addressed` | Finished addressing a review comment | — |
 | `investigation_complete` | Finished analyzing CI failures | `data`: JSON with `findings` and optional `suggested_fix` |
 | `push_completed` | Committed and pushed a fix | — |
 | `task_complete` | Finished any other execute task | — |
+| `user_chose` | Used by freeform interpretation when text maps to a choice | `choice`: mapped value |
 
-### Choice Mapping
+## Freeform Text Input
 
-**IMPORTANT:** Every `ask_user` response includes a `choice_map` dictionary that maps each choice display text to its exact `choice` value. **Always use the `choice_map` from the response** — do NOT invent or abbreviate choice values.
+When a terminal state is detected, the user sees both enum choices and a text input field. If the user types freeform text instead of picking a choice, the agent receives:
 
-Example response:
 ```json
 {
-  "action": "ask_user",
-  "question": "...",
-  "choices": ["Merge the PR", "Wait for another approver"],
-  "choice_map": {"Merge the PR": "merge", "Wait for another approver": "wait_for_approver"}
+  "action": "execute",
+  "task": "interpret_freeform",
+  "instructions": "The user typed: '...'. The original question was: '...'. The available choices were: [...]."
 }
 ```
-When the user selects "Wait for another approver", look up `choice_map["Wait for another approver"]` → use `"wait_for_approver"` as the `choice` parameter.
 
-Fallback table (only if `choice_map` is missing):
-
-| User selection | choice value |
-|----------------|-------------|
-| "Address all comments" | `address_all` |
-| "Address a specific comment" | `address_specific` |
-| "Address this comment" | `address` |
-| "Explain and suggest what to do" | `explain` |
-| "Investigate the failures" | `investigate` |
-| "Show me the failed job logs" | `show_logs` |
-| "Re-run failed jobs" | `rerun` |
-| "Re-run cancelled jobs" | `rerun_failed` |
-| "Run a new build" | `run_new` |
-| "Apply the suggested fix" / "Apply the recommendation" | `apply_fix` |
-| "Ignore and resume monitoring" | `ignore` |
-| "Resume monitoring" | `resume` |
-| "Stop monitoring" | `stop` |
-| "Merge the PR" | `merge` |
-| "Force merge (--admin)" | `merge_admin` |
-| "Wait for another approver" | `wait_for_approver` |
-| "Resolve the conflict (rebase)" | `rebase` |
-| "I'll handle it myself" / "I'll handle..." | `handle_myself` |
-| "Address next comment" | `continue` |
-| "Skip this comment" | `skip` |
-| "Done — resume monitoring" | `done` |
-| "I'll handle the rest myself" | `done` |
-| "Resolve this thread" | `resolve` |
-| "Follow up with more context" | `follow_up` |
-| "Reassess my response" | `re_suggest` |
-| "Go back to monitoring" | `go_back` |
-| Numbered comment selection (e.g., "1. author...") | The full text of the choice |
+**How to handle `interpret_freeform`:**
+1. If the text cleanly maps to ONE of the available choices with no extra instructions, tell the user "I'm interpreting this as [choice text]" and call `pr_monitor_next_step` with `event='user_chose'` and `choice=<mapped_value>`.
+2. If the text is a custom instruction (or has extra instructions beyond a choice), execute the user's request directly, then call `pr_monitor_next_step` with `event='task_complete'` so the state machine re-discovers the PR state.
 
 ## Monitor All My PRs
 
@@ -144,19 +113,17 @@ When the user says "monitor all my PRs", "watch all my PRs", or similar:
    ```
    Returns a list of initialized PRs with their `monitor_id`s, titles, and URLs. Each PR gets its own viewer window.
 
-3. **Enter the multi-PR loop**: Call `pr_monitor_next_step(monitorId="all", event="ready")` — this blocks until any PR has a terminal state.
+3. **Enter the multi-PR loop**: Call `pr_monitor_next_step(monitorId="all", event="ready")` — this blocks until any PR has a terminal state and the user makes a choice via elicitation.
 
-4. **Handle terminal states**: The response includes a `monitorId` field identifying which PR needs attention. Handle it using the specific monitorId:
+4. **Handle the response**: The response includes a `monitorId` field identifying which PR needs attention:
    ```
-   → if action == "ask_user": call ask_user, then:
-     pr_monitor_next_step(monitorId=<specific_monitor_id>, event="user_chose", choice=<choice>)
-   → if action == "execute": do the work, then:
+   → if action == "execute": do the work using the specific monitorId, then:
      pr_monitor_next_step(monitorId=<specific_monitor_id>, event=<completion_event>, data=<results>)
    → if action == "merged": display merge notification
    → if action == "stop": all PRs done
    ```
 
-5. **Resume multi-PR monitoring**: After handling a terminal state, the specific PR's response will include `monitorId="all"` with a message to resume. Call:
+5. **Resume multi-PR monitoring**: After handling a terminal state, call:
    ```
    pr_monitor_next_step(monitorId="all", event="ready")
    ```
@@ -227,12 +194,21 @@ When replying to review comments on the PR (via `gh api .../replies`), always us
 
 ---
 
+## Commit Linking in Replies
+
+When replying to a review comment after making a code change, **always link the commit** that addressed the feedback. This gives the reviewer a direct link to verify the fix.
+
+**How:** After pushing, run `git rev-parse HEAD` to get the SHA, then reference it as `owner/repo@SHA` in your reply. GitHub auto-links this to the commit.
+
+**Example reply:** "Added the null check — Azure/azure-sdk-for-net@abc1234"
+
+---
+
 ## Important Rules
 
-- **Never act autonomously on terminal states** — ALWAYS present `ask_user` choices first. The user decides. No exceptions.
+- **Trust the state machine** — do NOT improvise state flow. Do NOT add extra questions, skip steps, or interpret the context. Execute exactly what `pr_monitor_next_step` tells you.
 - **Resume by default** — after handling a terminal state, the state machine resumes polling automatically unless the user chose to stop.
 - **One monitor per PR** — if you push again to the same PR, call `pr_monitor_stop` then `pr_monitor_start` for a fresh baseline.
 - **Session-scoped** — monitoring only lasts for the current Copilot CLI session.
-- **Trust the state machine** — do NOT improvise state flow. Do NOT add extra questions, skip steps, or interpret the context. Execute exactly what `pr_monitor_next_step` tells you.
 - **CI failure investigation** — when the state machine tells you to investigate, fetch logs, analyze, and report back. Always include your findings. If you have a suggested fix, include it in `data.suggested_fix`.
 - **NEVER use `/azp run` or `/azp rerun` comments** to trigger CI reruns. These PR comments are not reliable, may trigger unintended pipelines, and bypass the state machine's deferred rerun logic. Always use the Playwright browser automation (via `rerun_via_browser` task) or the state machine's built-in mechanisms to rerun failed jobs.

@@ -28,7 +28,6 @@ public class MonitorState
     public string LogFile => Path.Combine(SessionFolder, $"{FilePrefix}.log");
     public string TriggerFile => Path.Combine(SessionFolder, $"{FilePrefix}.trigger");
     public string DebugLogFile => Path.Combine(SessionFolder, $"{FilePrefix}.debug.log");
-    public string IgnoreFile => Path.Combine(SessionFolder, $"{FilePrefix}.ignore-comments");
 
     // State machine
     public MonitorStateId CurrentState { get; set; } = MonitorStateId.Idle;
@@ -48,7 +47,6 @@ public class MonitorState
     public List<CommentInfo> UnresolvedComments { get; set; } = [];
     public List<CommentInfo> WaitingForReplyComments { get; set; } = [];
     public CommentInfo? ActiveWaitingComment { get; set; }
-    public List<string> IgnoredCommentIds { get; set; } = [];
     public int CurrentCommentIndex { get; set; }
 
     // CI failures (populated when terminal state is CiFailure)
@@ -81,4 +79,10 @@ public class MonitorState
 
     // Set when user chooses rerun but other checks are still pending/queued — defer until complete
     public bool PendingRerunWhenChecksComplete { get; set; }
+
+    /// <summary>
+    /// Comment that received a reviewer reply (detected during polling).
+    /// Set when ReviewerReplied terminal state is detected.
+    /// </summary>
+    public CommentInfo? RepliedComment { get; set; }
 }
