@@ -1170,6 +1170,17 @@ public static class MonitorViewer
                     continue;
                 }
 
+                // Parse ELICITED| lines — user made a choice via MCP elicitation, clear terminal state
+                if (line.StartsWith("ELICITED|"))
+                {
+                    isTerminal = false;
+                    terminalState = "";
+                    terminalDescription = "";
+                    isCountingDown = false;
+                    hadStatusUpdate = true;
+                    continue;
+                }
+
                 // Parse STOPPED| lines — monitoring has ended, close the viewer
                 if (line.StartsWith("STOPPED|"))
                 {

@@ -34,14 +34,57 @@ public class MonitorFlowTools
     };
 
     /// <summary>
-    /// Serialize a MonitorAction, automatically attaching choice_map for ask_user actions.
-    /// Use this instead of calling JsonSerializer.Serialize directly.
+    /// Serialize a MonitorAction to JSON.
     /// </summary>
     private static string SerializeAction(MonitorAction action)
     {
-        if (action.Action == "ask_user")
-            MonitorTransitions.AttachChoiceMap(action);
         return JsonSerializer.Serialize(action, _jsonOptions);
+    }
+
+    /// <summary>
+    /// Build an execute action for freeform text interpretation by the agent.
+    /// </summary>
+    private static MonitorAction BuildFreeformInterpretAction(ElicitChoiceResult result, MonitorState state, string? monitorId = null)
+    {
+        var choicesContext = result.OriginalChoices != null
+            ? string.Join(", ", result.OriginalChoices.Select(c =>
+            {
+                var mapped = MonitorTransitions.ChoiceValueMap.TryGetValue(c, out var v) ? v : c;
+                return $"'{c}' → {mapped}";
+            }))
+            : "none";
+
+        // Build comment context for Path B (custom instruction that modifies code)
+        var commentContext = "";
+        if (state.CommentFlow != CommentFlowState.None &&
+            state.CurrentCommentIndex < state.UnresolvedComments.Count)
+        {
+            var c = state.UnresolvedComments[state.CurrentCommentIndex];
+            commentContext = $" Active comment from {c.Author} on {c.FilePath}:{c.Line}: \"{c.Body}\". URL: {c.Url}.";
+        }
+
+        return new MonitorAction
+        {
+            Action = "execute",
+            MonitorId = monitorId,
+            Task = "interpret_freeform",
+            Instructions = $"The user typed: \"{result.Value}\". " +
+                $"The original question was: \"{result.OriginalQuestion}\". " +
+                $"The available choices were: [{choicesContext}]. " +
+                "**Path A — clean choice match:** If the text cleanly maps to ONE of the available choices with NO extra instructions, " +
+                "tell the user 'I'm interpreting this as [choice display text]' and call pr_monitor_next_step " +
+                "with event='user_chose' and choice=<mapped_value>. " +
+                "**Path B — custom instruction:** If the text is a custom instruction that doesn't map to a single choice " +
+                "(or has extra instructions beyond the choice), execute the user's request directly. " +
+                "If the instruction involves code changes: STOP and present your changes to the user for review before committing — " +
+                "honor the user's custom instructions for git workflow. Only commit/push after the user approves. " +
+                "After pushing, reply in the comment thread with what was changed and link the commit " +
+                $"(use `git rev-parse HEAD` to get the SHA, then format as {state.Owner}/{state.Repo}@SHA). " +
+                "Then call pr_monitor_next_step with event='comment_addressed'." +
+                commentContext +
+                (state.CommentFlow != CommentFlowState.None ? MonitorTransitions.CopilotFooter(state) : "") +
+                " If the instruction does NOT involve code changes, execute it and call pr_monitor_next_step with event='task_complete'."
+        };
     }
 
     /// <summary>
@@ -151,14 +194,6 @@ public class MonitorFlowTools
             RequiresConversationResolution = requiresConversationResolution,
             LastPollTime = DateTime.UtcNow
         };
-
-        // Load ignore file if it exists
-        if (File.Exists(state.IgnoreFile))
-        {
-            state.IgnoredCommentIds = (await File.ReadAllLinesAsync(state.IgnoreFile, cancellationToken))
-                .Where(l => !string.IsNullOrWhiteSpace(l))
-                .ToList();
-        }
 
         // Initialize log file with enriched first line
         var logDir = Path.GetDirectoryName(state.LogFile);
@@ -368,9 +403,38 @@ public class MonitorFlowTools
 
                 var action = await PollAllUntilTerminalStateAsync(cancellationToken);
 
-                if (action.Action == "ask_user")
+                // Elicit directly for multi-PR terminal states
+                if (action.Action == "ask_user" && action.Choices?.Count > 0)
                 {
-                    action.Instructions = "MANDATORY: Call the ask_user tool with the EXACT question and choices above. Do NOT rewrite, rephrase, or add your own choices. Do NOT act on behalf of the user. Wait for the user's selection, then call pr_monitor_next_step with the monitorId from this response, event='user_chose' and choice set to the EXACT value from the choice_map for the selected option. After handling, call pr_monitor_next_step with monitorId='all' and event='ready' to resume monitoring all PRs.";
+                    await WriteLogEntryAsync(
+                        action.MonitorId != null && _sessions.TryGetValue(action.MonitorId, out var logSession) ? logSession.State : heartbeatSession.State,
+                        action);
+
+                    var elicitResult = await ElicitationHelper.ElicitChoiceAsync(server!, action, cancellationToken);
+                    DebugLogger.Log("NextStep", $"Multi-PR elicited: {(elicitResult.IsFreeform ? "freeform" : "choice")}={elicitResult.Value}");
+
+                    // Log the elicitation result
+                    if (action.MonitorId != null && _sessions.TryGetValue(action.MonitorId, out var elicitSession))
+                        await WriteElicitedLogEntryAsync(elicitSession.State, elicitResult.Value);
+
+                    // Freeform text — let the agent interpret it
+                    if (elicitResult.IsFreeform)
+                    {
+                        var freeformState = action.MonitorId != null && _sessions.TryGetValue(action.MonitorId, out var fs)
+                            ? fs.State : heartbeatSession.State;
+                        freeformState.CurrentState = MonitorStateId.ExecutingTask;
+                        var freeformAction = BuildFreeformInterpretAction(elicitResult, freeformState, action.MonitorId);
+                        return SerializeAction(freeformAction);
+                    }
+
+                    // Return the choice to the agent with instructions to feed it to the specific PR's monitor
+                    return SerializeAction(new MonitorAction
+                    {
+                        Action = "execute",
+                        MonitorId = action.MonitorId,
+                        Task = "relay_choice",
+                        Instructions = $"The user chose '{elicitResult.Value}' for PR monitor {action.MonitorId}. Call pr_monitor_next_step with monitorId='{action.MonitorId}', event='user_chose', choice='{elicitResult.Value}'. After handling, call pr_monitor_next_step with monitorId='all' and event='ready' to resume monitoring all PRs."
+                    });
                 }
 
                 await WriteLogEntryAsync(
@@ -382,11 +446,17 @@ public class MonitorFlowTools
             catch (Exception ex)
             {
                 DebugLogger.Error("NextStep", ex);
-                return SerializeAction(new MonitorAction
+                var errorAction = new MonitorAction
                 {
                     Action = "ask_user",
                     Question = $"Internal error during multi-PR monitoring: {ex.Message}. What would you like to do?",
                     Choices = ["Resume monitoring", "Stop monitoring"]
+                };
+                var errorResult = await ElicitationHelper.ElicitChoiceAsync(server!, errorAction, cancellationToken);
+                return SerializeAction(new MonitorAction
+                {
+                    Action = errorResult.Value == "stop" ? "stop" : "polling",
+                    Message = errorResult.Value == "stop" ? "Monitoring stopped." : "Resuming monitoring..."
                 });
             }
             finally
@@ -422,16 +492,38 @@ public class MonitorFlowTools
                 var comment = state.WaitingForReplyComments.FirstOrDefault(c => c.Id == threadId);
                 if (comment != null)
                 {
+                    // Build the waiting comment action and let the main elicitation loop handle it
                     var triggerAction = MonitorTransitions.BuildWaitingCommentAction(state, comment);
-                    if (triggerAction.Action == "ask_user")
+                    if (triggerAction.Action == "ask_user" && triggerAction.Choices?.Count > 0)
                     {
-                        triggerAction.Instructions = "MANDATORY: Call the ask_user tool with the EXACT question and choices above. Do NOT rewrite, rephrase, or add your own choices. Do NOT act on behalf of the user. Wait for the user's selection, then call pr_monitor_next_step with event='user_chose' and choice set to the EXACT value from the choice_map for the selected option.";
+                        await WriteLogEntryAsync(state, triggerAction);
+                        var triggerResult = await ElicitationHelper.ElicitChoiceAsync(server, triggerAction, cancellationToken);
+                        DebugLogger.Log("NextStep", $"Elicited viewer trigger: {(triggerResult.IsFreeform ? "freeform" : "choice")}={triggerResult.Value}");
+                        await WriteElicitedLogEntryAsync(state, triggerResult.Value);
+
+                        // Freeform text — let the agent interpret it
+                        if (triggerResult.IsFreeform)
+                        {
+                            state.CurrentState = MonitorStateId.ExecutingTask;
+                            session.StopHeartbeat();
+                            return SerializeAction(BuildFreeformInterpretAction(triggerResult, state));
+                        }
+
+                        // Override event/choice so the state machine processes the user's choice
+                        @event = "user_chose";
+                        choice = triggerResult.Value;
                     }
-                    await WriteLogEntryAsync(state, triggerAction);
-                    DebugLogger.Log("NextStep", $"Returning trigger action: {triggerAction.Action}");
-                    return SerializeAction(triggerAction);
+                    else
+                    {
+                        await WriteLogEntryAsync(state, triggerAction);
+                        DebugLogger.Log("NextStep", $"Returning trigger action: {triggerAction.Action}");
+                        return SerializeAction(triggerAction);
+                    }
                 }
-                session.PendingTriggerContent = null;
+                else
+                {
+                    session.PendingTriggerContent = null;
+                }
             }
 
             // Parse data if provided
@@ -455,76 +547,112 @@ public class MonitorFlowTools
             var action = MonitorTransitions.ProcessEvent(state, @event, choice, data);
             DebugLogger.Log("NextStep", $"State machine returned: action={action.Action}, task={action.Task ?? "null"}");
 
-            // Handle auto_execute: run the command in C# and loop back
-            while (action.Action == "auto_execute")
+            // Core loop: handle auto_execute, polling, and elicitation before returning to agent.
+            // The agent only sees execute/stop actions — all ask_user flows are resolved here
+            // via MCP elicitation (bypassing the LLM entirely for user choices).
+            while (true)
             {
-                action = await ExecuteAutoAction(state, action);
-                DebugLogger.Log("NextStep", $"Auto-execute result: action={action.Action}, task={action.Task ?? "null"}");
-            }
+                // Handle auto_execute: run the command in C# and loop back
+                while (action.Action == "auto_execute")
+                {
+                    action = await ExecuteAutoAction(state, action);
+                    DebugLogger.Log("NextStep", $"Auto-execute result: action={action.Action}, task={action.Task ?? "null"}");
+                }
 
-            // If the state machine says "polling", we block here until a terminal state
-            if (action.Action == "polling")
-            {
-                // In multi-PR mode, don't block on individual session — redirect to "all"
-                bool isMultiMonitored;
-                lock (_multiMonitorLock) { isMultiMonitored = _multiMonitorIds.Contains(monitorId); }
-                if (isMultiMonitored && monitorId != "all")
+                // If the state machine says "polling", we block here until a terminal state
+                if (action.Action == "polling")
+                {
+                    // In multi-PR mode, don't block on individual session — redirect to "all"
+                    bool isMultiMonitored;
+                    lock (_multiMonitorLock) { isMultiMonitored = _multiMonitorIds.Contains(monitorId); }
+                    if (isMultiMonitored && monitorId != "all")
+                    {
+                        await WriteLogEntryAsync(state, action);
+                        DebugLogger.Log("NextStep", "Multi-monitor active — redirecting to 'all' polling");
+                        return SerializeAction(new MonitorAction
+                        {
+                            Action = "polling",
+                            MonitorId = "all",
+                            Message = "PR handled. Call pr_monitor_next_step with monitorId='all' and event='ready' to resume monitoring all PRs."
+                        });
+                    }
+
+                    // Cancel any existing poll loop from a previous tool call (e.g., user hit Esc then resumed)
+                    session.CancelPolling();
+                    using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, session.PollToken);
+                    // Write RESUMING line so the viewer clears any terminal state and shows polling UI
+                    await WriteLogEntryAsync(state, action);
+                    DebugLogger.Log("NextStep", "Entering poll loop...");
+                    action = await PollUntilTerminalStateAsync(session, linkedCts.Token);
+                    DebugLogger.Log("NextStep", $"Poll loop exited: action={action.Action}");
+
+                    // If we were cancelled because a new next_step call replaced our poll loop,
+                    // exit silently — the new call has taken over this session's log file.
+                    if (action.Action == "stop" && !cancellationToken.IsCancellationRequested)
+                    {
+                        DebugLogger.Log("NextStep", "Poll replaced by new call — exiting silently");
+                        return SerializeAction(action);
+                    }
+
+                    // After polling, continue the loop (may get ask_user, auto_execute, etc.)
+                    continue;
+                }
+
+                // Elicit: ask_user actions are resolved directly via MCP elicitation
+                if (action.Action == "ask_user" && action.Choices?.Count > 0)
                 {
                     await WriteLogEntryAsync(state, action);
-                    await PersistIgnoreFileAsync(state);
-                    DebugLogger.Log("NextStep", "Multi-monitor active — redirecting to 'all' polling");
-                    return SerializeAction(new MonitorAction
+
+                    var elicitResult = await ElicitationHelper.ElicitChoiceAsync(server, action, cancellationToken);
+                    DebugLogger.Log("NextStep", $"Elicited: {(elicitResult.IsFreeform ? "freeform" : "choice")}={elicitResult.Value}");
+                    await WriteElicitedLogEntryAsync(state, elicitResult.Value);
+
+                    // Freeform text — transition to executing and let the agent interpret it
+                    if (elicitResult.IsFreeform)
                     {
-                        Action = "polling",
-                        MonitorId = "all",
-                        Message = "PR handled. Call pr_monitor_next_step with monitorId='all' and event='ready' to resume monitoring all PRs."
-                    });
+                        state.CurrentState = MonitorStateId.ExecutingTask;
+                        action = BuildFreeformInterpretAction(elicitResult, state);
+                        break;
+                    }
+
+                    // Feed the user's choice back into the state machine and continue the loop
+                    action = MonitorTransitions.ProcessEvent(state, "user_chose", elicitResult.Value, null);
+                    DebugLogger.Log("NextStep", $"Post-elicit: action={action.Action}, task={action.Task ?? "null"}");
+                    continue;
                 }
 
-                // Cancel any existing poll loop from a previous tool call (e.g., user hit Esc then resumed)
-                session.CancelPolling();
-                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, session.PollToken);
-                // Write RESUMING line so the viewer clears any terminal state and shows polling UI
-                await WriteLogEntryAsync(state, action);
-                // Persist ignore file before blocking (may have changed during comment flow)
-                await PersistIgnoreFileAsync(state);
-                DebugLogger.Log("NextStep", "Entering poll loop...");
-                action = await PollUntilTerminalStateAsync(session, linkedCts.Token);
-                DebugLogger.Log("NextStep", $"Poll loop exited: action={action.Action}");
-
-                // If we were cancelled because a new next_step call replaced our poll loop,
-                // exit silently — the new call has taken over this session's log file.
-                if (action.Action == "stop" && !cancellationToken.IsCancellationRequested)
-                {
-                    DebugLogger.Log("NextStep", "Poll replaced by new call — exiting silently");
-                    return SerializeAction(action);
-                }
+                // Any other action (execute, stop, merged) — break out and return to agent
+                break;
             }
-
-            // Persist ignore file after any state change
-            await PersistIgnoreFileAsync(state);
 
             // Write to log if transitioning
             await WriteLogEntryAsync(state, action);
-
-            // For ask_user actions, inject a mandatory instruction into the response
-            // so the LLM cannot skip the ask_user step or rewrite the choices
-            if (action.Action == "ask_user")
-            {
-                action.Instructions = "MANDATORY: Call the ask_user tool with the EXACT question and choices above. Do NOT rewrite, rephrase, or add your own choices. Do NOT act on behalf of the user. Wait for the user's selection, then call pr_monitor_next_step with event='user_chose' and choice set to the EXACT value from the choice_map for the selected option.";
-            }
 
             return SerializeAction(action);
         }
         catch (Exception ex)
         {
             DebugLogger.Error("NextStep", ex);
-            return SerializeAction(new MonitorAction
+            var errorAction = new MonitorAction
             {
                 Action = "ask_user",
                 Question = $"Internal error: {ex.Message}. What would you like to do?",
                 Choices = ["Resume monitoring", "Stop monitoring"]
-            });
+            };
+            try
+            {
+                var errorResult = await ElicitationHelper.ElicitChoiceAsync(server, errorAction, cancellationToken);
+                return SerializeAction(new MonitorAction
+                {
+                    Action = errorResult.Value == "stop" ? "stop" : "polling",
+                    Message = errorResult.Value == "stop" ? "Monitoring stopped." : "Resuming monitoring..."
+                });
+            }
+            catch
+            {
+                // If elicitation itself fails, just stop
+                return SerializeAction(new MonitorAction { Action = "stop", Message = $"Internal error: {ex.Message}" });
+            }
         }
         finally
         {
@@ -635,14 +763,8 @@ public class MonitorFlowTools
 
                 var allComments = await PrStatusFetcher.FetchAndCleanUnresolvedCommentsAsync(state.Owner, state.Repo, state.PrNumber, state.PrAuthor, reviewResult.Approvals);
 
-                PruneResolvedIgnoredComments(state, allComments, "PollLoop");
-
-                // Filter out ignored comments, then split by waiting-for-reply status
-                var nonIgnored = allComments
-                    .Where(c => !state.IgnoredCommentIds.Contains(c.Id))
-                    .ToList();
-                var needsAction = nonIgnored.Where(c => !c.IsWaitingForReply).ToList();
-                var waitingForReply = nonIgnored.Where(c => c.IsWaitingForReply).ToList();
+                var needsAction = allComments.Where(c => !c.IsWaitingForReply).ToList();
+                var waitingForReply = allComments.Where(c => c.IsWaitingForReply).ToList();
                 state.UnresolvedComments = needsAction;
                 state.WaitingForReplyComments = waitingForReply;
 
@@ -785,13 +907,8 @@ public class MonitorFlowTools
 
         var allComments = await PrStatusFetcher.FetchAndCleanUnresolvedCommentsAsync(state.Owner, state.Repo, state.PrNumber, state.PrAuthor, reviewResult.Approvals);
 
-        PruneResolvedIgnoredComments(state, allComments, "PollRefresh");
-
-        var nonIgnored = allComments
-            .Where(c => !state.IgnoredCommentIds.Contains(c.Id))
-            .ToList();
-        var needsAction = nonIgnored.Where(c => !c.IsWaitingForReply).ToList();
-        var waitingForReply = nonIgnored.Where(c => c.IsWaitingForReply).ToList();
+        var needsAction = allComments.Where(c => !c.IsWaitingForReply).ToList();
+        var waitingForReply = allComments.Where(c => c.IsWaitingForReply).ToList();
         state.UnresolvedComments = needsAction;
         state.WaitingForReplyComments = waitingForReply;
 
@@ -1167,18 +1284,6 @@ public class MonitorFlowTools
         return 120; // All checks complete — poll every 2 minutes
     }
 
-    /// <summary>
-    /// Remove ignored comment IDs that no longer appear in the current unresolved comments from GitHub.
-    /// This prevents stale CiPassedCommentsIgnored prompts when comments have been resolved.
-    /// </summary>
-    private static void PruneResolvedIgnoredComments(MonitorState state, List<CommentInfo> allComments, string logContext)
-    {
-        var currentCommentIds = new HashSet<string>(allComments.Select(c => c.Id));
-        var pruned = state.IgnoredCommentIds.RemoveAll(id => !currentCommentIds.Contains(id));
-        if (pruned > 0)
-            DebugLogger.Log(logContext, $"Pruned {pruned} stale ignored comment IDs (resolved on GitHub)");
-    }
-
     private static string BuildStatusLine(MonitorState state)
     {
         var c = state.Checks;
@@ -1242,6 +1347,21 @@ public class MonitorFlowTools
     }
 
     /// <summary>
+    /// Write an ELICITED| log line when the user makes a choice via MCP elicitation.
+    /// Format: ELICITED|hh:mm tt|choice_value
+    /// </summary>
+    private static async Task WriteElicitedLogEntryAsync(MonitorState state, string choiceValue)
+    {
+        try
+        {
+            var timestamp = DateTime.Now.ToString("hh:mm tt");
+            var line = $"ELICITED|{timestamp}|{choiceValue}";
+            await File.AppendAllTextAsync(state.LogFile, line + Environment.NewLine);
+        }
+        catch { /* ignore log write failures */ }
+    }
+
+    /// <summary>
     /// Build a TERMINAL| log line with JSON payload that the viewer can parse.
     /// Format: TERMINAL|{"state":"ci_failure","description":"[01:22 PM] ❌ PR #56484 has CI failures..."}
     /// </summary>
@@ -1254,27 +1374,10 @@ public class MonitorFlowTools
             TerminalStateType.CiFailure => "ci_failure",
             TerminalStateType.CiCancelled => "ci_cancelled",
             TerminalStateType.ApprovedCiGreen => "approved_and_ci_green",
-            TerminalStateType.CiPassedCommentsIgnored => "ci_passed_comments_pending",
             _ => "unknown"
         };
         var terminalObj = new { state = viewerState, description = action.Question ?? "" };
         return $"TERMINAL|{JsonSerializer.Serialize(terminalObj, _jsonOptions)}";
-    }
-
-    private static async Task PersistIgnoreFileAsync(MonitorState state)
-    {
-        try
-        {
-            if (state.IgnoredCommentIds.Count > 0)
-            {
-                await File.WriteAllLinesAsync(state.IgnoreFile, state.IgnoredCommentIds);
-            }
-            else if (File.Exists(state.IgnoreFile))
-            {
-                File.Delete(state.IgnoreFile);
-            }
-        }
-        catch { /* ignore file write failures */ }
     }
 
     /// <summary>

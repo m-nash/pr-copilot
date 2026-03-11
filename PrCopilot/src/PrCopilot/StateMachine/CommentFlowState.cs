@@ -11,6 +11,8 @@ public enum CommentFlowState
     SingleCommentPrompt,
     MultiCommentPrompt,
     AddressAllIterating,
+    ExplainAllIterating,
     PickComment,
-    PickRemaining
+    PickRemaining,
+    WaitingForManualHandling
 }
