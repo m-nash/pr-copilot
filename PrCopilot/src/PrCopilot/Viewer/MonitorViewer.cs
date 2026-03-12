@@ -1214,9 +1214,14 @@ public static class MonitorViewer
         {
             try
             {
-                if (!File.Exists(debugFile)) return (newLines: Array.Empty<string>(), totalLines: startFrom);
+                if (!File.Exists(debugFile)) return (newLines: Array.Empty<string>(), totalLines: startFrom, truncated: false);
                 var allLines = File.ReadAllLines(debugFile, Encoding.UTF8);
-                if (allLines.Length <= startFrom) return (newLines: Array.Empty<string>(), totalLines: allLines.Length);
+
+                // Detect file truncation/rotation — reload from the beginning
+                if (allLines.Length < startFrom)
+                    startFrom = 0;
+
+                if (allLines.Length <= startFrom) return (newLines: Array.Empty<string>(), totalLines: allLines.Length, truncated: false);
 
                 var filtered = new List<string>();
                 for (var i = startFrom; i < allLines.Length; i++)
@@ -1230,11 +1235,11 @@ public static class MonitorViewer
                         line = line[6..];
                     filtered.Add(line);
                 }
-                return (newLines: filtered.ToArray(), totalLines: allLines.Length);
+                return (newLines: filtered.ToArray(), totalLines: allLines.Length, truncated: startFrom == 0 && state.LastLineCount > 0);
             }
             catch
             {
-                return (newLines: Array.Empty<string>(), totalLines: startFrom);
+                return (newLines: Array.Empty<string>(), totalLines: startFrom, truncated: false);
             }
         }).ContinueWith(task =>
         {
@@ -1244,11 +1249,13 @@ public static class MonitorViewer
                 {
                     if (task.IsCompletedSuccessfully)
                     {
-                        var (newLines, totalLines) = task.Result;
+                        var (newLines, totalLines, truncated) = task.Result;
                         state.LastLineCount = totalLines;
+                        if (truncated)
+                            debugLines.Clear();
                         foreach (var line in newLines)
                             debugLines.Add(line);
-                        if (newLines.Length > 0)
+                        if (newLines.Length > 0 || truncated)
                         {
                             listView.SetSource(debugLines);
                             if (debugLines.Count > 0)
