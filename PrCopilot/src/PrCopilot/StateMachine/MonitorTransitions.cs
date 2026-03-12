@@ -196,9 +196,8 @@ public static class MonitorTransitions
             return AdvanceAfterCommentAddressed(state);
         }
 
-        // Explain-all flow: after explaining, show per-comment choices
+        // Explain-all flow: after explain or freeform task, re-present per-comment choices
         if (state.CommentFlow == CommentFlowState.ExplainAllIterating &&
-            state.PendingExplainResult &&
             state.CurrentCommentIndex < state.UnresolvedComments.Count)
         {
             state.PendingExplainResult = false;
@@ -212,10 +211,6 @@ public static class MonitorTransitions
                 Context = c
             };
         }
-
-        // Explain-all flow: task_complete after freeform action (not an explain) — advance to next
-        if (state.CommentFlow == CommentFlowState.ExplainAllIterating)
-            return AdvanceExplainAll(state);
 
         // Single comment flow: after explain, show post-explain choices
         if (state.CommentFlow == CommentFlowState.SingleCommentPrompt &&

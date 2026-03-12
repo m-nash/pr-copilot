@@ -983,6 +983,29 @@ public class StateMachineTests
         Assert.Equal("polling", action.Action);
     }
 
+    [Fact]
+    public void ProcessEvent_ExplainAll_FreeformTaskComplete_RepresentsChoices()
+    {
+        // Bug: After a freeform task (e.g., "do a gap analysis") completes in explain-all flow,
+        // the state machine should re-present per-comment choices — not advance to the next comment.
+        // PendingExplainResult is false because it was cleared when the explain result was shown.
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.ExplainAllIterating;
+        state.PendingExplainResult = false; // already shown explain, user typed freeform
+        state.UnresolvedComments = [MakeComment("c1"), MakeComment("c2", "reviewer2", "src/Other.cs"),
+                                    MakeComment("c3", "reviewer1", "src/Another.cs"), MakeComment("c4")];
+        state.CurrentCommentIndex = 2; // comment 3/4
+
+        var action = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        // Should re-present choices for the SAME comment, not advance
+        Assert.Equal("ask_user", action.Action);
+        Assert.Equal(2, state.CurrentCommentIndex); // still on comment 3
+        Assert.Contains("Apply the recommendation", action.Choices!);
+        Assert.Contains("Skip this comment", action.Choices!);
+    }
+
     #endregion
 
     #region ProcessEvent — CI Failure Flow Choices
