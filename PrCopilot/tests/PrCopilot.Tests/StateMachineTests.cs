@@ -984,7 +984,7 @@ public class StateMachineTests
     }
 
     [Fact]
-    public void ProcessEvent_ExplainAll_FreeformTaskComplete_RePresentsChoices()
+    public void ProcessEvent_ExplainAll_FreeformTaskComplete_RepresentsChoices()
     {
         // Bug: After a freeform task (e.g., "do a gap analysis") completes in explain-all flow,
         // the state machine should re-present per-comment choices — not advance to the next comment.
