@@ -329,7 +329,7 @@ public static class MonitorViewer
         };
         var debugExpanded = false;
         var debugLines = new ObservableCollection<string>();
-        var debugLastLineCount = 0;
+        var debugLoadState = new DebugLoadState();
 
         var debugToggleButton = new Button
         {
@@ -452,7 +452,7 @@ public static class MonitorViewer
             window.SetNeedsLayout();
             if (debugExpanded)
             {
-                LoadDebugLines(debugFile!, debugLines, ref debugLastLineCount, debugListView);
+                LoadDebugLinesAsync(debugFile!, debugLines, debugLoadState, debugListView);
             }
         };
 
@@ -657,7 +657,7 @@ public static class MonitorViewer
             // Tail debug file if panel is expanded
             if (hasDebugFile && debugExpanded)
             {
-                LoadDebugLines(debugFile!, debugLines, ref debugLastLineCount, debugListView);
+                LoadDebugLinesAsync(debugFile!, debugLines, debugLoadState, debugListView);
             }
 
             return true;
@@ -1201,31 +1201,72 @@ public static class MonitorViewer
     }
 
     /// <summary>
-    /// Reads new lines from the debug log file and appends them to the ListView.
+    /// Reads new lines from the debug log file on a background thread and appends them to the ListView,
+    /// filtering out heartbeat noise. The TUI remains responsive during file I/O.
     /// </summary>
-    private static void LoadDebugLines(string debugFile, ObservableCollection<string> debugLines, ref int lastLineCount, ListView listView)
+    private static void LoadDebugLinesAsync(string debugFile, ObservableCollection<string> debugLines, DebugLoadState state, ListView listView)
     {
-        try
-        {
-            if (!File.Exists(debugFile)) return;
-            var allLines = File.ReadAllLines(debugFile, Encoding.UTF8);
-            if (allLines.Length <= lastLineCount) return;
+        if (state.IsLoading) return;
+        state.IsLoading = true;
+        var startFrom = state.LastLineCount;
 
-            for (var i = lastLineCount; i < allLines.Length; i++)
+        Task.Run(() =>
+        {
+            try
             {
-                var line = allLines[i].Trim();
-                if (string.IsNullOrEmpty(line)) continue;
-                // Strip DEBUG| prefix if present
-                if (line.StartsWith("DEBUG|", StringComparison.OrdinalIgnoreCase))
-                    line = line[6..];
-                debugLines.Add(line);
+                if (!File.Exists(debugFile)) return (newLines: Array.Empty<string>(), totalLines: startFrom);
+                var allLines = File.ReadAllLines(debugFile, Encoding.UTF8);
+                if (allLines.Length <= startFrom) return (newLines: Array.Empty<string>(), totalLines: allLines.Length);
+
+                var filtered = new List<string>();
+                for (var i = startFrom; i < allLines.Length; i++)
+                {
+                    var line = allLines[i].Trim();
+                    if (string.IsNullOrEmpty(line)) continue;
+                    // Filter out heartbeat noise — these fire every 5s and overwhelm the log
+                    if (line.Contains("[Heartbeat]", StringComparison.OrdinalIgnoreCase)) continue;
+                    // Strip DEBUG| prefix if present
+                    if (line.StartsWith("DEBUG|", StringComparison.OrdinalIgnoreCase))
+                        line = line[6..];
+                    filtered.Add(line);
+                }
+                return (newLines: filtered.ToArray(), totalLines: allLines.Length);
             }
-            lastLineCount = allLines.Length;
-            listView.SetSource(debugLines);
-            // Auto-scroll to bottom
-            if (debugLines.Count > 0)
-                listView.SelectedItem = debugLines.Count - 1;
-        }
-        catch { }
+            catch
+            {
+                return (newLines: Array.Empty<string>(), totalLines: startFrom);
+            }
+        }).ContinueWith(task =>
+        {
+            Application.Invoke(() =>
+            {
+                try
+                {
+                    if (task.IsCompletedSuccessfully)
+                    {
+                        var (newLines, totalLines) = task.Result;
+                        state.LastLineCount = totalLines;
+                        foreach (var line in newLines)
+                            debugLines.Add(line);
+                        if (newLines.Length > 0)
+                        {
+                            listView.SetSource(debugLines);
+                            if (debugLines.Count > 0)
+                                listView.SelectedItem = debugLines.Count - 1;
+                        }
+                    }
+                }
+                finally
+                {
+                    state.IsLoading = false;
+                }
+            });
+        });
+    }
+
+    private sealed class DebugLoadState
+    {
+        public int LastLineCount;
+        public volatile bool IsLoading;
     }
 }
