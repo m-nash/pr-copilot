@@ -213,9 +213,20 @@ public static class MonitorTransitions
             };
         }
 
-        // Explain-all flow: task_complete after freeform action (not an explain) — advance to next
-        if (state.CommentFlow == CommentFlowState.ExplainAllIterating)
-            return AdvanceExplainAll(state);
+        // Explain-all flow: task_complete after freeform action — re-present per-comment choices
+        if (state.CommentFlow == CommentFlowState.ExplainAllIterating &&
+            state.CurrentCommentIndex < state.UnresolvedComments.Count)
+        {
+            var c = state.UnresolvedComments[state.CurrentCommentIndex];
+            state.CurrentState = MonitorStateId.AwaitingUser;
+            return new MonitorAction
+            {
+                Action = "ask_user",
+                Question = $"Comment ({state.CurrentCommentIndex + 1}/{state.UnresolvedComments.Count}) from {c.Author} on {c.FilePath}:{c.Line}: \"{Truncate(c.Body, 200)}\"",
+                Choices = ["Apply the recommendation", "Skip this comment", "Done — resume monitoring"],
+                Context = c
+            };
+        }
 
         // Single comment flow: after explain, show post-explain choices
         if (state.CommentFlow == CommentFlowState.SingleCommentPrompt &&
