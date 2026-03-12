@@ -196,27 +196,11 @@ public static class MonitorTransitions
             return AdvanceAfterCommentAddressed(state);
         }
 
-        // Explain-all flow: after explaining, show per-comment choices
+        // Explain-all flow: after explain or freeform task, re-present per-comment choices
         if (state.CommentFlow == CommentFlowState.ExplainAllIterating &&
-            state.PendingExplainResult &&
             state.CurrentCommentIndex < state.UnresolvedComments.Count)
         {
             state.PendingExplainResult = false;
-            var c = state.UnresolvedComments[state.CurrentCommentIndex];
-            state.CurrentState = MonitorStateId.AwaitingUser;
-            return new MonitorAction
-            {
-                Action = "ask_user",
-                Question = $"Comment ({state.CurrentCommentIndex + 1}/{state.UnresolvedComments.Count}) from {c.Author} on {c.FilePath}:{c.Line}: \"{Truncate(c.Body, 200)}\"",
-                Choices = ["Apply the recommendation", "Skip this comment", "Done — resume monitoring"],
-                Context = c
-            };
-        }
-
-        // Explain-all flow: task_complete after freeform action — re-present per-comment choices
-        if (state.CommentFlow == CommentFlowState.ExplainAllIterating &&
-            state.CurrentCommentIndex < state.UnresolvedComments.Count)
-        {
             var c = state.UnresolvedComments[state.CurrentCommentIndex];
             state.CurrentState = MonitorStateId.AwaitingUser;
             return new MonitorAction
