@@ -1109,6 +1109,39 @@ public class MonitorFlowTools
                     state.ActiveWaitingComment = null;
                     return MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
                 }
+            case "request_review":
+                {
+                    var reviewer = state.PendingReRequestReviewer ?? "";
+                    if (!string.IsNullOrEmpty(reviewer))
+                    {
+                        // Fresh check: verify the reviewer has no new unresolved comments
+                        // that arrived after the current batch was captured
+                        try
+                        {
+                            var freshComments = await PrStatusFetcher.FetchUnresolvedCommentsAsync(
+                                state.Owner, state.Repo, state.PrNumber, state.PrAuthor);
+                            var hasUnresolved = freshComments.Any(c =>
+                                string.Equals(c.Author, reviewer, StringComparison.OrdinalIgnoreCase) && !c.IsWaitingForReply);
+                            if (hasUnresolved)
+                            {
+                                DebugLogger.Log("AutoExec", $"request_review {reviewer}: skipped — reviewer still has unresolved comments");
+                                return MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            // Non-critical — proceed with re-request if fresh check fails
+                            DebugLogger.Log("AutoExec", $"request_review fresh check failed (non-critical): {ex.Message}");
+                        }
+
+                        var (success, output) = await GitHubCliExecutor.RequestReviewAsync(state.Owner, state.Repo, state.PrNumber, reviewer);
+                        DebugLogger.Log("AutoExec", $"request_review {reviewer}: success={success}");
+                        // Non-critical — continue even if re-request fails
+                        if (!success)
+                            DebugLogger.Log("AutoExec", $"request_review failed (non-critical): {output}");
+                    }
+                    return MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+                }
             case "merge_pr":
                 {
                     var (success, output) = await GitHubCliExecutor.MergePrAsync(state.Owner, state.Repo, state.PrNumber);
