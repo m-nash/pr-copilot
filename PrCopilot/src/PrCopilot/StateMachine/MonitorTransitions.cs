@@ -804,11 +804,13 @@ public static class MonitorTransitions
             return false;
 
         // Check all indices (except current) for remaining comments from this reviewer
+        // that still need action. Skip comments already replied to (IsWaitingForReply).
         for (int i = 0; i < state.UnresolvedComments.Count; i++)
         {
             if (i == state.CurrentCommentIndex)
                 continue;
-            if (string.Equals(state.UnresolvedComments[i].Author, reviewer, StringComparison.OrdinalIgnoreCase))
+            var c = state.UnresolvedComments[i];
+            if (string.Equals(c.Author, reviewer, StringComparison.OrdinalIgnoreCase) && !c.IsWaitingForReply)
                 return false;
         }
 

@@ -1537,6 +1537,35 @@ public class StateMachineTests
         Assert.Contains("Replied to comment", nextAction.Question!);
     }
 
+    [Fact]
+    public void CommentReplied_SameReviewer_SequentialReplies_ReRequestsAfterLast()
+    {
+        // Two comments from the same reviewer — reply to both sequentially.
+        // Re-request should only trigger after the second reply.
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.AddressAllIterating;
+        state.UnresolvedComments = [MakeComment("c1", "human-reviewer"), MakeComment("c2", "human-reviewer", "src/Other.cs")];
+        state.CurrentCommentIndex = 0;
+
+        // Reply to c1 — c2 still needs action → no re-request
+        var action1 = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
+        Assert.Single(state.WaitingForReplyComments);
+        Assert.Equal("ask_user", action1.Action);
+        Assert.Null(state.PendingReRequestReviewer);
+
+        // Simulate advancing to c2 and replying
+        state.CurrentCommentIndex = 1;
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        var action2 = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
+
+        // c1 is already waiting-for-reply → no remaining work → re-request
+        Assert.Equal(2, state.WaitingForReplyComments.Count);
+        Assert.Equal("auto_execute", action2.Action);
+        Assert.Equal("request_review", action2.Task);
+        Assert.Equal("human-reviewer", state.PendingReRequestReviewer);
+    }
+
     #endregion
 
     #region Deferred Rerun (pending checks)
