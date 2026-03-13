@@ -768,6 +768,10 @@ public class MonitorFlowTools
                 state.UnresolvedComments = needsAction;
                 state.WaitingForReplyComments = waitingForReply;
 
+                // Re-request review for reviewers whose comments are all waiting-for-reply.
+                // This catches cases where the session was interrupted before the re-request fired.
+                await ReRequestReviewForFullyRepliedReviewersAsync(state, waitingForReply, needsAction);
+
                 DebugLogger.Log("PollLoop", $"Poll #{state.PollCount}: {state.Checks.Total} checks ({state.Checks.Failed} failed), {state.Approvals.Count} approvals, {needsAction.Count} needs-action, {waitingForReply.Count} waiting");
 
                 // Write STATUS line
@@ -1315,6 +1319,55 @@ public class MonitorFlowTools
         if (checks.Total == 0)
             return 30; // No checks yet — poll more frequently
         return 120; // All checks complete — poll every 2 minutes
+    }
+
+    /// <summary>
+    /// Re-requests review from reviewers whose unresolved comments are ALL waiting-for-reply
+    /// (i.e., we've replied to every one) but whose review hasn't been re-requested yet.
+    /// This catches cases where the session was interrupted before the re-request could fire.
+    /// Uses the same ShouldReRequestReview logic as the comment flow.
+    /// </summary>
+    private static async Task ReRequestReviewForFullyRepliedReviewersAsync(
+        MonitorState state, List<CommentInfo> waitingForReply, List<CommentInfo> needsAction)
+    {
+        if (waitingForReply.Count == 0)
+            return;
+
+        // Get unique reviewers with waiting-for-reply comments
+        var reviewersWithWaiting = waitingForReply
+            .Where(c => !string.IsNullOrEmpty(c.Author))
+            .Select(c => c.Author)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        // Combine needs-action into a list for the shared check (waitingForReply are already excluded
+        // by the core method since their IsWaitingForReply is true)
+        var allComments = needsAction.Concat(waitingForReply).ToList();
+
+        foreach (var reviewer in reviewersWithWaiting)
+        {
+            // Skip bots — their threads get auto-resolved, not re-requested
+            if (PrStatusFetcher.IsBotReviewer(reviewer))
+                continue;
+
+            // Use the shared core check — passes ReRequestedOnStartup as the already-requested list
+            if (!MonitorTransitions.ShouldReRequestReview(
+                    reviewer, state.PrAuthor, state.CurrentUser,
+                    state.ReRequestedOnStartup, allComments))
+                continue;
+
+            DebugLogger.Log("PollLoop", $"Re-requesting review from {reviewer} — all their comments are waiting-for-reply");
+            var (success, output) = await GitHubCliExecutor.RequestReviewAsync(state.Owner, state.Repo, state.PrNumber, reviewer);
+            if (success)
+            {
+                state.ReRequestedOnStartup.Add(reviewer);
+                DebugLogger.Log("PollLoop", $"Re-requested review from {reviewer}");
+            }
+            else
+            {
+                DebugLogger.Log("PollLoop", $"Failed to re-request review from {reviewer} (non-critical): {output}");
+            }
+        }
     }
 
     private static string BuildStatusLine(MonitorState state)

@@ -795,36 +795,39 @@ public static class MonitorTransitions
     /// </summary>
     internal static bool ShouldReRequestReview(MonitorState state, string reviewer)
     {
+        return ShouldReRequestReview(reviewer, state.PrAuthor, state.CurrentUser,
+            state.ReviewsReRequested, state.UnresolvedComments, state.CurrentCommentIndex);
+    }
+
+    /// <summary>
+    /// Core re-request check, usable from both the comment flow and the poll loop.
+    /// Returns true if a reviewer has no remaining needs-action comments.
+    /// </summary>
+    internal static bool ShouldReRequestReview(
+        string reviewer, string prAuthor, string currentUser,
+        IReadOnlyList<string> alreadyReRequested,
+        IReadOnlyList<CommentInfo> unresolvedComments, int skipIndex = -1)
+    {
         // Don't re-request from ourselves or the PR author
-        if (string.Equals(reviewer, state.PrAuthor, StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(reviewer, state.CurrentUser, StringComparison.OrdinalIgnoreCase))
-        {
-            DebugLogger.Log("StateMachine", $"ShouldReRequestReview({reviewer}): false — reviewer is PR author or current user");
+        if (string.Equals(reviewer, prAuthor, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(reviewer, currentUser, StringComparison.OrdinalIgnoreCase))
             return false;
-        }
 
-        // Already re-requested in this batch
-        if (state.ReviewsReRequested.Any(r => string.Equals(r, reviewer, StringComparison.OrdinalIgnoreCase)))
-        {
-            DebugLogger.Log("StateMachine", $"ShouldReRequestReview({reviewer}): false — already re-requested in this batch");
+        // Already re-requested
+        if (alreadyReRequested.Any(r => string.Equals(r, reviewer, StringComparison.OrdinalIgnoreCase)))
             return false;
-        }
 
-        // Check all indices (except current) for remaining comments from this reviewer
-        // that still need action. Skip comments already addressed or replied to.
-        for (int i = 0; i < state.UnresolvedComments.Count; i++)
+        // Check for remaining comments from this reviewer that still need action.
+        // Skip comments already addressed or replied to (IsWaitingForReply/IsAddressed).
+        for (int i = 0; i < unresolvedComments.Count; i++)
         {
-            if (i == state.CurrentCommentIndex)
+            if (i == skipIndex)
                 continue;
-            var c = state.UnresolvedComments[i];
+            var c = unresolvedComments[i];
             if (string.Equals(c.Author, reviewer, StringComparison.OrdinalIgnoreCase) && !c.IsWaitingForReply && !c.IsAddressed)
-            {
-                DebugLogger.Log("StateMachine", $"ShouldReRequestReview({reviewer}): false — comment at index {i} ({c.Id}) still needs action");
                 return false;
-            }
         }
 
-        DebugLogger.Log("StateMachine", $"ShouldReRequestReview({reviewer}): true — all comments from this reviewer handled");
         return true;
     }
 
