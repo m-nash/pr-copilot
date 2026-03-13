@@ -1708,6 +1708,47 @@ public class StateMachineTests
 
     #endregion
 
+    #region NormalizeBotLogin
+
+    [Fact]
+    public void NormalizeBotLogin_GraphQLBot_AppendsBotSuffix()
+    {
+        // GraphQL returns Bot actors without [bot] suffix
+        var json = """{"login": "copilot-pull-request-reviewer", "__typename": "Bot"}""";
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        var result = PrStatusFetcher.NormalizeBotLogin(doc.RootElement);
+        Assert.Equal("copilot-pull-request-reviewer[bot]", result);
+    }
+
+    [Fact]
+    public void NormalizeBotLogin_HumanUser_ReturnsUnchanged()
+    {
+        var json = """{"login": "reviewer1", "__typename": "User"}""";
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        var result = PrStatusFetcher.NormalizeBotLogin(doc.RootElement);
+        Assert.Equal("reviewer1", result);
+    }
+
+    [Fact]
+    public void NormalizeBotLogin_RestStyleAlreadyHasBotSuffix_NoDoubleAppend()
+    {
+        var json = """{"login": "copilot-pull-request-reviewer[bot]", "__typename": "Bot"}""";
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        var result = PrStatusFetcher.NormalizeBotLogin(doc.RootElement);
+        Assert.Equal("copilot-pull-request-reviewer[bot]", result);
+    }
+
+    [Fact]
+    public void NormalizeBotLogin_NoTypename_ReturnsUnchanged()
+    {
+        var json = """{"login": "copilot-pull-request-reviewer"}""";
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        var result = PrStatusFetcher.NormalizeBotLogin(doc.RootElement);
+        Assert.Equal("copilot-pull-request-reviewer", result);
+    }
+
+    #endregion
+
     #region ApprovalAutoResolve
 
     [Fact]
