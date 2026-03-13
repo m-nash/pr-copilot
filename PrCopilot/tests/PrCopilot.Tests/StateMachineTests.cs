@@ -1349,6 +1349,26 @@ public class StateMachineTests
         Assert.Contains("event=comment_replied", action.Instructions!);
     }
 
+    [Fact]
+    public void CommentReplied_ExplainAll_HumanReviewer_AdvancesToNextComment()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.ExplainAllIterating;
+        state.UnresolvedComments = [MakeComment("c1", "human-reviewer"), MakeComment("c2", "human-reviewer2", "src/Other.cs")];
+        state.CurrentCommentIndex = 0;
+
+        var action = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
+
+        // Should track first comment as waiting-for-reply
+        Assert.Single(state.WaitingForReplyComments);
+        Assert.Equal("c1", state.WaitingForReplyComments[0].Id);
+        // Should advance to explain the next comment
+        Assert.Equal(1, state.CurrentCommentIndex);
+        Assert.Equal("execute", action.Action);
+        Assert.Equal("explain_comment", action.Task);
+    }
+
     #endregion
 
     #region Deferred Rerun (pending checks)
