@@ -1233,6 +1233,11 @@ public static class MonitorViewer
                                 listView.SelectedItem = debugLines.Count - 1;
                         }
                     }
+                    else if (task.Exception is { } ex)
+                    {
+                        // Observe the exception to prevent UnobservedTaskException
+                        System.Diagnostics.Debug.WriteLine($"Debug log read failed: {ex.GetBaseException().Message}");
+                    }
                 }
                 finally
                 {
