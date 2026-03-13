@@ -427,7 +427,7 @@ public static class PrStatusFetcher
     /// Fetches the list of currently requested reviewers on a PR.
     /// Returns login names (e.g. ["reviewer1", "reviewer2"]).
     /// </summary>
-    public static async Task<HashSet<string>> FetchRequestedReviewersAsync(string owner, string repo, int prNumber)
+    public static async Task<HashSet<string>?> FetchRequestedReviewersAsync(string owner, string repo, int prNumber)
     {
         try
         {
@@ -446,7 +446,7 @@ public static class PrStatusFetcher
         catch (Exception ex)
         {
             DebugLogger.Log("FetchRequestedReviewers", $"Failed (non-critical): {ex.Message}");
-            return [];
+            return null;
         }
     }
 

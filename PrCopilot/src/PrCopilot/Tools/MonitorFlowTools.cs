@@ -1121,7 +1121,7 @@ public class MonitorFlowTools
                         // Check if reviewer already has a pending review request (ground truth from API)
                         var alreadyRequested = await PrStatusFetcher.FetchRequestedReviewersAsync(
                             state.Owner, state.Repo, state.PrNumber);
-                        if (alreadyRequested.Contains(reviewer))
+                        if (alreadyRequested is not null && alreadyRequested.Contains(reviewer))
                         {
                             DebugLogger.Log("AutoExec", $"request_review {reviewer}: skipped — already in requested_reviewers");
                             return MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
@@ -1345,6 +1345,13 @@ public class MonitorFlowTools
         // Fetch current requested reviewers from GitHub — this is the source of truth
         var alreadyRequested = await PrStatusFetcher.FetchRequestedReviewersAsync(
             state.Owner, state.Repo, state.PrNumber);
+
+        // If the API call failed, skip re-request logic to avoid false positives
+        if (alreadyRequested is null)
+        {
+            DebugLogger.Log("PollLoop", "Skipping re-request catch-up — FetchRequestedReviewersAsync failed");
+            return;
+        }
 
         // Get unique reviewers with waiting-for-reply comments
         var reviewersWithWaiting = waitingForReply
