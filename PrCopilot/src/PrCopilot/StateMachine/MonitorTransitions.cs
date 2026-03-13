@@ -191,13 +191,35 @@ public static class MonitorTransitions
 
     private static MonitorAction ProcessTaskComplete(MonitorState state)
     {
+        // If we just completed a re-request review, advance to next comment
+        if (state.PendingReRequestReviewer != null)
+        {
+            var summary = state.PendingResolveSummary ?? "Comment addressed";
+            state.PendingReRequestReviewer = null;
+            state.PendingResolveSummary = null;
+            return AdvanceAfterComment(state, summary);
+        }
+
         // If we just auto-resolved a thread after addressing/replying to a comment, advance
         if (state.PendingResolveAfterAddress)
         {
             var summary = state.PendingResolveSummary ?? "Comment addressed";
             state.PendingResolveAfterAddress = false;
-            state.PendingResolveSummary = null;
             state.ActiveWaitingComment = null;
+
+            // Check if this was the last comment from this reviewer — if so, re-request review
+            var resolvedComment = state.CurrentCommentIndex < state.UnresolvedComments.Count
+                ? state.UnresolvedComments[state.CurrentCommentIndex]
+                : null;
+            if (resolvedComment != null && ShouldReRequestReview(state, resolvedComment.Author))
+            {
+                state.PendingReRequestReviewer = resolvedComment.Author;
+                state.PendingResolveSummary = summary;
+                state.ReviewsReRequested.Add(resolvedComment.Author);
+                return BuildReRequestReviewAction(state, resolvedComment.Author);
+            }
+
+            state.PendingResolveSummary = null;
             return AdvanceAfterComment(state, summary);
         }
 
@@ -280,6 +302,8 @@ public static class MonitorTransitions
         state.CommentFlow = CommentFlowState.None;
         state.CiFailureFlow = CiFailureFlowState.None;
         state.ActiveWaitingComment = null;
+        state.PendingReRequestReviewer = null;
+        state.ReviewsReRequested.Clear();
         // The MCP tool will detect this state and start the blocking poll loop
         return new MonitorAction { Action = "polling", Message = "Monitoring..." };
     }
@@ -745,6 +769,42 @@ public static class MonitorTransitions
             Task = "resolve_thread",
             Message = $"Resolving thread {comment.Id}...",
             Context = comment
+        };
+    }
+
+    /// <summary>
+    /// Check whether we should re-request a review from the given reviewer.
+    /// Returns true if this was their last unresolved comment in the current batch.
+    /// </summary>
+    internal static bool ShouldReRequestReview(MonitorState state, string reviewer)
+    {
+        // Don't re-request from ourselves or the PR author
+        if (string.Equals(reviewer, state.PrAuthor, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(reviewer, state.CurrentUser, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        // Already re-requested in this batch
+        if (state.ReviewsReRequested.Any(r => string.Equals(r, reviewer, StringComparison.OrdinalIgnoreCase)))
+            return false;
+
+        // Check if there are remaining unresolved comments from this reviewer at later indices
+        for (int i = state.CurrentCommentIndex + 1; i < state.UnresolvedComments.Count; i++)
+        {
+            if (string.Equals(state.UnresolvedComments[i].Author, reviewer, StringComparison.OrdinalIgnoreCase))
+                return false;
+        }
+
+        return true;
+    }
+
+    private static MonitorAction BuildReRequestReviewAction(MonitorState state, string reviewer)
+    {
+        DebugLogger.Log("StateMachine", $"Re-requesting review from {reviewer}");
+        return new MonitorAction
+        {
+            Action = "auto_execute",
+            Task = "request_review",
+            Message = $"Re-requesting review from {reviewer}..."
         };
     }
 

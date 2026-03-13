@@ -1109,6 +1109,19 @@ public class MonitorFlowTools
                     state.ActiveWaitingComment = null;
                     return MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
                 }
+            case "request_review":
+                {
+                    var reviewer = state.PendingReRequestReviewer ?? "";
+                    if (!string.IsNullOrEmpty(reviewer))
+                    {
+                        var (success, output) = await GitHubCliExecutor.RequestReviewAsync(state.Owner, state.Repo, state.PrNumber, reviewer);
+                        DebugLogger.Log("AutoExec", $"request_review {reviewer}: success={success}");
+                        // Non-critical — continue even if re-request fails
+                        if (!success)
+                            DebugLogger.Log("AutoExec", $"request_review failed (non-critical): {output}");
+                    }
+                    return MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+                }
             case "merge_pr":
                 {
                     var (success, output) = await GitHubCliExecutor.MergePrAsync(state.Owner, state.Repo, state.PrNumber);

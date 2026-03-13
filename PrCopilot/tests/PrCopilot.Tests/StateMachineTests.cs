@@ -1194,9 +1194,14 @@ public class StateMachineTests
         Assert.Equal("auto_execute", action.Action);
         Assert.Equal("resolve_thread", action.Task);
 
-        // Then: task_complete resumes polling (last comment)
+        // Then: task_complete queues re-request review (last comment from reviewer1)
         var action2 = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
-        Assert.Equal("polling", action2.Action);
+        Assert.Equal("auto_execute", action2.Action);
+        Assert.Equal("request_review", action2.Task);
+
+        // Then: re-request completes → resumes polling (last comment)
+        var action3 = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        Assert.Equal("polling", action3.Action);
         Assert.Equal(MonitorStateId.Polling, state.CurrentState);
     }
 
@@ -1316,8 +1321,8 @@ public class StateMachineTests
     [Fact]
     public void CommentReplied_BotReviewer_PostResolve_UsesRepliedSummary()
     {
-        // After bot auto-resolve completes (task_complete), the summary should say
-        // "Replied to comment" not "Comment addressed"
+        // After bot auto-resolve completes (task_complete), re-request is queued,
+        // then after re-request the summary should say "Replied to comment"
         var state = CreateState();
         state.CurrentState = MonitorStateId.ExecutingTask;
         state.CommentFlow = CommentFlowState.SingleCommentPrompt;
@@ -1329,7 +1334,10 @@ public class StateMachineTests
 
         // comment_replied on bot → resolve_thread
         MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
-        // resolve completes → should use "Replied to comment" in user-facing question
+        // resolve completes → re-request review for bot (last from them)
+        var reRequestAction = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        Assert.Equal("request_review", reRequestAction.Task);
+        // re-request completes → should use "Replied to comment" in user-facing question
         var action = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
 
         Assert.Equal("ask_user", action.Action);
@@ -1340,7 +1348,7 @@ public class StateMachineTests
     [Fact]
     public void CommentAddressed_PostResolve_UsesAddressedSummary()
     {
-        // Verify comment_addressed still uses "Comment addressed" after auto-resolve
+        // Verify comment_addressed still uses "Comment addressed" after auto-resolve and re-request
         var state = CreateState();
         state.CurrentState = MonitorStateId.ExecutingTask;
         state.CommentFlow = CommentFlowState.SingleCommentPrompt;
@@ -1352,7 +1360,10 @@ public class StateMachineTests
 
         // comment_addressed → resolve_thread
         MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
-        // resolve completes → should use "Comment addressed"
+        // resolve completes → re-request review for human-reviewer (last from them)
+        var reRequestAction = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        Assert.Equal("request_review", reRequestAction.Task);
+        // re-request completes → should use "Comment addressed"
         var action = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
 
         Assert.Equal("ask_user", action.Action);
@@ -1728,6 +1739,221 @@ public class StateMachineTests
         Assert.Contains("3 unresolved conversation(s)", action.Question);
         Assert.Contains("bob", action.Question);
         Assert.Contains("carol", action.Question);
+    }
+
+    #endregion
+
+    #region Re-Request Review After Comment Resolution
+
+    [Fact]
+    public void ShouldReRequestReview_LastCommentFromReviewer_ReturnsTrue()
+    {
+        var state = CreateState();
+        state.PrAuthor = "pr-author";
+        state.CurrentUser = "current-user";
+        state.UnresolvedComments = [MakeComment("c1", "reviewer1")];
+        state.CurrentCommentIndex = 0;
+
+        Assert.True(MonitorTransitions.ShouldReRequestReview(state, "reviewer1"));
+    }
+
+    [Fact]
+    public void ShouldReRequestReview_MoreCommentsAhead_ReturnsFalse()
+    {
+        var state = CreateState();
+        state.PrAuthor = "pr-author";
+        state.CurrentUser = "current-user";
+        state.UnresolvedComments =
+        [
+            MakeComment("c1", "reviewer1"),
+            MakeComment("c2", "reviewer1")
+        ];
+        state.CurrentCommentIndex = 0;
+
+        Assert.False(MonitorTransitions.ShouldReRequestReview(state, "reviewer1"));
+    }
+
+    [Fact]
+    public void ShouldReRequestReview_PrAuthor_ReturnsFalse()
+    {
+        var state = CreateState();
+        state.PrAuthor = "reviewer1";
+        state.CurrentUser = "current-user";
+        state.UnresolvedComments = [MakeComment("c1", "reviewer1")];
+        state.CurrentCommentIndex = 0;
+
+        Assert.False(MonitorTransitions.ShouldReRequestReview(state, "reviewer1"));
+    }
+
+    [Fact]
+    public void ShouldReRequestReview_CurrentUser_ReturnsFalse()
+    {
+        var state = CreateState();
+        state.PrAuthor = "pr-author";
+        state.CurrentUser = "reviewer1";
+        state.UnresolvedComments = [MakeComment("c1", "reviewer1")];
+        state.CurrentCommentIndex = 0;
+
+        Assert.False(MonitorTransitions.ShouldReRequestReview(state, "reviewer1"));
+    }
+
+    [Fact]
+    public void ShouldReRequestReview_BotReviewer_ReturnsTrue()
+    {
+        var state = CreateState();
+        state.PrAuthor = "pr-author";
+        state.CurrentUser = "current-user";
+        state.UnresolvedComments = [MakeComment("c1", "copilot-pull-request-reviewer[bot]")];
+        state.CurrentCommentIndex = 0;
+
+        // Bots like Copilot should be re-requested
+        Assert.True(MonitorTransitions.ShouldReRequestReview(state, "copilot-pull-request-reviewer[bot]"));
+    }
+
+    [Fact]
+    public void ShouldReRequestReview_AlreadyReRequested_ReturnsFalse()
+    {
+        var state = CreateState();
+        state.PrAuthor = "pr-author";
+        state.CurrentUser = "current-user";
+        state.UnresolvedComments = [MakeComment("c1", "reviewer1")];
+        state.CurrentCommentIndex = 0;
+        state.ReviewsReRequested = ["reviewer1"];
+
+        Assert.False(MonitorTransitions.ShouldReRequestReview(state, "reviewer1"));
+    }
+
+    [Fact]
+    public void ShouldReRequestReview_CaseInsensitive()
+    {
+        var state = CreateState();
+        state.PrAuthor = "PR-Author";
+        state.CurrentUser = "current-user";
+        state.UnresolvedComments = [MakeComment("c1", "pr-author")];
+        state.CurrentCommentIndex = 0;
+
+        // Should match PrAuthor case-insensitively
+        Assert.False(MonitorTransitions.ShouldReRequestReview(state, "pr-author"));
+    }
+
+    [Fact]
+    public void ProcessTaskComplete_AfterResolve_LastComment_QueuesReRequestReview()
+    {
+        var state = CreateState();
+        state.PrAuthor = "pr-author";
+        state.CurrentUser = "current-user";
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.UnresolvedComments = [MakeComment("c1", "reviewer1")];
+        state.CurrentCommentIndex = 0;
+
+        // Simulate: comment_addressed → resolve_thread → task_complete
+        MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
+        var action = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        // Should queue a re-request review auto_execute
+        Assert.Equal("auto_execute", action.Action);
+        Assert.Equal("request_review", action.Task);
+        Assert.Equal("reviewer1", state.PendingReRequestReviewer);
+        Assert.Contains("reviewer1", state.ReviewsReRequested);
+    }
+
+    [Fact]
+    public void ProcessTaskComplete_AfterResolve_MoreComments_NoReRequest()
+    {
+        var state = CreateState();
+        state.PrAuthor = "pr-author";
+        state.CurrentUser = "current-user";
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.AddressAllIterating;
+        state.UnresolvedComments =
+        [
+            MakeComment("c1", "reviewer1"),
+            MakeComment("c2", "reviewer1")
+        ];
+        state.CurrentCommentIndex = 0;
+
+        // Simulate: comment_addressed → resolve_thread → task_complete
+        MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
+        var action = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        // Should NOT queue re-request — reviewer1 has another comment ahead
+        Assert.NotEqual("request_review", action.Task);
+        Assert.Null(state.PendingReRequestReviewer);
+    }
+
+    [Fact]
+    public void ProcessTaskComplete_AfterReRequest_AdvancesToNextComment()
+    {
+        var state = CreateState();
+        state.PrAuthor = "pr-author";
+        state.CurrentUser = "current-user";
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.AddressAllIterating;
+        state.UnresolvedComments =
+        [
+            MakeComment("c1", "reviewer1"),
+            MakeComment("c2", "reviewer2")
+        ];
+        state.CurrentCommentIndex = 0;
+
+        // Simulate full flow: address → resolve → re-request → task_complete
+        MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
+        // resolve completes → queues re-request
+        var reRequestAction = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        Assert.Equal("request_review", reRequestAction.Task);
+
+        // re-request completes → should advance to next comment
+        var nextAction = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        Assert.Equal("ask_user", nextAction.Action);
+        Assert.Equal(1, state.CurrentCommentIndex);
+    }
+
+    [Fact]
+    public void ProcessTaskComplete_MultipleReviewers_ReRequestsEach()
+    {
+        var state = CreateState();
+        state.PrAuthor = "pr-author";
+        state.CurrentUser = "current-user";
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.AddressAllIterating;
+        state.UnresolvedComments =
+        [
+            MakeComment("c1", "reviewer1"),
+            MakeComment("c2", "reviewer2")
+        ];
+        state.CurrentCommentIndex = 0;
+
+        // Address first comment (reviewer1 — last from them)
+        MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
+        var action1 = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        Assert.Equal("request_review", action1.Task);
+        Assert.Equal("reviewer1", state.PendingReRequestReviewer);
+
+        // Re-request completes → advance to reviewer2's comment
+        MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        // Address second comment (reviewer2 — last from them)
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
+        var action2 = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        Assert.Equal("request_review", action2.Task);
+        Assert.Equal("reviewer2", state.PendingReRequestReviewer);
+    }
+
+    [Fact]
+    public void TransitionToPolling_ClearsReRequestState()
+    {
+        var state = CreateState();
+        state.PendingReRequestReviewer = "reviewer1";
+        state.ReviewsReRequested = ["reviewer1", "reviewer2"];
+
+        // Force a transition to polling
+        MonitorTransitions.ProcessEvent(state, "ready", null, null);
+
+        Assert.Null(state.PendingReRequestReviewer);
+        Assert.Empty(state.ReviewsReRequested);
     }
 
     #endregion

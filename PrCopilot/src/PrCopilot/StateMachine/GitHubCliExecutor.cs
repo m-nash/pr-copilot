@@ -21,6 +21,14 @@ public static class GitHubCliExecutor
     }
 
     /// <summary>
+    /// Re-request a review from a specific user via the GitHub API.
+    /// </summary>
+    public static async Task<(bool success, string output)> RequestReviewAsync(string owner, string repo, int prNumber, string reviewer)
+    {
+        return await RunGhAsync($"api repos/{owner}/{repo}/pulls/{prNumber}/requested_reviewers -X POST -f \"reviewers[]={reviewer}\"");
+    }
+
+    /// <summary>
     /// Merge a PR using squash merge.
     /// </summary>
     public static async Task<(bool success, string output)> MergePrAsync(string owner, string repo, int prNumber)

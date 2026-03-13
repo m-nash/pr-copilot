@@ -71,6 +71,12 @@ public class MonitorState
     // Set when auto-resolving a thread after addressing a comment
     public bool PendingResolveAfterAddress { get; set; }
 
+    // Re-request review tracking: reviewer login to re-request after current auto_execute completes
+    public string? PendingReRequestReviewer { get; set; }
+
+    // Reviewers already re-requested during this comment flow (prevents duplicates)
+    public List<string> ReviewsReRequested { get; set; } = [];
+
     // Summary message for the post-resolve transition (e.g., "Comment addressed" vs "Replied to comment")
     public string? PendingResolveSummary { get; set; }
 
