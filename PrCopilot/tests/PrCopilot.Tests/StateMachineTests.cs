@@ -1295,6 +1295,58 @@ public class StateMachineTests
         Assert.Contains("Apply the recommendation you made", applyAction.Instructions!);
     }
 
+    [Fact]
+    public void CommentReplied_BotReviewer_AutoResolves()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.UnresolvedComments = [MakeComment("c1", "copilot-pull-request-reviewer[bot]")];
+        state.CurrentCommentIndex = 0;
+
+        var action = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
+
+        // Bot reviewer → auto-resolve (same as comment_addressed)
+        Assert.True(state.PendingResolveAfterAddress);
+        Assert.Equal("auto_execute", action.Action);
+        Assert.Equal("resolve_thread", action.Task);
+    }
+
+    [Fact]
+    public void CommentReplied_HumanReviewer_TracksWaitingForReply()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.UnresolvedComments = [MakeComment("c1", "human-reviewer")];
+        state.CurrentCommentIndex = 0;
+
+        var action = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
+
+        // Human reviewer → track as waiting-for-reply, don't auto-resolve
+        Assert.Single(state.WaitingForReplyComments);
+        Assert.True(state.WaitingForReplyComments[0].IsWaitingForReply);
+        Assert.False(state.PendingResolveAfterAddress);
+    }
+
+    [Fact]
+    public void ApplyRecommendation_Instructions_DifferentiatePaths()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.UnresolvedComments = [MakeComment()];
+        state.CurrentCommentIndex = 0;
+
+        MonitorTransitions.ProcessEvent(state, "user_chose", "explain", null);
+        MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "apply_fix", null);
+
+        // Instructions should mention both event paths
+        Assert.Contains("event=comment_addressed", action.Instructions!);
+        Assert.Contains("event=comment_replied", action.Instructions!);
+    }
+
     #endregion
 
     #region Deferred Rerun (pending checks)

@@ -163,6 +163,9 @@ public static class MonitorTransitions
             // LLM finished addressing a comment
             (MonitorStateId.ExecutingTask, "comment_addressed") => ProcessCommentAddressed(state, data),
 
+            // LLM replied to a comment (pushback/clarification — no code changes)
+            (MonitorStateId.ExecutingTask, "comment_replied") => ProcessCommentReplied(state),
+
             // LLM finished investigation
             (MonitorStateId.Investigating, "investigation_complete") => ProcessInvestigationComplete(state, data),
 
@@ -526,7 +529,8 @@ public static class MonitorTransitions
             Task = "apply_recommendation",
             Instructions = $"Apply the recommendation you made during your analysis of this comment. " +
                 $"If you recommended implementing the change, make the code changes. ONLY address THIS SPECIFIC comment — do NOT address, reply to, or fix any other comments. STOP and present your changes to the user for review before committing — use ask_user to show what you changed and ask for approval. Only commit/push after the user approves (honor user's custom instructions for git workflow). After pushing, reply in the thread with what was changed and link the commit (use `git rev-parse HEAD` to get the SHA, then format as {state.Owner}/{state.Repo}@SHA), then call pr_monitor_next_step with event=comment_addressed. " +
-                $"If you recommended pushing back or that no changes are needed, reply in the comment thread explaining why (referencing your analysis), then call pr_monitor_next_step with event=comment_addressed. " +
+                $"If you recommended pushing back, disagreeing, or asking a clarifying question, reply in the comment thread (referencing your analysis), then call pr_monitor_next_step with event=comment_replied. " +
+                $"If you recommended agreeing with the comment but no code changes are needed, reply acknowledging the comment, then call pr_monitor_next_step with event=comment_addressed. " +
                 $"Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{c.Body}\". URL: {c.Url}.{CopilotFooter(state)}",
             Context = c
         };
@@ -576,6 +580,36 @@ public static class MonitorTransitions
             state.ActiveWaitingComment = addressedComment;
             state.PendingResolveAfterAddress = true;
             return BuildResolveThreadAction(state, addressedComment);
+        }
+
+        return AdvanceAfterCommentAddressed(state);
+    }
+
+    private static MonitorAction ProcessCommentReplied(MonitorState state)
+    {
+        // Agent replied to a comment (pushback/clarification) without code changes.
+        // Auto-resolve if the reviewer is a bot (they won't reply back).
+        // Track as waiting-for-reply if the reviewer is human.
+        var comment = state.CurrentCommentIndex < state.UnresolvedComments.Count
+            ? state.UnresolvedComments[state.CurrentCommentIndex]
+            : null;
+
+        if (comment != null)
+        {
+            if (PrStatusFetcher.IsBotReviewer(comment.Author))
+            {
+                // Bot reviewer — auto-resolve, they won't respond
+                state.ActiveWaitingComment = comment;
+                state.PendingResolveAfterAddress = true;
+                return BuildResolveThreadAction(state, comment);
+            }
+
+            // Human reviewer — track as waiting-for-reply, don't resolve
+            if (!state.WaitingForReplyComments.Any(c => c.Id == comment.Id))
+            {
+                comment.IsWaitingForReply = true;
+                state.WaitingForReplyComments.Add(comment);
+            }
         }
 
         return AdvanceAfterCommentAddressed(state);

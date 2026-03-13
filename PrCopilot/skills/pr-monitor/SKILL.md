@@ -76,7 +76,8 @@ call pr_monitor_next_step(monitor_id, event, data)
 | Event | When to send | Additional fields |
 |-------|-------------|-------------------|
 | `ready` | After `pr_monitor_start`, or after resuming | — |
-| `comment_addressed` | Finished addressing a review comment | — |
+| `comment_addressed` | Finished addressing a review comment (implemented fix or agreed) | — |
+| `comment_replied` | Replied to a comment without code changes (pushback or clarification) | — |
 | `investigation_complete` | Finished analyzing CI failures | `data`: JSON with `findings` and optional `suggested_fix` |
 | `push_completed` | Committed and pushed a fix | — |
 | `task_complete` | Finished any other execute task | — |
