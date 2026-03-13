@@ -1239,6 +1239,10 @@ public static class MonitorViewer
                         System.Diagnostics.Debug.WriteLine($"Debug log read failed: {ex.GetBaseException().Message}");
                     }
                 }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Debug log UI update failed: {ex.Message}");
+                }
                 finally
                 {
                     state.IsLoading = false;
