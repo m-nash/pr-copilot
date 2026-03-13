@@ -363,5 +363,18 @@ public class DebugLogReaderTests : IDisposable
         Assert.False(lines[0].Contains('\uFEFF'), "BOM character U+FEFF should be stripped from first line");
     }
 
+    [Fact]
+    public void NoNewlineInChunk_StillAdvancesOffset()
+    {
+        // If a single massive line has no newline within the read window,
+        // the reader must still advance past it to avoid an infinite re-read loop.
+        var longLine = "DEBUG|12:00:00 PM|[GhCli] " + new string('X', 2_000_000); // >1MB, no newline
+        File.WriteAllText(_tempFile, longLine, Utf8NoBom);
+
+        var (lines, newOffset, _) = MonitorViewer.ReadDebugLogIncremental(_tempFile, 0);
+        // Must have advanced past offset 0 to guarantee forward progress
+        Assert.True(newOffset > 0, $"Offset must advance to avoid stall, got {newOffset}");
+    }
+
     #endregion
 }

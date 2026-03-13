@@ -1287,7 +1287,13 @@ public static class MonitorViewer
             {
                 var lastNewline = text.LastIndexOf('\n');
                 if (lastNewline < 0)
-                    return (Array.Empty<string>(), readFrom, truncated);
+                {
+                    // No newline found. If we hit the MaxReadBytes cap, advance past the
+                    // chunk to guarantee forward progress (a single line > 1MB). Otherwise
+                    // the data is a normal partial line still being written — wait for more.
+                    var holdOffset = bytesRead >= MaxReadBytes ? readFrom + bytesRead : readFrom;
+                    return (Array.Empty<string>(), holdOffset, truncated);
+                }
                 var completeText = text[..(lastNewline + 1)];
                 newOffset = readFrom + Encoding.UTF8.GetByteCount(completeText);
                 text = completeText;
