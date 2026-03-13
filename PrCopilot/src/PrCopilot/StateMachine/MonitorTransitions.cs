@@ -191,12 +191,14 @@ public static class MonitorTransitions
 
     private static MonitorAction ProcessTaskComplete(MonitorState state)
     {
-        // If we just auto-resolved a thread after addressing a comment, advance to next comment
+        // If we just auto-resolved a thread after addressing/replying to a comment, advance
         if (state.PendingResolveAfterAddress)
         {
+            var summary = state.PendingResolveSummary ?? "Comment addressed";
             state.PendingResolveAfterAddress = false;
+            state.PendingResolveSummary = null;
             state.ActiveWaitingComment = null;
-            return AdvanceAfterCommentAddressed(state);
+            return AdvanceAfterComment(state, summary);
         }
 
         // Explain-all flow: after explain or freeform task, re-present per-comment choices
@@ -579,6 +581,7 @@ public static class MonitorTransitions
         {
             state.ActiveWaitingComment = addressedComment;
             state.PendingResolveAfterAddress = true;
+            state.PendingResolveSummary = "Comment addressed";
             return BuildResolveThreadAction(state, addressedComment);
         }
 
@@ -601,6 +604,7 @@ public static class MonitorTransitions
                 // Bot reviewer — auto-resolve, they won't respond
                 state.ActiveWaitingComment = comment;
                 state.PendingResolveAfterAddress = true;
+                state.PendingResolveSummary = "Replied to comment";
                 return BuildResolveThreadAction(state, comment);
             }
 

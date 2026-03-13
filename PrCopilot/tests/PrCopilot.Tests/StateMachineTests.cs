@@ -1308,8 +1308,55 @@ public class StateMachineTests
 
         // Bot reviewer → auto-resolve (same as comment_addressed)
         Assert.True(state.PendingResolveAfterAddress);
+        Assert.Equal("Replied to comment", state.PendingResolveSummary);
         Assert.Equal("auto_execute", action.Action);
         Assert.Equal("resolve_thread", action.Task);
+    }
+
+    [Fact]
+    public void CommentReplied_BotReviewer_PostResolve_UsesRepliedSummary()
+    {
+        // After bot auto-resolve completes (task_complete), the summary should say
+        // "Replied to comment" not "Comment addressed"
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.UnresolvedComments = [
+            MakeComment("c1", "copilot-pull-request-reviewer[bot]"),
+            MakeComment("c2", "human-reviewer", "src/Other.cs")
+        ];
+        state.CurrentCommentIndex = 0;
+
+        // comment_replied on bot → resolve_thread
+        MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
+        // resolve completes → should use "Replied to comment" in user-facing question
+        var action = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        Assert.Equal("ask_user", action.Action);
+        Assert.Contains("Replied to comment", action.Question!);
+        Assert.DoesNotContain("addressed", action.Question!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void CommentAddressed_PostResolve_UsesAddressedSummary()
+    {
+        // Verify comment_addressed still uses "Comment addressed" after auto-resolve
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.UnresolvedComments = [
+            MakeComment("c1", "human-reviewer"),
+            MakeComment("c2", "human-reviewer2", "src/Other.cs")
+        ];
+        state.CurrentCommentIndex = 0;
+
+        // comment_addressed → resolve_thread
+        MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
+        // resolve completes → should use "Comment addressed"
+        var action = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        Assert.Equal("ask_user", action.Action);
+        Assert.Contains("Comment addressed", action.Question!);
     }
 
     [Fact]
