@@ -14,11 +14,7 @@
     "osascript",
     "pushback",
     "slnx",
-    "xunit",
-    "jsquire",
-    "avanigupta",
-    "maorleger",
-    "joshfree"
+    "xunit"
   ],
   "ignorePaths": [
     "**/bin/**",

@@ -2197,16 +2197,16 @@ public class StateMachineTests
     [Fact]
     public void ShouldReRequestReview_ReviewerAlreadyInRequestedReviewers_ReturnsFalse()
     {
-        // Simulates PR 57093: jsquire is in requested_reviewers (awaiting initial review).
+        // Simulates a reviewer who is in requested_reviewers (awaiting initial review).
         // Even if they had a waiting-for-reply comment, we should NOT re-request.
-        var alreadyRequested = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "jsquire" };
+        var alreadyRequested = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "reviewer-pending" };
         var comments = new List<CommentInfo>
         {
-            new() { Id = "c1", Author = "jsquire", IsWaitingForReply = true }
+            new() { Id = "c1", Author = "reviewer-pending", IsWaitingForReply = true }
         };
 
         var result = MonitorTransitions.ShouldReRequestReview(
-            "jsquire", "pr-author", "current-user", alreadyRequested, comments);
+            "reviewer-pending", "pr-author", "current-user", alreadyRequested, comments);
 
         Assert.False(result);
     }
@@ -2214,18 +2214,18 @@ public class StateMachineTests
     [Fact]
     public void ShouldReRequestReview_ReviewerNotInRequestedReviewers_AllReplied_ReturnsTrue()
     {
-        // Simulates PR 57090: JoshLove-msft finished review (APPROVED), NOT in requested_reviewers.
+        // Simulates a reviewer who finished review (APPROVED), NOT in requested_reviewers.
         // All their comments are waiting-for-reply → should re-request.
         var alreadyRequested = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            { "avanigupta", "maorleger", "joshfree" };
+            { "other-reviewer-a", "other-reviewer-b", "other-reviewer-c" };
         var comments = new List<CommentInfo>
         {
-            new() { Id = "c1", Author = "JoshLove-msft", IsWaitingForReply = true },
-            new() { Id = "c2", Author = "JoshLove-msft", IsWaitingForReply = true }
+            new() { Id = "c1", Author = "finished-reviewer", IsWaitingForReply = true },
+            new() { Id = "c2", Author = "finished-reviewer", IsWaitingForReply = true }
         };
 
         var result = MonitorTransitions.ShouldReRequestReview(
-            "JoshLove-msft", "m-nash", "current-user", alreadyRequested, comments);
+            "finished-reviewer", "pr-author", "current-user", alreadyRequested, comments);
 
         Assert.True(result);
     }
@@ -2250,13 +2250,11 @@ public class StateMachineTests
     [Fact]
     public void ShouldReRequestReview_CopilotBotReviewer_NotInRequestedReviewers_ReturnsTrue()
     {
-        // Simulates PR 57090: copilot-pull-request-reviewer[bot] left a COMMENTED review,
-        // we resolved its thread, and it's NOT in requested_reviewers.
-        // During the comment flow, the bot's thread gets auto-resolved and then
-        // ShouldReRequestReview fires — should return true to re-request the bot
-        // so it reviews the updated code.
+        // Bot reviewer left a COMMENTED review, we resolved its thread, and it's NOT
+        // in requested_reviewers. ShouldReRequestReview should return true to re-request
+        // the bot so it reviews the updated code.
         var alreadyRequested = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            { "avanigupta", "maorleger", "joshfree" };
+            { "other-reviewer-a", "other-reviewer-b", "other-reviewer-c" };
 
         // After resolve, the bot's comment is gone from unresolved list.
         // In the comment flow, ShouldReRequestReview is called with the current
@@ -2264,7 +2262,7 @@ public class StateMachineTests
         var comments = new List<CommentInfo>();
 
         var result = MonitorTransitions.ShouldReRequestReview(
-            "copilot-pull-request-reviewer[bot]", "m-nash", "current-user",
+            "copilot-pull-request-reviewer[bot]", "pr-author", "current-user",
             alreadyRequested, comments);
 
         Assert.True(result);
@@ -2279,7 +2277,7 @@ public class StateMachineTests
         var comments = new List<CommentInfo>();
 
         var result = MonitorTransitions.ShouldReRequestReview(
-            "copilot-pull-request-reviewer[bot]", "m-nash", "current-user",
+            "copilot-pull-request-reviewer[bot]", "pr-author", "current-user",
             alreadyRequested, comments);
 
         Assert.False(result);
