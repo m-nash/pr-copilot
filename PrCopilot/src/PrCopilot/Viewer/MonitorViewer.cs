@@ -1260,7 +1260,7 @@ public static class MonitorViewer
             bool truncated = fileLength < fromOffset;
             var readFrom = truncated ? 0L : fromOffset;
 
-            if (fileLength <= readFrom) return (Array.Empty<string>(), fileLength, false);
+            if (fileLength <= readFrom) return (Array.Empty<string>(), fileLength, truncated);
 
             const int MaxReadBytes = 1024 * 1024; // 1 MB cap per tick
             stream.Seek(readFrom, SeekOrigin.Begin);

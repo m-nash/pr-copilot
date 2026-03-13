@@ -245,6 +245,22 @@ public class DebugLogReaderTests : IDisposable
         Assert.Contains("New", lines[0]);
     }
 
+    [Fact]
+    public void Truncation_ToEmptyFile_StillSignalsTruncated()
+    {
+        File.WriteAllText(_tempFile, "DEBUG|12:00:00 PM|[GhCli] Some content\n", Utf8NoBom);
+        var (_, offset1, _) = MonitorViewer.ReadDebugLogIncremental(_tempFile, 0);
+        Assert.True(offset1 > 0);
+
+        // Truncate to 0 bytes
+        File.WriteAllText(_tempFile, "", Utf8NoBom);
+
+        var (lines, offset2, truncated) = MonitorViewer.ReadDebugLogIncremental(_tempFile, offset1);
+        Assert.True(truncated, "Should signal truncation when file shrinks to 0");
+        Assert.Empty(lines);
+        Assert.Equal(0, offset2);
+    }
+
     #endregion
 
     #region Edge cases
