@@ -1262,8 +1262,10 @@ public static class MonitorViewer
 
             if (fileLength <= readFrom) return (Array.Empty<string>(), fileLength, false);
 
+            const int MaxReadBytes = 1024 * 1024; // 1 MB cap per tick
             stream.Seek(readFrom, SeekOrigin.Begin);
-            var buffer = new byte[fileLength - readFrom];
+            var bytesToRead = (int)Math.Min(fileLength - readFrom, MaxReadBytes);
+            var buffer = new byte[bytesToRead];
             int bytesRead = stream.Read(buffer, 0, buffer.Length);
             var text = Encoding.UTF8.GetString(buffer, 0, bytesRead);
 
