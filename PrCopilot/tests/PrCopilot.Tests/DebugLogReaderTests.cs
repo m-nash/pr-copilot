@@ -268,7 +268,8 @@ public class DebugLogReaderTests : IDisposable
     [Fact]
     public void FileDoesNotExist_ReturnsEmpty()
     {
-        var (lines, offset, truncated) = MonitorViewer.ReadDebugLogIncremental(@"C:\nonexistent\file.log", 0);
+        var nonExistentPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".log");
+        var (lines, offset, truncated) = MonitorViewer.ReadDebugLogIncremental(nonExistentPath, 0);
         Assert.Empty(lines);
         Assert.Equal(0, offset);
         Assert.False(truncated);
