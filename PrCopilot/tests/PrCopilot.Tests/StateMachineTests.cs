@@ -1301,6 +1301,45 @@ public class StateMachineTests
     }
 
     [Fact]
+    public void ExplainComment_Instructions_MentionTestEvidenceForPushback()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.UnresolvedComments = [MakeComment()];
+        state.CurrentCommentIndex = 0;
+
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "explain", null);
+
+        Assert.Equal("explain_comment", action.Task);
+        Assert.Contains("test evidence", action.Instructions!);
+        Assert.Contains("pushing back", action.Instructions!);
+    }
+
+    [Fact]
+    public void ApplyRecommendation_PushbackInstructions_RequireTestFirst()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.UnresolvedComments = [MakeComment()];
+        state.CurrentCommentIndex = 0;
+
+        // explain → task_complete → user chooses apply
+        MonitorTransitions.ProcessEvent(state, "user_chose", "explain", null);
+        MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        var applyAction = MonitorTransitions.ProcessEvent(state, "user_chose", "apply_fix", null);
+
+        Assert.Equal("apply_recommendation", applyAction.Task);
+        // Pushback path requires trying to write a test first
+        Assert.Contains("first try to find or write a test", applyAction.Instructions!);
+        // If test can't be written, agent should reconsider
+        Assert.Contains("reconsider", applyAction.Instructions!);
+        // Clarifying questions remain a separate path
+        Assert.Contains("clarifying question", applyAction.Instructions!);
+    }
+
+    [Fact]
     public void CommentReplied_BotReviewer_AutoResolves()
     {
         var state = CreateState();

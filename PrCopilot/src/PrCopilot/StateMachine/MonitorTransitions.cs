@@ -555,7 +555,10 @@ public static class MonitorTransitions
             Task = "apply_recommendation",
             Instructions = $"Apply the recommendation you made during your analysis of this comment. " +
                 $"If you recommended implementing the change, make the code changes. ONLY address THIS SPECIFIC comment — do NOT address, reply to, or fix any other comments. STOP and present your changes to the user for review before committing — use ask_user to show what you changed and ask for approval. Only commit/push after the user approves (honor user's custom instructions for git workflow). After pushing, reply in the thread with what was changed and link the commit (use `git rev-parse HEAD` to get the SHA, then format as {state.Owner}/{state.Repo}@SHA), then call pr_monitor_next_step with event=comment_addressed. " +
-                $"If you recommended pushing back, disagreeing, or asking a clarifying question, reply in the comment thread (referencing your analysis), then call pr_monitor_next_step with event=comment_replied. " +
+                $"If you recommended pushing back or disagreeing, first try to find or write a test that proves the comment is wrong. " +
+                $"If you CANNOT write such a test, reconsider — the comment may be valid — implement the change instead (follow the implement path above, use event=comment_addressed). " +
+                $"If you CAN write the test, check it in (present to user for approval first, commit/push after approval), reply in the thread referencing your analysis and the new test (link the commit), then call pr_monitor_next_step with event=comment_replied. " +
+                $"If you recommended asking a clarifying question, reply in the comment thread (referencing your analysis), then call pr_monitor_next_step with event=comment_replied. " +
                 $"If you recommended agreeing with the comment but no code changes are needed, reply acknowledging the comment, then call pr_monitor_next_step with event=comment_addressed. " +
                 $"Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{c.Body}\". URL: {c.Url}.{CopilotFooter(state)}",
             Context = c
@@ -571,7 +574,9 @@ public static class MonitorTransitions
         {
             Action = "execute",
             Task = "explain_comment",
-            Instructions = $"Read and explain this review comment. Recommend whether to implement the change or push back. ONLY analyze THIS SPECIFIC comment — do NOT address, reply to, or fix any other comments. DO NOT make any code changes, DO NOT commit, DO NOT push, DO NOT reply to the comment thread — ONLY explain and recommend. Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{c.Body}\". URL: {c.Url}. After explaining, call pr_monitor_next_step with event=task_complete.",
+            Instructions = $"Read and explain this review comment. Recommend whether to implement the change or push back. " +
+                $"If you lean toward pushing back, consider what test evidence would prove the comment is wrong — a strong pushback recommendation should explain what test could validate your position. " +
+                $"ONLY analyze THIS SPECIFIC comment — do NOT address, reply to, or fix any other comments. DO NOT make any code changes, DO NOT commit, DO NOT push, DO NOT reply to the comment thread — ONLY explain and recommend. Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{c.Body}\". URL: {c.Url}. After explaining, call pr_monitor_next_step with event=task_complete.",
             Context = c
         };
     }
