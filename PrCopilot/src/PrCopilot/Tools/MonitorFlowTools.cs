@@ -333,7 +333,7 @@ public class MonitorFlowTools
     [McpServerTool(Name = "pr_monitor_next_step"), Description("The one tool the agent calls in a loop. Reports the result of the last action and gets the next instruction. May block for minutes/hours when in polling mode (zero tokens burned), or return instantly during active flows.")]
     public async Task<string> PrMonitorNextStep(
         [Description("Monitor ID from pr_monitor_start")] string monitorId,
-        [Description("Event: ready, user_chose, comment_addressed, comment_replied, fix_applied, investigation_complete, push_completed, task_complete")] string @event,
+        [Description("Event: ready, user_chose, comment_addressed, comment_replied, investigation_complete, push_completed, task_complete")] string @event,
         [Description("User's choice (for user_chose events)")] string? choice = null,
         [Description("Event data as JSON string (findings, suggested_fix, etc.)")] string? data = null,
         McpServer server = null!,
