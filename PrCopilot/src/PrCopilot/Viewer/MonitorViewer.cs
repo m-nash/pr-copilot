@@ -1202,46 +1202,17 @@ public static class MonitorViewer
 
     /// <summary>
     /// Reads new lines from the debug log file on a background thread and appends them to the ListView,
-    /// filtering out heartbeat noise. The TUI remains responsive during file I/O.
+    /// filtering out heartbeat noise. Uses byte-offset tracking to avoid re-reading the entire file,
+    /// and only processes complete lines (ending with a newline).
     /// </summary>
     private static void LoadDebugLinesAsync(string debugFile, ObservableCollection<string> debugLines, DebugLoadState state, ListView listView)
     {
         if (state.IsLoading) return;
         state.IsLoading = true;
-        var startFrom = state.LastLineCount;
+        var readFrom = state.ByteOffset;
 
-        Task.Run(() =>
-        {
-            try
-            {
-                if (!File.Exists(debugFile)) return (newLines: Array.Empty<string>(), totalLines: startFrom, truncated: false);
-                var allLines = File.ReadAllLines(debugFile, Encoding.UTF8);
-
-                // Detect file truncation/rotation — reload from the beginning
-                if (allLines.Length < startFrom)
-                    startFrom = 0;
-
-                if (allLines.Length <= startFrom) return (newLines: Array.Empty<string>(), totalLines: allLines.Length, truncated: false);
-
-                var filtered = new List<string>();
-                for (var i = startFrom; i < allLines.Length; i++)
-                {
-                    var line = allLines[i].Trim();
-                    if (string.IsNullOrEmpty(line)) continue;
-                    // Filter out heartbeat noise — these fire every 5s and overwhelm the log
-                    if (line.Contains("[Heartbeat]", StringComparison.OrdinalIgnoreCase)) continue;
-                    // Strip DEBUG| prefix if present
-                    if (line.StartsWith("DEBUG|", StringComparison.OrdinalIgnoreCase))
-                        line = line[6..];
-                    filtered.Add(line);
-                }
-                return (newLines: filtered.ToArray(), totalLines: allLines.Length, truncated: startFrom == 0 && state.LastLineCount > 0);
-            }
-            catch
-            {
-                return (newLines: Array.Empty<string>(), totalLines: startFrom, truncated: false);
-            }
-        }).ContinueWith(task =>
+        Task.Run(() => ReadDebugLogIncremental(debugFile, readFrom))
+        .ContinueWith(task =>
         {
             Application.Invoke(() =>
             {
@@ -1249,8 +1220,8 @@ public static class MonitorViewer
                 {
                     if (task.IsCompletedSuccessfully)
                     {
-                        var (newLines, totalLines, truncated) = task.Result;
-                        state.LastLineCount = totalLines;
+                        var (newLines, newOffset, truncated) = task.Result;
+                        state.ByteOffset = newOffset;
                         if (truncated)
                             debugLines.Clear();
                         foreach (var line in newLines)
@@ -1271,9 +1242,70 @@ public static class MonitorViewer
         });
     }
 
+    /// <summary>
+    /// Core logic for incremental debug log reading. Reads only new bytes from the file starting
+    /// at <paramref name="fromOffset"/>, filters heartbeat lines, strips DEBUG| prefixes, and
+    /// only returns complete lines. Detects file truncation/rotation.
+    /// </summary>
+    internal static (string[] newLines, long newOffset, bool truncated) ReadDebugLogIncremental(string debugFile, long fromOffset)
+    {
+        try
+        {
+            if (!File.Exists(debugFile)) return (Array.Empty<string>(), fromOffset, false);
+
+            using var stream = new FileStream(debugFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            var fileLength = stream.Length;
+
+            // Detect file truncation/rotation — reload from the beginning
+            bool truncated = fileLength < fromOffset;
+            var readFrom = truncated ? 0L : fromOffset;
+
+            if (fileLength <= readFrom) return (Array.Empty<string>(), fileLength, false);
+
+            stream.Seek(readFrom, SeekOrigin.Begin);
+            var buffer = new byte[fileLength - readFrom];
+            int bytesRead = stream.Read(buffer, 0, buffer.Length);
+            var text = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+
+            // Only process complete lines — if text doesn't end with a newline,
+            // the last chunk is incomplete; hold it for the next read
+            long newOffset = readFrom + bytesRead;
+            if (text.Length > 0 && !text.EndsWith('\n'))
+            {
+                var lastNewline = text.LastIndexOf('\n');
+                if (lastNewline < 0)
+                    return (Array.Empty<string>(), readFrom, truncated);
+                var completeText = text[..(lastNewline + 1)];
+                newOffset = readFrom + Encoding.UTF8.GetByteCount(completeText);
+                text = completeText;
+            }
+
+            var lines = text.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            var filtered = new List<string>();
+            foreach (var rawLine in lines)
+            {
+                var line = rawLine.TrimEnd('\r').Trim();
+                if (string.IsNullOrEmpty(line)) continue;
+                // Filter out heartbeat noise — these fire every 5s and overwhelm the log
+                if (line.Contains("[Heartbeat]", StringComparison.OrdinalIgnoreCase)) continue;
+                // Filter out version check lines — these fire every 30s and add clutter
+                if (line.Contains("Version check", StringComparison.OrdinalIgnoreCase)) continue;
+                // Strip DEBUG| prefix if present
+                if (line.StartsWith("DEBUG|", StringComparison.OrdinalIgnoreCase))
+                    line = line[6..];
+                filtered.Add(line);
+            }
+            return (filtered.ToArray(), newOffset, truncated);
+        }
+        catch
+        {
+            return (Array.Empty<string>(), fromOffset, false);
+        }
+    }
+
     private sealed class DebugLoadState
     {
-        public int LastLineCount;
+        public long ByteOffset;
         public volatile bool IsLoading;
     }
 }
