@@ -344,5 +344,24 @@ public class DebugLogReaderTests : IDisposable
         Assert.False(truncated);
     }
 
+    [Fact]
+    public void Utf8Bom_IsStrippedFromFirstLine()
+    {
+        // DebugLogger uses Encoding.UTF8 which writes a BOM on new files.
+        // The reader must strip it so DEBUG| prefix detection still works.
+        var utf8WithBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: true);
+        File.WriteAllText(_tempFile,
+            "DEBUG|12:00:00 PM|[GhCli] First line\n" +
+            "DEBUG|12:00:01 PM|[GhCli] Second line\n", utf8WithBom);
+
+        var (lines, _, _) = MonitorViewer.ReadDebugLogIncremental(_tempFile, 0);
+        Assert.Equal(2, lines.Length);
+        // First line should have DEBUG| stripped despite BOM
+        Assert.DoesNotContain("DEBUG|", lines[0]);
+        Assert.Contains("First line", lines[0]);
+        // Verify no BOM character leaks into the output
+        Assert.False(lines[0].Contains('\uFEFF'), "BOM character U+FEFF should be stripped from first line");
+    }
+
     #endregion
 }

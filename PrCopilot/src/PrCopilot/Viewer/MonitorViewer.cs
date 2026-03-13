@@ -1272,7 +1272,13 @@ public static class MonitorViewer
             var bytesToRead = (int)Math.Min(fileLength - readFrom, MaxReadBytes);
             var buffer = new byte[bytesToRead];
             int bytesRead = stream.Read(buffer, 0, buffer.Length);
-            var text = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+
+            // Skip UTF-8 BOM (EF BB BF) if present at the start of the buffer.
+            // DebugLogger uses Encoding.UTF8 which writes a BOM on new files.
+            int bomOffset = 0;
+            if (readFrom == 0 && bytesRead >= 3 && buffer[0] == 0xEF && buffer[1] == 0xBB && buffer[2] == 0xBF)
+                bomOffset = 3;
+            var text = Encoding.UTF8.GetString(buffer, bomOffset, bytesRead - bomOffset);
 
             // Only process complete lines — if text doesn't end with a newline,
             // the last chunk is incomplete; hold it for the next read
