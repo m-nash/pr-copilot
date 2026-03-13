@@ -329,7 +329,7 @@ public static class MonitorViewer
         };
         var debugExpanded = false;
         var debugLines = new ObservableCollection<string>();
-        var debugLastLineCount = 0;
+        var debugLoadState = new DebugLoadState();
 
         var debugToggleButton = new Button
         {
@@ -452,7 +452,7 @@ public static class MonitorViewer
             window.SetNeedsLayout();
             if (debugExpanded)
             {
-                LoadDebugLines(debugFile!, debugLines, ref debugLastLineCount, debugListView);
+                LoadDebugLinesAsync(debugFile!, debugLines, debugLoadState, debugListView);
             }
         };
 
@@ -657,7 +657,7 @@ public static class MonitorViewer
             // Tail debug file if panel is expanded
             if (hasDebugFile && debugExpanded)
             {
-                LoadDebugLines(debugFile!, debugLines, ref debugLastLineCount, debugListView);
+                LoadDebugLinesAsync(debugFile!, debugLines, debugLoadState, debugListView);
             }
 
             return true;
@@ -1201,31 +1201,134 @@ public static class MonitorViewer
     }
 
     /// <summary>
-    /// Reads new lines from the debug log file and appends them to the ListView.
+    /// Reads new lines from the debug log file on a background thread and appends them to the ListView,
+    /// filtering out heartbeat noise. Uses byte-offset tracking to avoid re-reading the entire file,
+    /// and only processes complete lines (ending with a newline).
     /// </summary>
-    private static void LoadDebugLines(string debugFile, ObservableCollection<string> debugLines, ref int lastLineCount, ListView listView)
+    private static void LoadDebugLinesAsync(string debugFile, ObservableCollection<string> debugLines, DebugLoadState state, ListView listView)
+    {
+        if (state.IsLoading) return;
+        state.IsLoading = true;
+        var readFrom = state.ByteOffset;
+
+        Task.Run(() => ReadDebugLogIncremental(debugFile, readFrom))
+        .ContinueWith(task =>
+        {
+            Application.Invoke(() =>
+            {
+                try
+                {
+                    if (task.IsCompletedSuccessfully)
+                    {
+                        var (newLines, newOffset, truncated) = task.Result;
+                        state.ByteOffset = newOffset;
+                        if (truncated)
+                            debugLines.Clear();
+                        foreach (var line in newLines)
+                            debugLines.Add(line);
+                        if (newLines.Length > 0 || truncated)
+                        {
+                            listView.SetSource(debugLines);
+                            if (debugLines.Count > 0)
+                                listView.SelectedItem = debugLines.Count - 1;
+                        }
+                    }
+                    else if (task.Exception is { } ex)
+                    {
+                        // Observe the exception to prevent UnobservedTaskException
+                        System.Diagnostics.Debug.WriteLine($"Debug log read failed: {ex.GetBaseException().Message}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Debug log UI update failed: {ex.Message}");
+                }
+                finally
+                {
+                    state.IsLoading = false;
+                }
+            });
+        });
+    }
+
+    /// <summary>
+    /// Core logic for incremental debug log reading. Reads only new bytes from the file starting
+    /// at <paramref name="fromOffset"/>, filters heartbeat lines, strips DEBUG| prefixes, and
+    /// only returns complete lines. Detects file truncation/rotation.
+    /// </summary>
+    internal static (string[] newLines, long newOffset, bool truncated) ReadDebugLogIncremental(string debugFile, long fromOffset)
     {
         try
         {
-            if (!File.Exists(debugFile)) return;
-            var allLines = File.ReadAllLines(debugFile, Encoding.UTF8);
-            if (allLines.Length <= lastLineCount) return;
+            if (!File.Exists(debugFile)) return (Array.Empty<string>(), 0, false);
 
-            for (var i = lastLineCount; i < allLines.Length; i++)
+            using var stream = new FileStream(debugFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            var fileLength = stream.Length;
+
+            // Detect file truncation/rotation — reload from the beginning
+            bool truncated = fileLength < fromOffset;
+            var readFrom = truncated ? 0L : fromOffset;
+
+            if (fileLength <= readFrom) return (Array.Empty<string>(), fileLength, truncated);
+
+            const int MaxReadBytes = 1024 * 1024; // 1 MB cap per tick
+            stream.Seek(readFrom, SeekOrigin.Begin);
+            var bytesToRead = (int)Math.Min(fileLength - readFrom, MaxReadBytes);
+            var buffer = new byte[bytesToRead];
+            int bytesRead = stream.Read(buffer, 0, buffer.Length);
+
+            // Skip UTF-8 BOM (EF BB BF) if present at the start of the buffer.
+            // DebugLogger uses Encoding.UTF8 which writes a BOM on new files.
+            int bomOffset = 0;
+            if (readFrom == 0 && bytesRead >= 3 && buffer[0] == 0xEF && buffer[1] == 0xBB && buffer[2] == 0xBF)
+                bomOffset = 3;
+            var text = Encoding.UTF8.GetString(buffer, bomOffset, bytesRead - bomOffset);
+
+            // Only process complete lines — if text doesn't end with a newline,
+            // the last chunk is incomplete; hold it for the next read
+            long newOffset = readFrom + bytesRead;
+            if (text.Length > 0 && !text.EndsWith('\n'))
             {
-                var line = allLines[i].Trim();
+                var lastNewline = text.LastIndexOf('\n');
+                if (lastNewline < 0)
+                {
+                    // No newline found. If we hit the MaxReadBytes cap, advance past the
+                    // chunk to guarantee forward progress (a single line > 1MB). Otherwise
+                    // the data is a normal partial line still being written — wait for more.
+                    var holdOffset = bytesRead >= MaxReadBytes ? readFrom + bytesRead : readFrom;
+                    return (Array.Empty<string>(), holdOffset, truncated);
+                }
+                var completeText = text[..(lastNewline + 1)];
+                newOffset = readFrom + bomOffset + Encoding.UTF8.GetByteCount(completeText);
+                text = completeText;
+            }
+
+            var lines = text.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            var filtered = new List<string>();
+            foreach (var rawLine in lines)
+            {
+                var line = rawLine.TrimEnd('\r').Trim();
                 if (string.IsNullOrEmpty(line)) continue;
+                // Filter out heartbeat noise — these fire every 5s and overwhelm the log
+                if (line.Contains("[Heartbeat]", StringComparison.OrdinalIgnoreCase)) continue;
+                // Filter out version check lines — these fire every 30s and add clutter
+                if (line.Contains("Version check", StringComparison.OrdinalIgnoreCase)) continue;
                 // Strip DEBUG| prefix if present
                 if (line.StartsWith("DEBUG|", StringComparison.OrdinalIgnoreCase))
                     line = line[6..];
-                debugLines.Add(line);
+                filtered.Add(line);
             }
-            lastLineCount = allLines.Length;
-            listView.SetSource(debugLines);
-            // Auto-scroll to bottom
-            if (debugLines.Count > 0)
-                listView.SelectedItem = debugLines.Count - 1;
+            return (filtered.ToArray(), newOffset, truncated);
         }
-        catch { }
+        catch
+        {
+            return (Array.Empty<string>(), fromOffset, false);
+        }
+    }
+
+    private sealed class DebugLoadState
+    {
+        public long ByteOffset;
+        public volatile bool IsLoading;
     }
 }
