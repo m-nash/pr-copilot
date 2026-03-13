@@ -1256,7 +1256,7 @@ public static class MonitorViewer
     {
         try
         {
-            if (!File.Exists(debugFile)) return (Array.Empty<string>(), fromOffset, false);
+            if (!File.Exists(debugFile)) return (Array.Empty<string>(), 0, false);
 
             using var stream = new FileStream(debugFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             var fileLength = stream.Length;

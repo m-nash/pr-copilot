@@ -331,5 +331,18 @@ public class DebugLogReaderTests : IDisposable
         Assert.Contains("Transition:", lines[3]);
     }
 
+    [Fact]
+    public void FileMissing_ResetsOffsetToZero()
+    {
+        var nonExistentFile = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".log");
+
+        // Simulate a previous read that reached offset 500
+        var (lines, newOffset, truncated) = MonitorViewer.ReadDebugLogIncremental(nonExistentFile, 500);
+
+        Assert.Empty(lines);
+        Assert.Equal(0, newOffset); // Should reset so a recreated file is read from start
+        Assert.False(truncated);
+    }
+
     #endregion
 }
