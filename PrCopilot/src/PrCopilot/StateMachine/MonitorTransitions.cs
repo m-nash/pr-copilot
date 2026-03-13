@@ -643,6 +643,16 @@ public static class MonitorTransitions
                 comment.IsWaitingForReply = true;
                 state.WaitingForReplyComments.Add(comment);
             }
+
+            // Re-request review if this was the last comment from this reviewer.
+            // We've replied to all their feedback — let them know to look again.
+            if (ShouldReRequestReview(state, comment.Author))
+            {
+                state.PendingReRequestReviewer = comment.Author;
+                state.PendingResolveSummary = "Replied to comment";
+                state.ReviewsReRequested.Add(comment.Author);
+                return BuildReRequestReviewAction(state, comment.Author);
+            }
         }
 
         return AdvanceAfterComment(state, "Replied to comment");

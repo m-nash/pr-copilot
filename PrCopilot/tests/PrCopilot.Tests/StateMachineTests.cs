@@ -1424,8 +1424,9 @@ public class StateMachineTests
         Assert.Single(state.WaitingForReplyComments);
         Assert.True(state.WaitingForReplyComments[0].IsWaitingForReply);
         Assert.False(state.PendingResolveAfterAddress);
-        // Single comment → advances to polling
-        Assert.Equal("polling", action.Action);
+        // Single comment, last from this reviewer → re-request review
+        Assert.Equal("auto_execute", action.Action);
+        Assert.Equal("request_review", action.Task);
     }
 
     [Fact]
@@ -1460,10 +1461,14 @@ public class StateMachineTests
         // Should track first comment as waiting-for-reply
         Assert.Single(state.WaitingForReplyComments);
         Assert.Equal("c1", state.WaitingForReplyComments[0].Id);
-        // Should advance to explain the next comment
+        // Last comment from this reviewer → re-request review first
+        Assert.Equal("auto_execute", action.Action);
+        Assert.Equal("request_review", action.Task);
+        // After re-request completes, should advance to explain next comment
+        var nextAction = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
         Assert.Equal(1, state.CurrentCommentIndex);
-        Assert.Equal("execute", action.Action);
-        Assert.Equal("explain_comment", action.Task);
+        Assert.Equal("execute", nextAction.Action);
+        Assert.Equal("explain_comment", nextAction.Task);
     }
 
     [Fact]
@@ -1471,8 +1476,6 @@ public class StateMachineTests
     {
         // Scenario: user picked a specific comment from multi-comment list,
         // went through explain → apply_fix → agent pushes back → comment_replied.
-        // AdvanceAfterCommentAddressed falls to PickRemaining which shows
-        // "Comment addressed. X more unresolved..." — but we only replied/pushed back.
         var state = CreateState();
         state.CurrentState = MonitorStateId.ExecutingTask;
         state.CommentFlow = CommentFlowState.SingleCommentPrompt;
@@ -1481,9 +1484,57 @@ public class StateMachineTests
 
         var action = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
 
+        // Last comment from this reviewer → re-request review first
+        Assert.Equal("auto_execute", action.Action);
+        Assert.Equal("request_review", action.Task);
+        // After re-request completes → should ask about remaining comments
+        var nextAction = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        Assert.Equal("ask_user", nextAction.Action);
         // Should NOT say "Comment addressed" since we only replied
+        Assert.DoesNotContain("addressed", nextAction.Question!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void CommentReplied_HumanReviewer_NoReRequestWhenMoreComments()
+    {
+        // Two comments from the same reviewer — replying to one shouldn't re-request yet
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.AddressAllIterating;
+        state.UnresolvedComments = [MakeComment("c1", "human-reviewer"), MakeComment("c2", "human-reviewer", "src/Other.cs")];
+        state.CurrentCommentIndex = 0;
+
+        var action = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
+
+        // Should track as waiting-for-reply
+        Assert.Single(state.WaitingForReplyComments);
+        // Reviewer has another comment (c2) → no re-request yet, advance to next
         Assert.Equal("ask_user", action.Action);
-        Assert.DoesNotContain("addressed", action.Question!, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(state.PendingReRequestReviewer);
+    }
+
+    [Fact]
+    public void CommentReplied_HumanReviewer_PostReRequest_AdvancesCorrectly()
+    {
+        // After re-request completes for human, should advance with correct summary
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.UnresolvedComments = [
+            MakeComment("c1", "human-reviewer"),
+            MakeComment("c2", "different-reviewer", "src/Other.cs")
+        ];
+        state.CurrentCommentIndex = 0;
+
+        // comment_replied → re-request (last from this reviewer)
+        var action = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
+        Assert.Equal("request_review", action.Task);
+        Assert.Equal("human-reviewer", state.PendingReRequestReviewer);
+
+        // re-request completes → advance
+        var nextAction = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        Assert.Equal("ask_user", nextAction.Action);
+        Assert.Contains("Replied to comment", nextAction.Question!);
     }
 
     #endregion
