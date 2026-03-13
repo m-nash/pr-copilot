@@ -1774,6 +1774,24 @@ public class StateMachineTests
     }
 
     [Fact]
+    public void ShouldReRequestReview_CommentsBehindCurrentIndex_ReturnsFalse()
+    {
+        // Out-of-order addressing: user picks comment at index 2, but index 0 is same reviewer
+        var state = CreateState();
+        state.PrAuthor = "pr-author";
+        state.CurrentUser = "current-user";
+        state.UnresolvedComments =
+        [
+            MakeComment("c1", "reviewer1"),
+            MakeComment("c2", "reviewer2"),
+            MakeComment("c3", "reviewer1")
+        ];
+        state.CurrentCommentIndex = 2; // addressing c3, but c1 (reviewer1) is at index 0
+
+        Assert.False(MonitorTransitions.ShouldReRequestReview(state, "reviewer1"));
+    }
+
+    [Fact]
     public void ShouldReRequestReview_PrAuthor_ReturnsFalse()
     {
         var state = CreateState();

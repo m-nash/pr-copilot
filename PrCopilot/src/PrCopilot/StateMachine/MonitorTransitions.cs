@@ -775,6 +775,7 @@ public static class MonitorTransitions
     /// <summary>
     /// Check whether we should re-request a review from the given reviewer.
     /// Returns true if this was their last unresolved comment in the current batch.
+    /// Checks all indices (not just later ones) to handle out-of-order addressing.
     /// </summary>
     internal static bool ShouldReRequestReview(MonitorState state, string reviewer)
     {
@@ -787,9 +788,11 @@ public static class MonitorTransitions
         if (state.ReviewsReRequested.Any(r => string.Equals(r, reviewer, StringComparison.OrdinalIgnoreCase)))
             return false;
 
-        // Check if there are remaining unresolved comments from this reviewer at later indices
-        for (int i = state.CurrentCommentIndex + 1; i < state.UnresolvedComments.Count; i++)
+        // Check all indices (except current) for remaining comments from this reviewer
+        for (int i = 0; i < state.UnresolvedComments.Count; i++)
         {
+            if (i == state.CurrentCommentIndex)
+                continue;
             if (string.Equals(state.UnresolvedComments[i].Author, reviewer, StringComparison.OrdinalIgnoreCase))
                 return false;
         }
