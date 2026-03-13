@@ -608,6 +608,7 @@ public static class MonitorTransitions
             : null;
         if (addressedComment != null)
         {
+            addressedComment.IsAddressed = true;
             state.ActiveWaitingComment = addressedComment;
             state.PendingResolveAfterAddress = true;
             state.PendingResolveSummary = "Comment addressed";
@@ -797,23 +798,33 @@ public static class MonitorTransitions
         // Don't re-request from ourselves or the PR author
         if (string.Equals(reviewer, state.PrAuthor, StringComparison.OrdinalIgnoreCase) ||
             string.Equals(reviewer, state.CurrentUser, StringComparison.OrdinalIgnoreCase))
+        {
+            DebugLogger.Log("StateMachine", $"ShouldReRequestReview({reviewer}): false — reviewer is PR author or current user");
             return false;
+        }
 
         // Already re-requested in this batch
         if (state.ReviewsReRequested.Any(r => string.Equals(r, reviewer, StringComparison.OrdinalIgnoreCase)))
+        {
+            DebugLogger.Log("StateMachine", $"ShouldReRequestReview({reviewer}): false — already re-requested in this batch");
             return false;
+        }
 
         // Check all indices (except current) for remaining comments from this reviewer
-        // that still need action. Skip comments already replied to (IsWaitingForReply).
+        // that still need action. Skip comments already addressed or replied to.
         for (int i = 0; i < state.UnresolvedComments.Count; i++)
         {
             if (i == state.CurrentCommentIndex)
                 continue;
             var c = state.UnresolvedComments[i];
-            if (string.Equals(c.Author, reviewer, StringComparison.OrdinalIgnoreCase) && !c.IsWaitingForReply)
+            if (string.Equals(c.Author, reviewer, StringComparison.OrdinalIgnoreCase) && !c.IsWaitingForReply && !c.IsAddressed)
+            {
+                DebugLogger.Log("StateMachine", $"ShouldReRequestReview({reviewer}): false — comment at index {i} ({c.Id}) still needs action");
                 return false;
+            }
         }
 
+        DebugLogger.Log("StateMachine", $"ShouldReRequestReview({reviewer}): true — all comments from this reviewer handled");
         return true;
     }
 

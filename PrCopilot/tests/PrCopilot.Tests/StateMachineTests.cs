@@ -2080,6 +2080,47 @@ public class StateMachineTests
     }
 
     [Fact]
+    public void ShouldReRequestReview_AllCommentsFromSameReviewer_Addressed_ReturnsTrue()
+    {
+        // BUG REPRO: When a reviewer has 2 comments and both are addressed sequentially,
+        // the re-request should fire after the LAST one. Previously, ShouldReRequestReview
+        // always returned false because it saw the already-addressed comment at the earlier
+        // index as still "unresolved" (the UnresolvedComments list is a static snapshot).
+        var state = CreateState();
+        state.PrAuthor = "pr-author";
+        state.CurrentUser = "current-user";
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.AddressAllIterating;
+        state.UnresolvedComments =
+        [
+            MakeComment("c1", "reviewer1"),
+            MakeComment("c2", "reviewer1")
+        ];
+        state.CurrentCommentIndex = 0;
+
+        // === Address comment 0 ===
+        // comment_addressed → sets PendingResolveAfterAddress, returns resolve_thread
+        MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
+        // resolve completes → should NOT re-request yet (comment 1 still pending)
+        var action1 = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        Assert.NotEqual("request_review", action1.Task);
+
+        // State machine advances: ask_user for next comment, user chooses "Address this comment"
+        Assert.Equal("ask_user", action1.Action);
+        Assert.Equal(1, state.CurrentCommentIndex);
+        state.CurrentState = MonitorStateId.ExecutingTask;
+
+        // === Address comment 1 ===
+        MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
+        // resolve completes → SHOULD re-request now (last comment from reviewer1)
+        var action2 = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        Assert.Equal("auto_execute", action2.Action);
+        Assert.Equal("request_review", action2.Task);
+        Assert.Equal("reviewer1", state.PendingReRequestReviewer);
+    }
+
+    [Fact]
     public void ProcessTaskComplete_AfterReRequest_AdvancesToNextComment()
     {
         var state = CreateState();
