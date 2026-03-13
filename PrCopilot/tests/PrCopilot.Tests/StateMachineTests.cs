@@ -2194,5 +2194,96 @@ public class StateMachineTests
         Assert.Empty(state.ReviewsReRequested);
     }
 
+    [Fact]
+    public void ShouldReRequestReview_ReviewerAlreadyInRequestedReviewers_ReturnsFalse()
+    {
+        // Simulates PR 57093: jsquire is in requested_reviewers (awaiting initial review).
+        // Even if they had a waiting-for-reply comment, we should NOT re-request.
+        var alreadyRequested = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "jsquire" };
+        var comments = new List<CommentInfo>
+        {
+            new() { Id = "c1", Author = "jsquire", IsWaitingForReply = true }
+        };
+
+        var result = MonitorTransitions.ShouldReRequestReview(
+            "jsquire", "pr-author", "current-user", alreadyRequested, comments);
+
+        Assert.False(result);
+    }
+
+    [Fact]
+    public void ShouldReRequestReview_ReviewerNotInRequestedReviewers_AllReplied_ReturnsTrue()
+    {
+        // Simulates PR 57090: JoshLove-msft finished review (APPROVED), NOT in requested_reviewers.
+        // All their comments are waiting-for-reply → should re-request.
+        var alreadyRequested = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { "avanigupta", "maorleger", "joshfree" };
+        var comments = new List<CommentInfo>
+        {
+            new() { Id = "c1", Author = "JoshLove-msft", IsWaitingForReply = true },
+            new() { Id = "c2", Author = "JoshLove-msft", IsWaitingForReply = true }
+        };
+
+        var result = MonitorTransitions.ShouldReRequestReview(
+            "JoshLove-msft", "m-nash", "current-user", alreadyRequested, comments);
+
+        Assert.True(result);
+    }
+
+    [Fact]
+    public void ShouldReRequestReview_ReviewerNotRequested_StillHasNeedsAction_ReturnsFalse()
+    {
+        // Reviewer finished review but still has a needs-action comment → don't re-request yet
+        var alreadyRequested = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var comments = new List<CommentInfo>
+        {
+            new() { Id = "c1", Author = "reviewer1", IsWaitingForReply = true },
+            new() { Id = "c2", Author = "reviewer1", IsWaitingForReply = false }
+        };
+
+        var result = MonitorTransitions.ShouldReRequestReview(
+            "reviewer1", "pr-author", "current-user", alreadyRequested, comments);
+
+        Assert.False(result);
+    }
+
+    [Fact]
+    public void ShouldReRequestReview_CopilotBotReviewer_NotInRequestedReviewers_ReturnsTrue()
+    {
+        // Simulates PR 57090: copilot-pull-request-reviewer[bot] left a COMMENTED review,
+        // we resolved its thread, and it's NOT in requested_reviewers.
+        // During the comment flow, the bot's thread gets auto-resolved and then
+        // ShouldReRequestReview fires — should return true to re-request the bot
+        // so it reviews the updated code.
+        var alreadyRequested = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { "avanigupta", "maorleger", "joshfree" };
+
+        // After resolve, the bot's comment is gone from unresolved list.
+        // In the comment flow, ShouldReRequestReview is called with the current
+        // comment index excluded — simulated here with an empty list (no remaining).
+        var comments = new List<CommentInfo>();
+
+        var result = MonitorTransitions.ShouldReRequestReview(
+            "copilot-pull-request-reviewer[bot]", "m-nash", "current-user",
+            alreadyRequested, comments);
+
+        Assert.True(result);
+    }
+
+    [Fact]
+    public void ShouldReRequestReview_CopilotBotReviewer_AlreadyInRequestedReviewers_ReturnsFalse()
+    {
+        // Bot reviewer already has a pending review request → don't re-request
+        var alreadyRequested = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { "copilot-pull-request-reviewer[bot]" };
+        var comments = new List<CommentInfo>();
+
+        var result = MonitorTransitions.ShouldReRequestReview(
+            "copilot-pull-request-reviewer[bot]", "m-nash", "current-user",
+            alreadyRequested, comments);
+
+        Assert.False(result);
+    }
+
     #endregion
 }

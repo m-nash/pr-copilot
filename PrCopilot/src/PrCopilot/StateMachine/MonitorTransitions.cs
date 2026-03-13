@@ -801,11 +801,12 @@ public static class MonitorTransitions
 
     /// <summary>
     /// Core re-request check, usable from both the comment flow and the poll loop.
-    /// Returns true if a reviewer has no remaining needs-action comments.
+    /// Returns true if a reviewer has no remaining needs-action comments and hasn't
+    /// already been re-requested (checked via alreadyReRequested set).
     /// </summary>
     internal static bool ShouldReRequestReview(
         string reviewer, string prAuthor, string currentUser,
-        IReadOnlyList<string> alreadyReRequested,
+        IEnumerable<string> alreadyReRequested,
         IReadOnlyList<CommentInfo> unresolvedComments, int skipIndex = -1)
     {
         // Don't re-request from ourselves or the PR author
@@ -813,7 +814,7 @@ public static class MonitorTransitions
             string.Equals(reviewer, currentUser, StringComparison.OrdinalIgnoreCase))
             return false;
 
-        // Already re-requested
+        // Already re-requested (in-memory list or GitHub API requested_reviewers)
         if (alreadyReRequested.Any(r => string.Equals(r, reviewer, StringComparison.OrdinalIgnoreCase)))
             return false;
 

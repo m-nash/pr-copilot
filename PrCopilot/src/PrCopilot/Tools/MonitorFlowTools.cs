@@ -1118,6 +1118,15 @@ public class MonitorFlowTools
                     var reviewer = state.PendingReRequestReviewer ?? "";
                     if (!string.IsNullOrEmpty(reviewer))
                     {
+                        // Check if reviewer already has a pending review request (ground truth from API)
+                        var alreadyRequested = await PrStatusFetcher.FetchRequestedReviewersAsync(
+                            state.Owner, state.Repo, state.PrNumber);
+                        if (alreadyRequested.Contains(reviewer))
+                        {
+                            DebugLogger.Log("AutoExec", $"request_review {reviewer}: skipped — already in requested_reviewers");
+                            return MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+                        }
+
                         // Fresh check: verify the reviewer has no new unresolved comments
                         // that arrived after the current batch was captured
                         try
@@ -1324,14 +1333,18 @@ public class MonitorFlowTools
     /// <summary>
     /// Re-requests review from reviewers whose unresolved comments are ALL waiting-for-reply
     /// (i.e., we've replied to every one) but whose review hasn't been re-requested yet.
-    /// This catches cases where the session was interrupted before the re-request could fire.
-    /// Uses the same ShouldReRequestReview logic as the comment flow.
+    /// Uses the GitHub API to check who already has a pending review request — no in-memory
+    /// tracking needed. This is resilient to session interruptions and restarts.
     /// </summary>
     private static async Task ReRequestReviewForFullyRepliedReviewersAsync(
         MonitorState state, List<CommentInfo> waitingForReply, List<CommentInfo> needsAction)
     {
         if (waitingForReply.Count == 0)
             return;
+
+        // Fetch current requested reviewers from GitHub — this is the source of truth
+        var alreadyRequested = await PrStatusFetcher.FetchRequestedReviewersAsync(
+            state.Owner, state.Repo, state.PrNumber);
 
         // Get unique reviewers with waiting-for-reply comments
         var reviewersWithWaiting = waitingForReply
@@ -1340,33 +1353,23 @@ public class MonitorFlowTools
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        // Combine needs-action into a list for the shared check (waitingForReply are already excluded
-        // by the core method since their IsWaitingForReply is true)
+        // Combine all comments for the shared check
         var allComments = needsAction.Concat(waitingForReply).ToList();
 
         foreach (var reviewer in reviewersWithWaiting)
         {
-            // Skip bots — their threads get auto-resolved, not re-requested
-            if (PrStatusFetcher.IsBotReviewer(reviewer))
-                continue;
-
-            // Use the shared core check — passes ReRequestedOnStartup as the already-requested list
+            // Use the shared core check with GitHub's requested_reviewers as the already-requested set
             if (!MonitorTransitions.ShouldReRequestReview(
                     reviewer, state.PrAuthor, state.CurrentUser,
-                    state.ReRequestedOnStartup, allComments))
+                    alreadyRequested, allComments))
                 continue;
 
             DebugLogger.Log("PollLoop", $"Re-requesting review from {reviewer} — all their comments are waiting-for-reply");
             var (success, output) = await GitHubCliExecutor.RequestReviewAsync(state.Owner, state.Repo, state.PrNumber, reviewer);
             if (success)
-            {
-                state.ReRequestedOnStartup.Add(reviewer);
                 DebugLogger.Log("PollLoop", $"Re-requested review from {reviewer}");
-            }
             else
-            {
                 DebugLogger.Log("PollLoop", $"Failed to re-request review from {reviewer} (non-critical): {output}");
-            }
         }
     }
 

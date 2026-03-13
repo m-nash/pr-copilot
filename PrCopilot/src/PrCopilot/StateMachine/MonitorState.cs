@@ -77,9 +77,6 @@ public class MonitorState
     // Reviewers already re-requested during this comment flow (prevents duplicates)
     public List<string> ReviewsReRequested { get; set; } = [];
 
-    // Reviewers re-requested during poll startup (prevents re-requesting every poll cycle)
-    public List<string> ReRequestedOnStartup { get; set; } = [];
-
     // Summary message for the post-resolve transition (e.g., "Comment addressed" vs "Replied to comment")
     public string? PendingResolveSummary { get; set; }
 

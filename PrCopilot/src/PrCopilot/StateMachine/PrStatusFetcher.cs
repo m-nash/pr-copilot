@@ -424,6 +424,33 @@ public static class PrStatusFetcher
     }
 
     /// <summary>
+    /// Fetches the list of currently requested reviewers on a PR.
+    /// Returns login names (e.g. ["reviewer1", "reviewer2"]).
+    /// </summary>
+    public static async Task<HashSet<string>> FetchRequestedReviewersAsync(string owner, string repo, int prNumber)
+    {
+        try
+        {
+            var json = await RunGhAsync(
+                $"api repos/{owner}/{repo}/pulls/{prNumber}/requested_reviewers --jq \"[.users[].login]\"");
+            using var doc = JsonDocument.Parse(json);
+            var reviewers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var item in doc.RootElement.EnumerateArray())
+            {
+                var login = item.GetString();
+                if (!string.IsNullOrEmpty(login))
+                    reviewers.Add(login);
+            }
+            return reviewers;
+        }
+        catch (Exception ex)
+        {
+            DebugLogger.Log("FetchRequestedReviewers", $"Failed (non-critical): {ex.Message}");
+            return [];
+        }
+    }
+
+    /// <summary>
     /// Checks whether the given branch requires all review conversations to be resolved before merging.
     /// Uses the repository rulesets API, which is accessible to anyone with read access.
     /// Returns false on API failure (permissions, older GH Enterprise, etc.).
