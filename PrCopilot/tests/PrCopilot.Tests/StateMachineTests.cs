@@ -955,7 +955,7 @@ public class StateMachineTests
     }
 
     [Fact]
-    public void ProcessEvent_ExplainAll_ApplyFix_BeginsAddressComment()
+    public void ProcessEvent_ExplainAll_ApplyFix_BeginsApplyRecommendation()
     {
         var state = CreateState();
         state.CurrentState = MonitorStateId.AwaitingUser;
@@ -966,7 +966,8 @@ public class StateMachineTests
         var action = MonitorTransitions.ProcessEvent(state, "user_chose", "apply_fix", null);
 
         Assert.Equal("execute", action.Action);
-        Assert.Equal("address_comment", action.Task);
+        Assert.Equal("apply_recommendation", action.Task);
+        Assert.Contains("Apply the recommendation you made", action.Instructions!);
         Assert.Equal(MonitorStateId.ExecutingTask, state.CurrentState);
     }
 
@@ -1276,7 +1277,7 @@ public class StateMachineTests
     }
 
     [Fact]
-    public void ExplainFlow_ApplyAfterExplain_ExecutesAddressTask()
+    public void ExplainFlow_ApplyAfterExplain_ExecutesApplyRecommendation()
     {
         var state = CreateState();
         state.CurrentState = MonitorStateId.AwaitingUser;
@@ -1290,7 +1291,149 @@ public class StateMachineTests
         var applyAction = MonitorTransitions.ProcessEvent(state, "user_chose", "apply_fix", null);
 
         Assert.Equal("execute", applyAction.Action);
-        Assert.Equal("address_comment", applyAction.Task);
+        Assert.Equal("apply_recommendation", applyAction.Task);
+        Assert.Contains("Apply the recommendation you made", applyAction.Instructions!);
+    }
+
+    [Fact]
+    public void CommentReplied_BotReviewer_AutoResolves()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.UnresolvedComments = [MakeComment("c1", "copilot-pull-request-reviewer[bot]")];
+        state.CurrentCommentIndex = 0;
+
+        var action = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
+
+        // Bot reviewer → auto-resolve (same as comment_addressed)
+        Assert.True(state.PendingResolveAfterAddress);
+        Assert.Equal("Replied to comment", state.PendingResolveSummary);
+        Assert.Equal("auto_execute", action.Action);
+        Assert.Equal("resolve_thread", action.Task);
+    }
+
+    [Fact]
+    public void CommentReplied_BotReviewer_PostResolve_UsesRepliedSummary()
+    {
+        // After bot auto-resolve completes (task_complete), the summary should say
+        // "Replied to comment" not "Comment addressed"
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.UnresolvedComments = [
+            MakeComment("c1", "copilot-pull-request-reviewer[bot]"),
+            MakeComment("c2", "human-reviewer", "src/Other.cs")
+        ];
+        state.CurrentCommentIndex = 0;
+
+        // comment_replied on bot → resolve_thread
+        MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
+        // resolve completes → should use "Replied to comment" in user-facing question
+        var action = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        Assert.Equal("ask_user", action.Action);
+        Assert.Contains("Replied to comment", action.Question!);
+        Assert.DoesNotContain("addressed", action.Question!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void CommentAddressed_PostResolve_UsesAddressedSummary()
+    {
+        // Verify comment_addressed still uses "Comment addressed" after auto-resolve
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.UnresolvedComments = [
+            MakeComment("c1", "human-reviewer"),
+            MakeComment("c2", "human-reviewer2", "src/Other.cs")
+        ];
+        state.CurrentCommentIndex = 0;
+
+        // comment_addressed → resolve_thread
+        MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
+        // resolve completes → should use "Comment addressed"
+        var action = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        Assert.Equal("ask_user", action.Action);
+        Assert.Contains("Comment addressed", action.Question!);
+    }
+
+    [Fact]
+    public void CommentReplied_HumanReviewer_TracksWaitingForReply()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.UnresolvedComments = [MakeComment("c1", "human-reviewer")];
+        state.CurrentCommentIndex = 0;
+
+        var action = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
+
+        // Human reviewer → track as waiting-for-reply, don't auto-resolve
+        Assert.Single(state.WaitingForReplyComments);
+        Assert.True(state.WaitingForReplyComments[0].IsWaitingForReply);
+        Assert.False(state.PendingResolveAfterAddress);
+        // Single comment → advances to polling
+        Assert.Equal("polling", action.Action);
+    }
+
+    [Fact]
+    public void ApplyRecommendation_Instructions_DifferentiatePaths()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.UnresolvedComments = [MakeComment()];
+        state.CurrentCommentIndex = 0;
+
+        MonitorTransitions.ProcessEvent(state, "user_chose", "explain", null);
+        MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "apply_fix", null);
+
+        // Instructions should mention both event paths
+        Assert.Contains("event=comment_addressed", action.Instructions!);
+        Assert.Contains("event=comment_replied", action.Instructions!);
+    }
+
+    [Fact]
+    public void CommentReplied_ExplainAll_HumanReviewer_AdvancesToNextComment()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.ExplainAllIterating;
+        state.UnresolvedComments = [MakeComment("c1", "human-reviewer"), MakeComment("c2", "human-reviewer2", "src/Other.cs")];
+        state.CurrentCommentIndex = 0;
+
+        var action = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
+
+        // Should track first comment as waiting-for-reply
+        Assert.Single(state.WaitingForReplyComments);
+        Assert.Equal("c1", state.WaitingForReplyComments[0].Id);
+        // Should advance to explain the next comment
+        Assert.Equal(1, state.CurrentCommentIndex);
+        Assert.Equal("execute", action.Action);
+        Assert.Equal("explain_comment", action.Task);
+    }
+
+    [Fact]
+    public void CommentReplied_PickedSingleComment_MultipleUnresolved_MessageSaysReplied()
+    {
+        // Scenario: user picked a specific comment from multi-comment list,
+        // went through explain → apply_fix → agent pushes back → comment_replied.
+        // AdvanceAfterCommentAddressed falls to PickRemaining which shows
+        // "Comment addressed. X more unresolved..." — but we only replied/pushed back.
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.UnresolvedComments = [MakeComment("c1", "human-reviewer"), MakeComment("c2", "human-reviewer2", "src/Other.cs")];
+        state.CurrentCommentIndex = 0;
+
+        var action = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
+
+        // Should NOT say "Comment addressed" since we only replied
+        Assert.Equal("ask_user", action.Action);
+        Assert.DoesNotContain("addressed", action.Question!, StringComparison.OrdinalIgnoreCase);
     }
 
     #endregion

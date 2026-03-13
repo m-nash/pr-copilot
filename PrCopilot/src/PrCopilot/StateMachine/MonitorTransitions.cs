@@ -163,6 +163,9 @@ public static class MonitorTransitions
             // LLM finished addressing a comment
             (MonitorStateId.ExecutingTask, "comment_addressed") => ProcessCommentAddressed(state, data),
 
+            // LLM replied to a comment (pushback/clarification — no code changes)
+            (MonitorStateId.ExecutingTask, "comment_replied") => ProcessCommentReplied(state),
+
             // LLM finished investigation
             (MonitorStateId.Investigating, "investigation_complete") => ProcessInvestigationComplete(state, data),
 
@@ -188,12 +191,14 @@ public static class MonitorTransitions
 
     private static MonitorAction ProcessTaskComplete(MonitorState state)
     {
-        // If we just auto-resolved a thread after addressing a comment, advance to next comment
+        // If we just auto-resolved a thread after addressing/replying to a comment, advance
         if (state.PendingResolveAfterAddress)
         {
+            var summary = state.PendingResolveSummary ?? "Comment addressed";
             state.PendingResolveAfterAddress = false;
+            state.PendingResolveSummary = null;
             state.ActiveWaitingComment = null;
-            return AdvanceAfterCommentAddressed(state);
+            return AdvanceAfterComment(state, summary);
         }
 
         // Explain-all flow: after explain or freeform task, re-present per-comment choices
@@ -380,7 +385,7 @@ public static class MonitorTransitions
                 WaitForManualHandling(state),
 
             (CommentFlowState.SingleCommentPrompt, "address") => BeginAddressCurrentComment(state),
-            (CommentFlowState.SingleCommentPrompt, "apply_fix") => BeginAddressCurrentComment(state),
+            (CommentFlowState.SingleCommentPrompt, "apply_fix") => BeginApplyRecommendation(state),
             (CommentFlowState.SingleCommentPrompt, "explain") => BeginExplainComment(state),
 
             // Per-comment confirmation in address-all flow
@@ -389,7 +394,7 @@ public static class MonitorTransitions
             (CommentFlowState.AddressAllIterating, "done") => TransitionToPolling(state),
 
             // Per-comment confirmation in explain-all flow
-            (CommentFlowState.ExplainAllIterating, "apply_fix") => BeginAddressCurrentComment(state),
+            (CommentFlowState.ExplainAllIterating, "apply_fix") => BeginApplyRecommendation(state),
             (CommentFlowState.ExplainAllIterating, "skip") => AdvanceExplainAll(state),
             (CommentFlowState.ExplainAllIterating, "done") => TransitionToPolling(state),
 
@@ -513,6 +518,26 @@ public static class MonitorTransitions
         return EmitAddressCommentAction(state);
     }
 
+    private static MonitorAction BeginApplyRecommendation(MonitorState state)
+    {
+        if (state.CurrentCommentIndex >= state.UnresolvedComments.Count)
+            return TransitionToPolling(state);
+
+        var c = state.UnresolvedComments[state.CurrentCommentIndex];
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        return new MonitorAction
+        {
+            Action = "execute",
+            Task = "apply_recommendation",
+            Instructions = $"Apply the recommendation you made during your analysis of this comment. " +
+                $"If you recommended implementing the change, make the code changes. ONLY address THIS SPECIFIC comment — do NOT address, reply to, or fix any other comments. STOP and present your changes to the user for review before committing — use ask_user to show what you changed and ask for approval. Only commit/push after the user approves (honor user's custom instructions for git workflow). After pushing, reply in the thread with what was changed and link the commit (use `git rev-parse HEAD` to get the SHA, then format as {state.Owner}/{state.Repo}@SHA), then call pr_monitor_next_step with event=comment_addressed. " +
+                $"If you recommended pushing back, disagreeing, or asking a clarifying question, reply in the comment thread (referencing your analysis), then call pr_monitor_next_step with event=comment_replied. " +
+                $"If you recommended agreeing with the comment but no code changes are needed, reply acknowledging the comment, then call pr_monitor_next_step with event=comment_addressed. " +
+                $"Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{c.Body}\". URL: {c.Url}.{CopilotFooter(state)}",
+            Context = c
+        };
+    }
+
     private static MonitorAction BeginExplainComment(MonitorState state)
     {
         var c = state.UnresolvedComments[state.CurrentCommentIndex];
@@ -556,13 +581,48 @@ public static class MonitorTransitions
         {
             state.ActiveWaitingComment = addressedComment;
             state.PendingResolveAfterAddress = true;
+            state.PendingResolveSummary = "Comment addressed";
             return BuildResolveThreadAction(state, addressedComment);
         }
 
         return AdvanceAfterCommentAddressed(state);
     }
 
-    private static MonitorAction AdvanceAfterCommentAddressed(MonitorState state)
+    private static MonitorAction ProcessCommentReplied(MonitorState state)
+    {
+        // Agent replied to a comment (pushback/clarification) without code changes.
+        // Auto-resolve if the reviewer is a bot (they won't reply back).
+        // Track as waiting-for-reply if the reviewer is human.
+        var comment = state.CurrentCommentIndex < state.UnresolvedComments.Count
+            ? state.UnresolvedComments[state.CurrentCommentIndex]
+            : null;
+
+        if (comment != null)
+        {
+            if (PrStatusFetcher.IsBotReviewer(comment.Author))
+            {
+                // Bot reviewer — auto-resolve, they won't respond
+                state.ActiveWaitingComment = comment;
+                state.PendingResolveAfterAddress = true;
+                state.PendingResolveSummary = "Replied to comment";
+                return BuildResolveThreadAction(state, comment);
+            }
+
+            // Human reviewer — track as waiting-for-reply, don't resolve
+            if (!state.WaitingForReplyComments.Any(c => c.Id == comment.Id))
+            {
+                comment.IsWaitingForReply = true;
+                state.WaitingForReplyComments.Add(comment);
+            }
+        }
+
+        return AdvanceAfterComment(state, "Replied to comment");
+    }
+
+    private static MonitorAction AdvanceAfterCommentAddressed(MonitorState state) =>
+        AdvanceAfterComment(state, "Comment addressed");
+
+    private static MonitorAction AdvanceAfterComment(MonitorState state, string summary)
     {
         if (state.CommentFlow == CommentFlowState.AddressAllIterating)
         {
@@ -588,7 +648,7 @@ public static class MonitorTransitions
         if (state.CommentFlow == CommentFlowState.ExplainAllIterating)
             return AdvanceExplainAll(state);
 
-        // Single comment addressed — check for remaining
+        // Single comment handled — check for remaining
         state.CommentFlow = CommentFlowState.PickRemaining;
         var remaining = state.UnresolvedComments
             .Where((_, i) => i != state.CurrentCommentIndex)
@@ -601,7 +661,7 @@ public static class MonitorTransitions
         return new MonitorAction
         {
             Action = "ask_user",
-            Question = $"Comment addressed. {remaining.Count} more unresolved comment(s) remaining.",
+            Question = $"{summary}. {remaining.Count} more unresolved comment(s) remaining.",
             Choices = ["Address next comment", "I'll handle the rest myself"],
             Context = remaining
         };

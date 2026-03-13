@@ -12,6 +12,7 @@
     "nologo",
     "nums",
     "osascript",
+    "pushback",
     "slnx",
     "xunit"
   ],

@@ -71,6 +71,9 @@ public class MonitorState
     // Set when auto-resolving a thread after addressing a comment
     public bool PendingResolveAfterAddress { get; set; }
 
+    // Summary message for the post-resolve transition (e.g., "Comment addressed" vs "Replied to comment")
+    public string? PendingResolveSummary { get; set; }
+
     // Branch protection: repo requires all review conversations to be resolved before merging
     public bool RequiresConversationResolution { get; set; }
 
