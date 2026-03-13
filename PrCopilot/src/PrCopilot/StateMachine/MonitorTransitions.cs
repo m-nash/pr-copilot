@@ -612,10 +612,13 @@ public static class MonitorTransitions
             }
         }
 
-        return AdvanceAfterCommentAddressed(state);
+        return AdvanceAfterComment(state, "Replied to comment");
     }
 
-    private static MonitorAction AdvanceAfterCommentAddressed(MonitorState state)
+    private static MonitorAction AdvanceAfterCommentAddressed(MonitorState state) =>
+        AdvanceAfterComment(state, "Comment addressed");
+
+    private static MonitorAction AdvanceAfterComment(MonitorState state, string summary)
     {
         if (state.CommentFlow == CommentFlowState.AddressAllIterating)
         {
@@ -641,7 +644,7 @@ public static class MonitorTransitions
         if (state.CommentFlow == CommentFlowState.ExplainAllIterating)
             return AdvanceExplainAll(state);
 
-        // Single comment addressed — check for remaining
+        // Single comment handled — check for remaining
         state.CommentFlow = CommentFlowState.PickRemaining;
         var remaining = state.UnresolvedComments
             .Where((_, i) => i != state.CurrentCommentIndex)
@@ -654,7 +657,7 @@ public static class MonitorTransitions
         return new MonitorAction
         {
             Action = "ask_user",
-            Question = $"Comment addressed. {remaining.Count} more unresolved comment(s) remaining.",
+            Question = $"{summary}. {remaining.Count} more unresolved comment(s) remaining.",
             Choices = ["Address next comment", "I'll handle the rest myself"],
             Context = remaining
         };

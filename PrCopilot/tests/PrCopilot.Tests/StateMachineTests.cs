@@ -1369,6 +1369,26 @@ public class StateMachineTests
         Assert.Equal("explain_comment", action.Task);
     }
 
+    [Fact]
+    public void CommentReplied_PickedSingleComment_MultipleUnresolved_MessageSaysReplied()
+    {
+        // Scenario: user picked a specific comment from multi-comment list,
+        // went through explain → apply_fix → agent pushes back → comment_replied.
+        // AdvanceAfterCommentAddressed falls to PickRemaining which shows
+        // "Comment addressed. X more unresolved..." — but we only replied/pushed back.
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.UnresolvedComments = [MakeComment("c1", "human-reviewer"), MakeComment("c2", "human-reviewer2", "src/Other.cs")];
+        state.CurrentCommentIndex = 0;
+
+        var action = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
+
+        // Should NOT say "Comment addressed" since we only replied
+        Assert.Equal("ask_user", action.Action);
+        Assert.DoesNotContain("addressed", action.Question!, StringComparison.OrdinalIgnoreCase);
+    }
+
     #endregion
 
     #region Deferred Rerun (pending checks)
