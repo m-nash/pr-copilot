@@ -2283,5 +2283,29 @@ public class StateMachineTests
         Assert.False(result);
     }
 
+    [Fact]
+    public void ShouldReRequestReview_ReviewerSubmittedNewReview_UnrepliedComments_ReturnsFalse()
+    {
+        // Reviewer submitted a new review after being re-requested, adding new comments.
+        // They are no longer in requested_reviewers (GitHub removes them on review submit),
+        // but they still have unresolved comments that we haven't replied to yet.
+        // ShouldReRequestReview must return false — we should not re-request until
+        // we've replied to ALL their comments.
+        var alreadyRequested = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var comments = new List<CommentInfo>
+        {
+            // Previously replied-to comment
+            new() { Id = "c1", Author = "copilot-pull-request-reviewer[bot]", IsWaitingForReply = true },
+            // New comment from their latest review — not yet replied to
+            new() { Id = "c2", Author = "copilot-pull-request-reviewer[bot]", IsWaitingForReply = false }
+        };
+
+        var result = MonitorTransitions.ShouldReRequestReview(
+            "copilot-pull-request-reviewer[bot]", "pr-author", "current-user",
+            alreadyRequested, comments);
+
+        Assert.False(result);
+    }
+
     #endregion
 }
