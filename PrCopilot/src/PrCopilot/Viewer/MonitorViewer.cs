@@ -1299,7 +1299,7 @@ public static class MonitorViewer
                     return (Array.Empty<string>(), holdOffset, truncated);
                 }
                 var completeText = text[..(lastNewline + 1)];
-                newOffset = readFrom + Encoding.UTF8.GetByteCount(completeText);
+                newOffset = readFrom + bomOffset + Encoding.UTF8.GetByteCount(completeText);
                 text = completeText;
             }
 

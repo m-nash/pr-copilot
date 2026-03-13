@@ -364,6 +364,37 @@ public class DebugLogReaderTests : IDisposable
     }
 
     [Fact]
+    public void Utf8Bom_PartialLine_OffsetAccountsForBom()
+    {
+        // When a BOM is present and text doesn't end with \n, the offset calculation
+        // must account for the 3-byte BOM. Otherwise the next read starts 3 bytes too
+        // early, causing duplication/corruption.
+        var utf8WithBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: true);
+        // Write two complete lines + one partial (no trailing \n)
+        File.WriteAllText(_tempFile,
+            "DEBUG|12:00:00 PM|[GhCli] Line1\n" +
+            "DEBUG|12:00:01 PM|[GhCli] Line2\n" +
+            "DEBUG|12:00:02 PM|[GhCli] Partial", utf8WithBom);
+
+        // First read should return only complete lines (Line1, Line2)
+        var (lines, offset, _) = MonitorViewer.ReadDebugLogIncremental(_tempFile, 0);
+        Assert.Equal(2, lines.Length);
+        Assert.Contains("Line1", lines[0]);
+        Assert.Contains("Line2", lines[1]);
+
+        // Now append a newline to complete the partial line
+        File.AppendAllText(_tempFile, "\n", Utf8NoBom);
+
+        // Second read from returned offset should get just the completed line
+        var (lines2, _, _) = MonitorViewer.ReadDebugLogIncremental(_tempFile, offset);
+        Assert.Single(lines2);
+        Assert.Contains("Partial", lines2[0]);
+        // Must NOT contain duplicate content from Line1 or Line2
+        Assert.DoesNotContain("Line1", lines2[0]);
+        Assert.DoesNotContain("Line2", lines2[0]);
+    }
+
+    [Fact]
     public void NoNewlineInChunk_StillAdvancesOffset()
     {
         // If a single massive line has no newline within the read window,
