@@ -1747,6 +1747,25 @@ public class StateMachineTests
         Assert.Equal("copilot-pull-request-reviewer", result);
     }
 
+    [Fact]
+    public void NormalizeBotLogin_NullAuthor_ReturnsEmpty()
+    {
+        // GraphQL returns author: null for deleted/ghost users
+        var json = "null";
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        var result = PrStatusFetcher.NormalizeBotLogin(doc.RootElement);
+        Assert.Equal("", result);
+    }
+
+    [Fact]
+    public void NormalizeBotLogin_MissingLogin_ReturnsEmpty()
+    {
+        var json = """{"__typename": "Bot"}""";
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        var result = PrStatusFetcher.NormalizeBotLogin(doc.RootElement);
+        Assert.Equal("", result);
+    }
+
     #endregion
 
     #region ApprovalAutoResolve

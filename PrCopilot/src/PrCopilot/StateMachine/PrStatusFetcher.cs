@@ -513,7 +513,14 @@ public static class PrStatusFetcher
     /// </summary>
     internal static string NormalizeBotLogin(JsonElement authorElement)
     {
-        var login = authorElement.GetProperty("login").GetString() ?? "";
+        // Guard against null/non-object author (e.g. deleted/ghost users)
+        if (authorElement.ValueKind != JsonValueKind.Object)
+            return "";
+
+        if (!authorElement.TryGetProperty("login", out var loginProp))
+            return "";
+
+        var login = loginProp.GetString() ?? "";
         if (authorElement.TryGetProperty("__typename", out var tn) &&
             string.Equals(tn.GetString(), "Bot", StringComparison.OrdinalIgnoreCase) &&
             !login.EndsWith("[bot]", StringComparison.OrdinalIgnoreCase))
