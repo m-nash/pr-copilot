@@ -1327,6 +1327,8 @@ public class StateMachineTests
         Assert.Single(state.WaitingForReplyComments);
         Assert.True(state.WaitingForReplyComments[0].IsWaitingForReply);
         Assert.False(state.PendingResolveAfterAddress);
+        // Single comment → advances to polling
+        Assert.Equal("polling", action.Action);
     }
 
     [Fact]
