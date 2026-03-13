@@ -955,7 +955,7 @@ public class StateMachineTests
     }
 
     [Fact]
-    public void ProcessEvent_ExplainAll_ApplyFix_BeginsAddressComment()
+    public void ProcessEvent_ExplainAll_ApplyFix_BeginsApplyRecommendation()
     {
         var state = CreateState();
         state.CurrentState = MonitorStateId.AwaitingUser;
@@ -966,7 +966,8 @@ public class StateMachineTests
         var action = MonitorTransitions.ProcessEvent(state, "user_chose", "apply_fix", null);
 
         Assert.Equal("execute", action.Action);
-        Assert.Equal("address_comment", action.Task);
+        Assert.Equal("apply_recommendation", action.Task);
+        Assert.Contains("Apply the recommendation you made", action.Instructions!);
         Assert.Equal(MonitorStateId.ExecutingTask, state.CurrentState);
     }
 
@@ -1276,7 +1277,7 @@ public class StateMachineTests
     }
 
     [Fact]
-    public void ExplainFlow_ApplyAfterExplain_ExecutesAddressTask()
+    public void ExplainFlow_ApplyAfterExplain_ExecutesApplyRecommendation()
     {
         var state = CreateState();
         state.CurrentState = MonitorStateId.AwaitingUser;
@@ -1290,7 +1291,8 @@ public class StateMachineTests
         var applyAction = MonitorTransitions.ProcessEvent(state, "user_chose", "apply_fix", null);
 
         Assert.Equal("execute", applyAction.Action);
-        Assert.Equal("address_comment", applyAction.Task);
+        Assert.Equal("apply_recommendation", applyAction.Task);
+        Assert.Contains("Apply the recommendation you made", applyAction.Instructions!);
     }
 
     #endregion

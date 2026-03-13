@@ -380,7 +380,7 @@ public static class MonitorTransitions
                 WaitForManualHandling(state),
 
             (CommentFlowState.SingleCommentPrompt, "address") => BeginAddressCurrentComment(state),
-            (CommentFlowState.SingleCommentPrompt, "apply_fix") => BeginAddressCurrentComment(state),
+            (CommentFlowState.SingleCommentPrompt, "apply_fix") => BeginApplyRecommendation(state),
             (CommentFlowState.SingleCommentPrompt, "explain") => BeginExplainComment(state),
 
             // Per-comment confirmation in address-all flow
@@ -389,7 +389,7 @@ public static class MonitorTransitions
             (CommentFlowState.AddressAllIterating, "done") => TransitionToPolling(state),
 
             // Per-comment confirmation in explain-all flow
-            (CommentFlowState.ExplainAllIterating, "apply_fix") => BeginAddressCurrentComment(state),
+            (CommentFlowState.ExplainAllIterating, "apply_fix") => BeginApplyRecommendation(state),
             (CommentFlowState.ExplainAllIterating, "skip") => AdvanceExplainAll(state),
             (CommentFlowState.ExplainAllIterating, "done") => TransitionToPolling(state),
 
@@ -511,6 +511,25 @@ public static class MonitorTransitions
     {
         state.CurrentState = MonitorStateId.ExecutingTask;
         return EmitAddressCommentAction(state);
+    }
+
+    private static MonitorAction BeginApplyRecommendation(MonitorState state)
+    {
+        if (state.CurrentCommentIndex >= state.UnresolvedComments.Count)
+            return TransitionToPolling(state);
+
+        var c = state.UnresolvedComments[state.CurrentCommentIndex];
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        return new MonitorAction
+        {
+            Action = "execute",
+            Task = "apply_recommendation",
+            Instructions = $"Apply the recommendation you made during your analysis of this comment. " +
+                $"If you recommended implementing the change, make the code changes. ONLY address THIS SPECIFIC comment — do NOT address, reply to, or fix any other comments. STOP and present your changes to the user for review before committing — use ask_user to show what you changed and ask for approval. Only commit/push after the user approves (honor user's custom instructions for git workflow). After pushing, reply in the thread with what was changed and link the commit (use `git rev-parse HEAD` to get the SHA, then format as {state.Owner}/{state.Repo}@SHA), then call pr_monitor_next_step with event=comment_addressed. " +
+                $"If you recommended pushing back or that no changes are needed, reply in the comment thread explaining why (referencing your analysis), then call pr_monitor_next_step with event=comment_addressed. " +
+                $"Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{c.Body}\". URL: {c.Url}.{CopilotFooter(state)}",
+            Context = c
+        };
     }
 
     private static MonitorAction BeginExplainComment(MonitorState state)
