@@ -172,18 +172,16 @@ public static class MonitorTransitions
             // LLM applied a fix and pushed
             (MonitorStateId.ApplyingFix, "push_completed") => TransitionToPolling(state),
 
+            // Recovery: agent applied fix + pushed during investigation (skipped investigation_complete → apply_fix flow)
+            (MonitorStateId.Investigating, "push_completed") => TransitionToPolling(state),
+
             // LLM finished executing a generic task
             (MonitorStateId.ExecutingTask, "task_complete") => ProcessTaskComplete(state),
 
             // Recovery: agent sent task_complete from AwaitingUser (skipped a tool call)
             (MonitorStateId.AwaitingUser, "task_complete") => RecoverFromUnexpectedTaskComplete(state),
 
-            _ => new MonitorAction
-            {
-                Action = "ask_user",
-                Question = $"Unexpected state: {state.CurrentState}/{eventType}. What would you like to do?",
-                Choices = ["Resume monitoring", "Stop monitoring"]
-            }
+            _ => RecoverFromUnexpectedState(state, eventType)
         };
         DebugLogger.Log("StateMachine", $"ProcessEvent result: action={result.Action}, task={result.Task ?? "null"}");
         return result;
@@ -294,6 +292,18 @@ public static class MonitorTransitions
 
         // Default: resume polling
         return TransitionToPolling(state);
+    }
+
+    private static MonitorAction RecoverFromUnexpectedState(MonitorState state, string eventType)
+    {
+        DebugLogger.Log("StateMachine", $"RECOVERY: Unexpected state {state.CurrentState}/{eventType}. Transitioning to AwaitingUser so next user_chose can recover.");
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        return new MonitorAction
+        {
+            Action = "ask_user",
+            Question = $"Unexpected state: {state.CurrentState}/{eventType}. What would you like to do?",
+            Choices = ["Resume monitoring", "Stop monitoring"]
+        };
     }
 
     private static MonitorAction TransitionToPolling(MonitorState state)
