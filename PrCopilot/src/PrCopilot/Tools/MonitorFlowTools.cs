@@ -109,24 +109,24 @@ public class MonitorFlowTools
     }
 
     /// <summary>
-    /// Auto-request a review from "copilot" if available and not already requested/reviewed.
+    /// Auto-request a review from Copilot if available and not already requested/reviewed.
     /// Returns true if a review was successfully requested, false otherwise.
     /// Failures are non-critical (copilot may not be available for the repo).
     /// </summary>
     private static async Task<bool> TryRequestCopilotReviewAsync(MonitorState state, ReviewResult reviewResult)
     {
-        const string copilotUser = "copilot";
-        // copilot-pull-request-reviewer[bot] is the author when copilot submits a review
-        const string copilotBotUser = "copilot-pull-request-reviewer[bot]";
-        // GraphQL variant without [bot] suffix
-        const string copilotBotUserGraphQL = "copilot-pull-request-reviewer";
+        // The bot's login varies by context:
+        //   Request via API: "copilot-pull-request-reviewer[bot]"
+        //   Shows in requested_reviewers: "Copilot"
+        //   Shows in reviews: "copilot-pull-request-reviewer[bot]"
+        //   GraphQL reviews: "copilot-pull-request-reviewer" (no [bot] suffix)
+        const string copilotRequestName = "copilot-pull-request-reviewer[bot]";
+        string[] copilotAliases = ["Copilot", "copilot-pull-request-reviewer[bot]", "copilot-pull-request-reviewer"];
 
         try
         {
             // Check if copilot has already submitted a review (any state)
-            if (reviewResult.AllReviewAuthors.Contains(copilotUser) ||
-                reviewResult.AllReviewAuthors.Contains(copilotBotUser) ||
-                reviewResult.AllReviewAuthors.Contains(copilotBotUserGraphQL))
+            if (copilotAliases.Any(alias => reviewResult.AllReviewAuthors.Contains(alias)))
             {
                 DebugLogger.Log("CopilotReview", "Copilot has already reviewed this PR — skipping request");
                 return false;
@@ -135,23 +135,33 @@ public class MonitorFlowTools
             // Check if copilot is already in the requested reviewers list
             var requestedReviewers = await PrStatusFetcher.FetchRequestedReviewersAsync(
                 state.Owner, state.Repo, state.PrNumber);
-            if (requestedReviewers != null && requestedReviewers.Contains(copilotUser))
+            if (requestedReviewers != null && copilotAliases.Any(alias => requestedReviewers.Contains(alias)))
             {
                 DebugLogger.Log("CopilotReview", "Copilot already in requested reviewers — skipping");
                 return false;
             }
 
-            // Try to request copilot review — may fail if copilot is not available for this repo
+            // Request using the bot's full login name
             var (success, output) = await GitHubCliExecutor.RequestReviewAsync(
-                state.Owner, state.Repo, state.PrNumber, copilotUser);
+                state.Owner, state.Repo, state.PrNumber, copilotRequestName);
 
-            if (success)
+            if (!success)
             {
-                DebugLogger.Log("CopilotReview", "Copilot review requested successfully");
+                DebugLogger.Log("CopilotReview", $"Copilot review request API failed: {output}");
+                return false;
+            }
+
+            // GitHub API returns 200 even when a reviewer isn't valid for the repo —
+            // it silently drops invalid names. Verify copilot was actually added.
+            var postRequestReviewers = await PrStatusFetcher.FetchRequestedReviewersAsync(
+                state.Owner, state.Repo, state.PrNumber);
+            if (postRequestReviewers != null && copilotAliases.Any(alias => postRequestReviewers.Contains(alias)))
+            {
+                DebugLogger.Log("CopilotReview", "Copilot review requested and verified successfully");
                 return true;
             }
 
-            DebugLogger.Log("CopilotReview", $"Copilot review request failed (not available for this repo?): {output}");
+            DebugLogger.Log("CopilotReview", "Copilot review request returned 200 but reviewer was not added — copilot likely not available for this repo");
             return false;
         }
         catch (Exception ex)
