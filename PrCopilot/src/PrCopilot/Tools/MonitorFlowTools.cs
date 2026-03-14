@@ -108,6 +108,59 @@ public class MonitorFlowTools
         _sessions.Clear();
     }
 
+    /// <summary>
+    /// Auto-request a review from "copilot" if available and not already requested/reviewed.
+    /// Returns true if a review was successfully requested, false otherwise.
+    /// Failures are non-critical (copilot may not be available for the repo).
+    /// </summary>
+    private static async Task<bool> TryRequestCopilotReviewAsync(MonitorState state, ReviewResult reviewResult)
+    {
+        const string copilotUser = "copilot";
+        // copilot-pull-request-reviewer[bot] is the author when copilot submits a review
+        const string copilotBotUser = "copilot-pull-request-reviewer[bot]";
+        // GraphQL variant without [bot] suffix
+        const string copilotBotUserGraphQL = "copilot-pull-request-reviewer";
+
+        try
+        {
+            // Check if copilot has already submitted a review (any state)
+            if (reviewResult.AllReviewAuthors.Contains(copilotUser) ||
+                reviewResult.AllReviewAuthors.Contains(copilotBotUser) ||
+                reviewResult.AllReviewAuthors.Contains(copilotBotUserGraphQL))
+            {
+                DebugLogger.Log("CopilotReview", "Copilot has already reviewed this PR — skipping request");
+                return false;
+            }
+
+            // Check if copilot is already in the requested reviewers list
+            var requestedReviewers = await PrStatusFetcher.FetchRequestedReviewersAsync(
+                state.Owner, state.Repo, state.PrNumber);
+            if (requestedReviewers != null && requestedReviewers.Contains(copilotUser))
+            {
+                DebugLogger.Log("CopilotReview", "Copilot already in requested reviewers — skipping");
+                return false;
+            }
+
+            // Try to request copilot review — may fail if copilot is not available for this repo
+            var (success, output) = await GitHubCliExecutor.RequestReviewAsync(
+                state.Owner, state.Repo, state.PrNumber, copilotUser);
+
+            if (success)
+            {
+                DebugLogger.Log("CopilotReview", "Copilot review requested successfully");
+                return true;
+            }
+
+            DebugLogger.Log("CopilotReview", $"Copilot review request failed (not available for this repo?): {output}");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            DebugLogger.Log("CopilotReview", $"Failed to request copilot review (non-critical): {ex.Message}");
+            return false;
+        }
+    }
+
     [McpServerTool(Name = "pr_monitor_start"), Description("Initialize PR monitoring. Fetches PR data, sets up log file, returns monitor_id. Call pr_monitor_next_step next.")]
     public async Task<string> PrMonitorStart(
         [Description("GitHub repository owner")] string owner,
@@ -222,6 +275,9 @@ public class MonitorFlowTools
         LaunchViewerIfNeeded(state);
         DebugLogger.Log("PrMonitorStart", $"Session stored, viewer checked, returning monitor_id={monitorId}");
 
+        // Auto-request copilot review if not already requested/reviewed on this PR
+        var copilotRequested = await TryRequestCopilotReviewAsync(state, reviewResult);
+
         return JsonSerializer.Serialize(new
         {
             monitor_id = monitorId,
@@ -233,6 +289,7 @@ public class MonitorFlowTools
             unresolved_comments = state.UnresolvedComments.Count,
             waiting_for_reply_comments = state.WaitingForReplyComments.Count,
             merge_conflict = state.HasMergeConflict,
+            copilot_review_requested = copilotRequested,
             message = $"Monitoring initialized for PR #{prNumber}. Call pr_monitor_next_step with event='ready' to begin."
         }, _jsonOptions);
     }
@@ -1390,14 +1447,14 @@ public class MonitorFlowTools
         {
             id = u.Id,
             author = u.Author,
-            summary = u.Body.Length > 80 ? u.Body[..80] + "..." : u.Body,
+            summary = u.Body.Length > 200 ? u.Body[..200] + "..." : u.Body,
             url = u.Url
         }).ToList();
         var waitingSummary = state.WaitingForReplyComments.Select(u => new
         {
             id = u.Id,
             author = u.Author,
-            summary = u.Body.Length > 80 ? u.Body[..80] + "..." : u.Body,
+            summary = u.Body.Length > 200 ? u.Body[..200] + "..." : u.Body,
             url = u.Url
         }).ToList();
 

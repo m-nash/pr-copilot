@@ -231,7 +231,7 @@ public static class MonitorTransitions
             return new MonitorAction
             {
                 Action = "ask_user",
-                Question = $"Comment ({state.CurrentCommentIndex + 1}/{state.UnresolvedComments.Count}) from {c.Author} on {c.FilePath}:{c.Line}: \"{Truncate(c.Body, 200)}\"",
+                Question = $"Comment ({state.CurrentCommentIndex + 1}/{state.UnresolvedComments.Count}) from {c.Author} on {c.FilePath}:{c.Line}: \"{Truncate(c.Body, 500)}\"",
                 Choices = ["Apply the recommendation", "Skip this comment", "Done — resume monitoring"],
                 Context = c
             };
@@ -242,28 +242,23 @@ public static class MonitorTransitions
             state.CurrentCommentIndex < state.UnresolvedComments.Count)
         {
             var c = state.UnresolvedComments[state.CurrentCommentIndex];
-            state.CurrentState = MonitorStateId.AwaitingUser;
 
-            // After explain, show post-explain choices (no "Explain" again)
+            // After explain, show post-explain choices
             if (state.PendingExplainResult)
             {
                 state.PendingExplainResult = false;
+                state.CurrentState = MonitorStateId.AwaitingUser;
                 return new MonitorAction
                 {
                     Action = "ask_user",
-                    Question = $"Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{Truncate(c.Body, 200)}\"",
+                    Question = $"Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{Truncate(c.Body, 500)}\"",
                     Choices = ["Apply the recommendation", "I'll handle it myself"],
                     Context = c
                 };
             }
 
-            return new MonitorAction
-            {
-                Action = "ask_user",
-                Question = $"Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{Truncate(c.Body, 200)}\"",
-                Choices = ["Address this comment", "Explain and suggest what to do", "I'll handle it myself"],
-                Context = c
-            };
+            // Safety fallback: if we reach here without explain having run, trigger it
+            return BeginExplainComment(state);
         }
 
         // If we were handling a waiting-for-reply comment action, return to monitoring
@@ -374,13 +369,8 @@ public static class MonitorTransitions
         // Remove from waiting list since we're handling the reply now
         state.WaitingForReplyComments.RemoveAll(c => c.Id == comment.Id);
 
-        return new MonitorAction
-        {
-            Action = "ask_user",
-            Question = $"[{timestamp}] 💬 {comment.LastReplyAuthor} replied to your comment on {comment.FilePath}:{comment.Line}: \"{Truncate(comment.Body, 100)}\"",
-            Choices = ["Address this comment", "Explain and suggest what to do", "I'll handle it myself"],
-            Context = comment
-        };
+        // Always auto-explain — skip the choice prompt
+        return BeginExplainComment(state);
     }
 
     private static MonitorAction BuildCommentAction(MonitorState state, string timestamp)
@@ -390,14 +380,8 @@ public static class MonitorTransitions
         {
             state.CommentFlow = CommentFlowState.SingleCommentPrompt;
             state.CurrentCommentIndex = 0;
-            var c = comments[0];
-            return new MonitorAction
-            {
-                Action = "ask_user",
-                Question = $"[{timestamp}] 💬 PR #{state.PrNumber} has a new comment from {c.Author} on {c.FilePath}: \"{Truncate(c.Body, 100)}\"",
-                Choices = ["Address this comment", "Explain and suggest what to do", "I'll handle it myself"],
-                Context = c
-            };
+            // Always auto-explain single comments — skip the choice prompt
+            return BeginExplainComment(state);
         }
 
         state.CommentFlow = CommentFlowState.MultiCommentPrompt;
@@ -458,7 +442,7 @@ public static class MonitorTransitions
         return new MonitorAction
         {
             Action = "ask_user",
-            Question = $"Comment (1/{state.UnresolvedComments.Count}): {c.Author} on {c.FilePath}:{c.Line}: \"{Truncate(c.Body, 100)}\"",
+            Question = $"Comment (1/{state.UnresolvedComments.Count}): {c.Author} on {c.FilePath}:{c.Line}: \"{Truncate(c.Body, 300)}\"",
             Choices = ["Address this comment", "Skip this comment", "Done — resume monitoring"],
             Context = c
         };
@@ -474,7 +458,7 @@ public static class MonitorTransitions
             return new MonitorAction
             {
                 Action = "ask_user",
-                Question = $"Next comment ({state.CurrentCommentIndex + 1}/{state.UnresolvedComments.Count}): {next.Author} on {next.FilePath}:{next.Line}: \"{Truncate(next.Body, 100)}\"",
+                Question = $"Next comment ({state.CurrentCommentIndex + 1}/{state.UnresolvedComments.Count}): {next.Author} on {next.FilePath}:{next.Line}: \"{Truncate(next.Body, 300)}\"",
                 Choices = ["Address this comment", "Skip this comment", "Done — resume monitoring"],
                 Context = next
             };
@@ -515,7 +499,7 @@ public static class MonitorTransitions
     {
         state.CommentFlow = CommentFlowState.PickComment;
         var choices = state.UnresolvedComments
-            .Select((c, i) => $"{i + 1}. {c.Author}: {Truncate(c.Body, 60)} ({c.FilePath})")
+            .Select((c, i) => $"{i + 1}. {c.Author}: {Truncate(c.Body, 120)} ({c.FilePath})")
             .ToList();
         choices.Add("I'll handle them myself");
 
@@ -538,14 +522,8 @@ public static class MonitorTransitions
         {
             state.CurrentCommentIndex = idx - 1;
             state.CommentFlow = CommentFlowState.SingleCommentPrompt;
-            var c = state.UnresolvedComments[state.CurrentCommentIndex];
-            return new MonitorAction
-            {
-                Action = "ask_user",
-                Question = $"Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{Truncate(c.Body, 200)}\"",
-                Choices = ["Address this comment", "Explain and suggest what to do", "I'll handle it myself"],
-                Context = c
-            };
+            // Always auto-explain picked comments
+            return BeginExplainComment(state);
         }
 
         return BeginPickComment(state);
@@ -690,7 +668,7 @@ public static class MonitorTransitions
                 return new MonitorAction
                 {
                     Action = "ask_user",
-                    Question = $"Next comment ({state.CurrentCommentIndex + 1}/{state.UnresolvedComments.Count}): {next.Author} on {next.FilePath}:{next.Line}: \"{Truncate(next.Body, 100)}\"",
+                    Question = $"Next comment ({state.CurrentCommentIndex + 1}/{state.UnresolvedComments.Count}): {next.Author} on {next.FilePath}:{next.Line}: \"{Truncate(next.Body, 300)}\"",
                     Choices = ["Address this comment", "Skip this comment", "Done — resume monitoring"],
                     Context = next
                 };
@@ -741,15 +719,8 @@ public static class MonitorTransitions
         if (state.CurrentCommentIndex < state.UnresolvedComments.Count)
         {
             state.CommentFlow = CommentFlowState.SingleCommentPrompt;
-            var c = state.UnresolvedComments[state.CurrentCommentIndex];
-            state.CurrentState = MonitorStateId.AwaitingUser;
-            return new MonitorAction
-            {
-                Action = "ask_user",
-                Question = $"Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{Truncate(c.Body, 200)}\"",
-                Choices = ["Address this comment", "Explain and suggest what to do", "I'll handle it myself"],
-                Context = c
-            };
+            // Always auto-explain the next comment
+            return BeginExplainComment(state);
         }
 
         return TransitionToPolling(state);
@@ -771,7 +742,7 @@ public static class MonitorTransitions
         return new MonitorAction
         {
             Action = "ask_user",
-            Question = $"[{timestamp}] ⏳ Waiting comment from {comment.Author} on {comment.FilePath}:{comment.Line}: \"{Truncate(comment.Body, 150)}\" — You replied, ball is in reviewer's court.",
+            Question = $"[{timestamp}] ⏳ Waiting comment from {comment.Author} on {comment.FilePath}:{comment.Line}: \"{Truncate(comment.Body, 400)}\" — You replied, ball is in reviewer's court.",
             Choices = ["Resolve this thread", "Go back to monitoring"],
             Context = comment
         };
