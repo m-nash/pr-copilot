@@ -189,6 +189,7 @@ public static class PrStatusFetcher
 
         var approvals = new List<ReviewInfo>();
         var staleApprovals = new List<ReviewInfo>();
+        var allAuthors = new HashSet<string>(latestByUser.Keys, StringComparer.OrdinalIgnoreCase);
 
         foreach (var (user, (state, commitId, submittedAt)) in latestByUser)
         {
@@ -208,7 +209,7 @@ public static class PrStatusFetcher
             }
         }
 
-        return new ReviewResult { Approvals = approvals, StaleApprovals = staleApprovals };
+        return new ReviewResult { Approvals = approvals, StaleApprovals = staleApprovals, AllReviewAuthors = allAuthors };
     }
 
     /// <summary>
