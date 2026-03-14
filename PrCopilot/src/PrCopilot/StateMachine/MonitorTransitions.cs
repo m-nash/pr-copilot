@@ -809,6 +809,9 @@ public static class MonitorTransitions
         IEnumerable<string> alreadyReRequested,
         IReadOnlyList<CommentInfo> unresolvedComments, int skipIndex = -1)
     {
+        if (string.IsNullOrWhiteSpace(reviewer))
+            return false;
+
         // Don't re-request from ourselves or the PR author
         if (string.Equals(reviewer, prAuthor, StringComparison.OrdinalIgnoreCase) ||
             string.Equals(reviewer, currentUser, StringComparison.OrdinalIgnoreCase))

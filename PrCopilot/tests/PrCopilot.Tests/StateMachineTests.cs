@@ -2307,5 +2307,20 @@ public class StateMachineTests
         Assert.False(result);
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ShouldReRequestReview_NullOrEmptyReviewer_ReturnsFalse(string? reviewer)
+    {
+        var alreadyRequested = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var comments = new List<CommentInfo>();
+
+        var result = MonitorTransitions.ShouldReRequestReview(
+            reviewer!, "pr-author", "current-user", alreadyRequested, comments);
+
+        Assert.False(result);
+    }
+
     #endregion
 }
