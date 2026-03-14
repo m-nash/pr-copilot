@@ -200,6 +200,7 @@ public class MonitorFlowTools
                 unresolved_comments = s.UnresolvedComments.Count,
                 waiting_for_reply_comments = s.WaitingForReplyComments.Count,
                 merge_conflict = s.HasMergeConflict,
+                copilot_review_requested = false,
                 message = $"Resuming existing monitor for PR #{prNumber}. Call pr_monitor_next_step with event='ready' to continue."
             }, _jsonOptions);
         }
