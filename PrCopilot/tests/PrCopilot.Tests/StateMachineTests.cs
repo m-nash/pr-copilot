@@ -718,7 +718,66 @@ public class StateMachineTests
 
         Assert.Equal("ask_user", action.Action);
         Assert.Contains("Unexpected state", action.Question);
+        // Question should show the original state, not the recovery state
+        Assert.Contains("Stopped", action.Question);
+        Assert.DoesNotContain("AwaitingUser", action.Question);
         Assert.NotNull(action.Choices);
+        // Verify recovery: state transitions to AwaitingUser so next user_chose won't loop
+        Assert.Equal(MonitorStateId.AwaitingUser, state.CurrentState);
+    }
+
+    [Fact]
+    public void ProcessEvent_UnexpectedState_ThenResume_TransitionsToPolling()
+    {
+        // Reproduces the PR 57090 bug: unexpected state → user picks Resume → should recover, not loop
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.Investigating;
+        state.CiFailureFlow = CiFailureFlowState.Investigating;
+
+        // First call: unexpected event triggers recovery prompt
+        var action = MonitorTransitions.ProcessEvent(state, "some_unexpected_event", null, null);
+        Assert.Equal("ask_user", action.Action);
+        Assert.Equal(MonitorStateId.AwaitingUser, state.CurrentState);
+
+        // Second call: user picks "Resume monitoring" — should escape the loop
+        action = MonitorTransitions.ProcessEvent(state, "user_chose", "resume", null);
+        Assert.Equal("polling", action.Action);
+        Assert.Equal(MonitorStateId.Polling, state.CurrentState);
+    }
+
+    [Fact]
+    public void ProcessEvent_PushCompletedFromInvestigating_TransitionsToPolling()
+    {
+        // Agent applied fix + pushed during investigation (skipped investigation_complete → apply_fix flow)
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.Investigating;
+        state.CiFailureFlow = CiFailureFlowState.Investigating;
+
+        var action = MonitorTransitions.ProcessEvent(state, "push_completed", null, null);
+
+        Assert.Equal("polling", action.Action);
+        Assert.Equal(MonitorStateId.Polling, state.CurrentState);
+        Assert.Equal(CiFailureFlowState.None, state.CiFailureFlow);
+    }
+
+    [Fact]
+    public void ProcessEvent_UnexpectedState_ThenStop_StopsMonitoring()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.Investigating;
+        state.CiFailureFlow = CiFailureFlowState.Investigating;
+
+        // First call: unexpected event triggers recovery prompt
+        var action = MonitorTransitions.ProcessEvent(state, "some_unexpected_event", null, null);
+        Assert.Equal("ask_user", action.Action);
+        Assert.Equal(MonitorStateId.AwaitingUser, state.CurrentState);
+        // Recovery clears active flows so resume/stop route through terminal switch
+        Assert.Equal(CiFailureFlowState.None, state.CiFailureFlow);
+
+        // Second call: user picks "Stop monitoring"
+        action = MonitorTransitions.ProcessEvent(state, "user_chose", "stop", null);
+        Assert.Equal("stop", action.Action);
+        Assert.Equal(MonitorStateId.Stopped, state.CurrentState);
     }
 
     [Fact]
