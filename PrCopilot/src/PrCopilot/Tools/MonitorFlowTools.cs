@@ -135,7 +135,12 @@ public class MonitorFlowTools
             // Check if copilot is already in the requested reviewers list
             var requestedReviewers = await PrStatusFetcher.FetchRequestedReviewersAsync(
                 state.Owner, state.Repo, state.PrNumber);
-            if (requestedReviewers != null && copilotAliases.Any(alias => requestedReviewers.Contains(alias)))
+            if (requestedReviewers == null)
+            {
+                DebugLogger.Log("CopilotReview", "Could not fetch requested reviewers (API failure) — skipping to avoid redundant requests");
+                return false;
+            }
+            if (copilotAliases.Any(alias => requestedReviewers.Contains(alias)))
             {
                 DebugLogger.Log("CopilotReview", "Copilot already in requested reviewers — skipping");
                 return false;
