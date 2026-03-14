@@ -339,6 +339,7 @@ public static class MonitorTransitions
             "investigate" => BeginInvestigation(state),
             "rerun_failed" => BuildRerunAction(state),
             "handle_myself" => StopMonitoring(state),
+            "stop" => StopMonitoring(state),
             "resume" => TransitionToPolling(state),
             "merge" => BuildMergeAction(state),
             "merge_admin" => BuildMergeAdminAction(state),

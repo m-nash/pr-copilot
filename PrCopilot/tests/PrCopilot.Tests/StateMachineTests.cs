@@ -761,6 +761,23 @@ public class StateMachineTests
     }
 
     [Fact]
+    public void ProcessEvent_UnexpectedState_ThenStop_StopsMonitoring()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.Investigating;
+
+        // First call: unexpected event triggers recovery prompt
+        var action = MonitorTransitions.ProcessEvent(state, "some_unexpected_event", null, null);
+        Assert.Equal("ask_user", action.Action);
+        Assert.Equal(MonitorStateId.AwaitingUser, state.CurrentState);
+
+        // Second call: user picks "Stop monitoring"
+        action = MonitorTransitions.ProcessEvent(state, "user_chose", "stop", null);
+        Assert.Equal("stop", action.Action);
+        Assert.Equal(MonitorStateId.Stopped, state.CurrentState);
+    }
+
+    [Fact]
     public void ProcessEvent_TaskCompleteFromAwaitingUser_RecoveryResumesPolling()
     {
         var state = CreateState();
