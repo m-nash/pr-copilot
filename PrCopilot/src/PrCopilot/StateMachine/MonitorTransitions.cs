@@ -299,6 +299,9 @@ public static class MonitorTransitions
         var priorState = state.CurrentState;
         DebugLogger.Log("StateMachine", $"RECOVERY: Unexpected state {priorState}/{eventType}. Transitioning to AwaitingUser so next user_chose can recover.");
         state.CurrentState = MonitorStateId.AwaitingUser;
+        state.CommentFlow = CommentFlowState.None;
+        state.CiFailureFlow = CiFailureFlowState.None;
+        state.ActiveWaitingComment = null;
         return new MonitorAction
         {
             Action = "ask_user",

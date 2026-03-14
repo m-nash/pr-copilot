@@ -765,11 +765,14 @@ public class StateMachineTests
     {
         var state = CreateState();
         state.CurrentState = MonitorStateId.Investigating;
+        state.CiFailureFlow = CiFailureFlowState.Investigating;
 
         // First call: unexpected event triggers recovery prompt
         var action = MonitorTransitions.ProcessEvent(state, "some_unexpected_event", null, null);
         Assert.Equal("ask_user", action.Action);
         Assert.Equal(MonitorStateId.AwaitingUser, state.CurrentState);
+        // Recovery clears active flows so resume/stop route through terminal switch
+        Assert.Equal(CiFailureFlowState.None, state.CiFailureFlow);
 
         // Second call: user picks "Stop monitoring"
         action = MonitorTransitions.ProcessEvent(state, "user_chose", "stop", null);
