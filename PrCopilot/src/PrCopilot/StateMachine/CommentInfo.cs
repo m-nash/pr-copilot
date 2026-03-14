@@ -16,6 +16,9 @@ public class CommentInfo
     public bool IsResolved { get; set; }
     /// <summary>True if the PR author is the last replier — ball is in reviewer's court.</summary>
     public bool IsWaitingForReply { get; set; }
+    /// <summary>True if this comment has been addressed (code fix pushed). Used by ShouldReRequestReview
+    /// to skip already-handled comments when deciding if a reviewer's last comment has been resolved.</summary>
+    public bool IsAddressed { get; set; }
     public string LastReplyAuthor { get; set; } = "";
     /// <summary>When the last reply was posted (UTC). Used to compare against approval timestamp.</summary>
     public DateTime? LastReplyAt { get; set; }

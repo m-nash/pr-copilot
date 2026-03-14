@@ -14,6 +14,7 @@
     "osascript",
     "pushback",
     "slnx",
+    "unreplied",
     "xunit"
   ],
   "ignorePaths": [

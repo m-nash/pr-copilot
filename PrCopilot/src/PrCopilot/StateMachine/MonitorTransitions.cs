@@ -608,6 +608,7 @@ public static class MonitorTransitions
             : null;
         if (addressedComment != null)
         {
+            addressedComment.IsAddressed = true;
             state.ActiveWaitingComment = addressedComment;
             state.PendingResolveAfterAddress = true;
             state.PendingResolveSummary = "Comment addressed";
@@ -642,6 +643,16 @@ public static class MonitorTransitions
             {
                 comment.IsWaitingForReply = true;
                 state.WaitingForReplyComments.Add(comment);
+            }
+
+            // Re-request review if this was the last comment from this reviewer.
+            // We've replied to all their feedback — let them know to look again.
+            if (ShouldReRequestReview(state, comment.Author))
+            {
+                state.PendingReRequestReviewer = comment.Author;
+                state.PendingResolveSummary = "Replied to comment";
+                state.ReviewsReRequested.Add(comment.Author);
+                return BuildReRequestReviewAction(state, comment.Author);
             }
         }
 
@@ -784,21 +795,40 @@ public static class MonitorTransitions
     /// </summary>
     internal static bool ShouldReRequestReview(MonitorState state, string reviewer)
     {
+        return ShouldReRequestReview(reviewer, state.PrAuthor, state.CurrentUser,
+            state.ReviewsReRequested, state.UnresolvedComments, state.CurrentCommentIndex);
+    }
+
+    /// <summary>
+    /// Core re-request check, usable from both the comment flow and the poll loop.
+    /// Returns true if a reviewer has no remaining needs-action comments and hasn't
+    /// already been re-requested (checked via alreadyReRequested set).
+    /// </summary>
+    internal static bool ShouldReRequestReview(
+        string reviewer, string prAuthor, string currentUser,
+        IEnumerable<string> alreadyReRequested,
+        IReadOnlyList<CommentInfo> unresolvedComments, int skipIndex = -1)
+    {
+        if (string.IsNullOrWhiteSpace(reviewer))
+            return false;
+
         // Don't re-request from ourselves or the PR author
-        if (string.Equals(reviewer, state.PrAuthor, StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(reviewer, state.CurrentUser, StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(reviewer, prAuthor, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(reviewer, currentUser, StringComparison.OrdinalIgnoreCase))
             return false;
 
-        // Already re-requested in this batch
-        if (state.ReviewsReRequested.Any(r => string.Equals(r, reviewer, StringComparison.OrdinalIgnoreCase)))
+        // Already re-requested (in-memory list or GitHub API requested_reviewers)
+        if (alreadyReRequested.Any(r => string.Equals(r, reviewer, StringComparison.OrdinalIgnoreCase)))
             return false;
 
-        // Check all indices (except current) for remaining comments from this reviewer
-        for (int i = 0; i < state.UnresolvedComments.Count; i++)
+        // Check for remaining comments from this reviewer that still need action.
+        // Skip comments already addressed or replied to (IsWaitingForReply/IsAddressed).
+        for (int i = 0; i < unresolvedComments.Count; i++)
         {
-            if (i == state.CurrentCommentIndex)
+            if (i == skipIndex)
                 continue;
-            if (string.Equals(state.UnresolvedComments[i].Author, reviewer, StringComparison.OrdinalIgnoreCase))
+            var c = unresolvedComments[i];
+            if (string.Equals(c.Author, reviewer, StringComparison.OrdinalIgnoreCase) && !c.IsWaitingForReply && !c.IsAddressed)
                 return false;
         }
 

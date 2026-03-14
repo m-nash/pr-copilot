@@ -1424,8 +1424,9 @@ public class StateMachineTests
         Assert.Single(state.WaitingForReplyComments);
         Assert.True(state.WaitingForReplyComments[0].IsWaitingForReply);
         Assert.False(state.PendingResolveAfterAddress);
-        // Single comment → advances to polling
-        Assert.Equal("polling", action.Action);
+        // Single comment, last from this reviewer → re-request review
+        Assert.Equal("auto_execute", action.Action);
+        Assert.Equal("request_review", action.Task);
     }
 
     [Fact]
@@ -1460,10 +1461,14 @@ public class StateMachineTests
         // Should track first comment as waiting-for-reply
         Assert.Single(state.WaitingForReplyComments);
         Assert.Equal("c1", state.WaitingForReplyComments[0].Id);
-        // Should advance to explain the next comment
+        // Last comment from this reviewer → re-request review first
+        Assert.Equal("auto_execute", action.Action);
+        Assert.Equal("request_review", action.Task);
+        // After re-request completes, should advance to explain next comment
+        var nextAction = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
         Assert.Equal(1, state.CurrentCommentIndex);
-        Assert.Equal("execute", action.Action);
-        Assert.Equal("explain_comment", action.Task);
+        Assert.Equal("execute", nextAction.Action);
+        Assert.Equal("explain_comment", nextAction.Task);
     }
 
     [Fact]
@@ -1471,8 +1476,6 @@ public class StateMachineTests
     {
         // Scenario: user picked a specific comment from multi-comment list,
         // went through explain → apply_fix → agent pushes back → comment_replied.
-        // AdvanceAfterCommentAddressed falls to PickRemaining which shows
-        // "Comment addressed. X more unresolved..." — but we only replied/pushed back.
         var state = CreateState();
         state.CurrentState = MonitorStateId.ExecutingTask;
         state.CommentFlow = CommentFlowState.SingleCommentPrompt;
@@ -1481,9 +1484,86 @@ public class StateMachineTests
 
         var action = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
 
+        // Last comment from this reviewer → re-request review first
+        Assert.Equal("auto_execute", action.Action);
+        Assert.Equal("request_review", action.Task);
+        // After re-request completes → should ask about remaining comments
+        var nextAction = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        Assert.Equal("ask_user", nextAction.Action);
         // Should NOT say "Comment addressed" since we only replied
+        Assert.DoesNotContain("addressed", nextAction.Question!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void CommentReplied_HumanReviewer_NoReRequestWhenMoreComments()
+    {
+        // Two comments from the same reviewer — replying to one shouldn't re-request yet
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.AddressAllIterating;
+        state.UnresolvedComments = [MakeComment("c1", "human-reviewer"), MakeComment("c2", "human-reviewer", "src/Other.cs")];
+        state.CurrentCommentIndex = 0;
+
+        var action = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
+
+        // Should track as waiting-for-reply
+        Assert.Single(state.WaitingForReplyComments);
+        // Reviewer has another comment (c2) → no re-request yet, advance to next
         Assert.Equal("ask_user", action.Action);
-        Assert.DoesNotContain("addressed", action.Question!, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(state.PendingReRequestReviewer);
+    }
+
+    [Fact]
+    public void CommentReplied_HumanReviewer_PostReRequest_AdvancesCorrectly()
+    {
+        // After re-request completes for human, should advance with correct summary
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.UnresolvedComments = [
+            MakeComment("c1", "human-reviewer"),
+            MakeComment("c2", "different-reviewer", "src/Other.cs")
+        ];
+        state.CurrentCommentIndex = 0;
+
+        // comment_replied → re-request (last from this reviewer)
+        var action = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
+        Assert.Equal("request_review", action.Task);
+        Assert.Equal("human-reviewer", state.PendingReRequestReviewer);
+
+        // re-request completes → advance
+        var nextAction = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        Assert.Equal("ask_user", nextAction.Action);
+        Assert.Contains("Replied to comment", nextAction.Question!);
+    }
+
+    [Fact]
+    public void CommentReplied_SameReviewer_SequentialReplies_ReRequestsAfterLast()
+    {
+        // Two comments from the same reviewer — reply to both sequentially.
+        // Re-request should only trigger after the second reply.
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.AddressAllIterating;
+        state.UnresolvedComments = [MakeComment("c1", "human-reviewer"), MakeComment("c2", "human-reviewer", "src/Other.cs")];
+        state.CurrentCommentIndex = 0;
+
+        // Reply to c1 — c2 still needs action → no re-request
+        var action1 = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
+        Assert.Single(state.WaitingForReplyComments);
+        Assert.Equal("ask_user", action1.Action);
+        Assert.Null(state.PendingReRequestReviewer);
+
+        // Simulate advancing to c2 and replying
+        state.CurrentCommentIndex = 1;
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        var action2 = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
+
+        // c1 is already waiting-for-reply → no remaining work → re-request
+        Assert.Equal(2, state.WaitingForReplyComments.Count);
+        Assert.Equal("auto_execute", action2.Action);
+        Assert.Equal("request_review", action2.Task);
+        Assert.Equal("human-reviewer", state.PendingReRequestReviewer);
     }
 
     #endregion
@@ -1704,6 +1784,66 @@ public class StateMachineTests
     {
         // copilot-pull-request-reviewer[bot] should NOT be filtered as a CI bot
         Assert.False(PrStatusFetcher.IsCiBot("copilot-pull-request-reviewer[bot]"));
+    }
+
+    #endregion
+
+    #region NormalizeBotLogin
+
+    [Fact]
+    public void NormalizeBotLogin_GraphQLBot_AppendsBotSuffix()
+    {
+        // GraphQL returns Bot actors without [bot] suffix
+        var json = """{"login": "copilot-pull-request-reviewer", "__typename": "Bot"}""";
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        var result = PrStatusFetcher.NormalizeBotLogin(doc.RootElement);
+        Assert.Equal("copilot-pull-request-reviewer[bot]", result);
+    }
+
+    [Fact]
+    public void NormalizeBotLogin_HumanUser_ReturnsUnchanged()
+    {
+        var json = """{"login": "reviewer1", "__typename": "User"}""";
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        var result = PrStatusFetcher.NormalizeBotLogin(doc.RootElement);
+        Assert.Equal("reviewer1", result);
+    }
+
+    [Fact]
+    public void NormalizeBotLogin_RestStyleAlreadyHasBotSuffix_NoDoubleAppend()
+    {
+        var json = """{"login": "copilot-pull-request-reviewer[bot]", "__typename": "Bot"}""";
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        var result = PrStatusFetcher.NormalizeBotLogin(doc.RootElement);
+        Assert.Equal("copilot-pull-request-reviewer[bot]", result);
+    }
+
+    [Fact]
+    public void NormalizeBotLogin_NoTypename_ReturnsUnchanged()
+    {
+        var json = """{"login": "copilot-pull-request-reviewer"}""";
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        var result = PrStatusFetcher.NormalizeBotLogin(doc.RootElement);
+        Assert.Equal("copilot-pull-request-reviewer", result);
+    }
+
+    [Fact]
+    public void NormalizeBotLogin_NullAuthor_ReturnsEmpty()
+    {
+        // GraphQL returns author: null for deleted/ghost users
+        var json = "null";
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        var result = PrStatusFetcher.NormalizeBotLogin(doc.RootElement);
+        Assert.Equal("", result);
+    }
+
+    [Fact]
+    public void NormalizeBotLogin_MissingLogin_ReturnsEmpty()
+    {
+        var json = """{"__typename": "Bot"}""";
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        var result = PrStatusFetcher.NormalizeBotLogin(doc.RootElement);
+        Assert.Equal("", result);
     }
 
     #endregion
@@ -1940,6 +2080,47 @@ public class StateMachineTests
     }
 
     [Fact]
+    public void ShouldReRequestReview_AllCommentsFromSameReviewer_Addressed_ReturnsTrue()
+    {
+        // BUG REPRO: When a reviewer has 2 comments and both are addressed sequentially,
+        // the re-request should fire after the LAST one. Previously, ShouldReRequestReview
+        // always returned false because it saw the already-addressed comment at the earlier
+        // index as still "unresolved" (the UnresolvedComments list is a static snapshot).
+        var state = CreateState();
+        state.PrAuthor = "pr-author";
+        state.CurrentUser = "current-user";
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.AddressAllIterating;
+        state.UnresolvedComments =
+        [
+            MakeComment("c1", "reviewer1"),
+            MakeComment("c2", "reviewer1")
+        ];
+        state.CurrentCommentIndex = 0;
+
+        // === Address comment 0 ===
+        // comment_addressed → sets PendingResolveAfterAddress, returns resolve_thread
+        MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
+        // resolve completes → should NOT re-request yet (comment 1 still pending)
+        var action1 = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        Assert.NotEqual("request_review", action1.Task);
+
+        // State machine advances: ask_user for next comment, user chooses "Address this comment"
+        Assert.Equal("ask_user", action1.Action);
+        Assert.Equal(1, state.CurrentCommentIndex);
+        state.CurrentState = MonitorStateId.ExecutingTask;
+
+        // === Address comment 1 ===
+        MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
+        // resolve completes → SHOULD re-request now (last comment from reviewer1)
+        var action2 = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        Assert.Equal("auto_execute", action2.Action);
+        Assert.Equal("request_review", action2.Task);
+        Assert.Equal("reviewer1", state.PendingReRequestReviewer);
+    }
+
+    [Fact]
     public void ProcessTaskComplete_AfterReRequest_AdvancesToNextComment()
     {
         var state = CreateState();
@@ -2011,6 +2192,134 @@ public class StateMachineTests
 
         Assert.Null(state.PendingReRequestReviewer);
         Assert.Empty(state.ReviewsReRequested);
+    }
+
+    [Fact]
+    public void ShouldReRequestReview_ReviewerAlreadyInRequestedReviewers_ReturnsFalse()
+    {
+        // Simulates a reviewer who is in requested_reviewers (awaiting initial review).
+        // Even if they had a waiting-for-reply comment, we should NOT re-request.
+        var alreadyRequested = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "reviewer-pending" };
+        var comments = new List<CommentInfo>
+        {
+            new() { Id = "c1", Author = "reviewer-pending", IsWaitingForReply = true }
+        };
+
+        var result = MonitorTransitions.ShouldReRequestReview(
+            "reviewer-pending", "pr-author", "current-user", alreadyRequested, comments);
+
+        Assert.False(result);
+    }
+
+    [Fact]
+    public void ShouldReRequestReview_ReviewerNotInRequestedReviewers_AllReplied_ReturnsTrue()
+    {
+        // Simulates a reviewer who finished review (APPROVED), NOT in requested_reviewers.
+        // All their comments are waiting-for-reply → should re-request.
+        var alreadyRequested = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { "other-reviewer-a", "other-reviewer-b", "other-reviewer-c" };
+        var comments = new List<CommentInfo>
+        {
+            new() { Id = "c1", Author = "finished-reviewer", IsWaitingForReply = true },
+            new() { Id = "c2", Author = "finished-reviewer", IsWaitingForReply = true }
+        };
+
+        var result = MonitorTransitions.ShouldReRequestReview(
+            "finished-reviewer", "pr-author", "current-user", alreadyRequested, comments);
+
+        Assert.True(result);
+    }
+
+    [Fact]
+    public void ShouldReRequestReview_ReviewerNotRequested_StillHasNeedsAction_ReturnsFalse()
+    {
+        // Reviewer finished review but still has a needs-action comment → don't re-request yet
+        var alreadyRequested = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var comments = new List<CommentInfo>
+        {
+            new() { Id = "c1", Author = "reviewer1", IsWaitingForReply = true },
+            new() { Id = "c2", Author = "reviewer1", IsWaitingForReply = false }
+        };
+
+        var result = MonitorTransitions.ShouldReRequestReview(
+            "reviewer1", "pr-author", "current-user", alreadyRequested, comments);
+
+        Assert.False(result);
+    }
+
+    [Fact]
+    public void ShouldReRequestReview_CopilotBotReviewer_NotInRequestedReviewers_ReturnsTrue()
+    {
+        // Bot reviewer left a COMMENTED review, we resolved its thread, and it's NOT
+        // in requested_reviewers. ShouldReRequestReview should return true to re-request
+        // the bot so it reviews the updated code.
+        var alreadyRequested = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { "other-reviewer-a", "other-reviewer-b", "other-reviewer-c" };
+
+        // After resolve, the bot's comment is gone from unresolved list.
+        // In the comment flow, ShouldReRequestReview is called with the current
+        // comment index excluded — simulated here with an empty list (no remaining).
+        var comments = new List<CommentInfo>();
+
+        var result = MonitorTransitions.ShouldReRequestReview(
+            "copilot-pull-request-reviewer[bot]", "pr-author", "current-user",
+            alreadyRequested, comments);
+
+        Assert.True(result);
+    }
+
+    [Fact]
+    public void ShouldReRequestReview_CopilotBotReviewer_AlreadyInRequestedReviewers_ReturnsFalse()
+    {
+        // Bot reviewer already has a pending review request → don't re-request
+        var alreadyRequested = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { "copilot-pull-request-reviewer[bot]" };
+        var comments = new List<CommentInfo>();
+
+        var result = MonitorTransitions.ShouldReRequestReview(
+            "copilot-pull-request-reviewer[bot]", "pr-author", "current-user",
+            alreadyRequested, comments);
+
+        Assert.False(result);
+    }
+
+    [Fact]
+    public void ShouldReRequestReview_ReviewerSubmittedNewReview_UnrepliedComments_ReturnsFalse()
+    {
+        // Reviewer submitted a new review after being re-requested, adding new comments.
+        // They are no longer in requested_reviewers (GitHub removes them on review submit),
+        // but they still have unresolved comments that we haven't replied to yet.
+        // ShouldReRequestReview must return false — we should not re-request until
+        // we've replied to ALL their comments.
+        var alreadyRequested = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var comments = new List<CommentInfo>
+        {
+            // Previously replied-to comment
+            new() { Id = "c1", Author = "copilot-pull-request-reviewer[bot]", IsWaitingForReply = true },
+            // New comment from their latest review — not yet replied to
+            new() { Id = "c2", Author = "copilot-pull-request-reviewer[bot]", IsWaitingForReply = false }
+        };
+
+        var result = MonitorTransitions.ShouldReRequestReview(
+            "copilot-pull-request-reviewer[bot]", "pr-author", "current-user",
+            alreadyRequested, comments);
+
+        Assert.False(result);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ShouldReRequestReview_NullOrEmptyReviewer_ReturnsFalse(string? reviewer)
+    {
+        var alreadyRequested = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var comments = new List<CommentInfo>();
+
+        var result = MonitorTransitions.ShouldReRequestReview(
+            reviewer!, "pr-author", "current-user", alreadyRequested, comments);
+
+        Assert.False(result);
     }
 
     #endregion

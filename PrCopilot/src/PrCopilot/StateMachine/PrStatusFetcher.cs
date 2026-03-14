@@ -231,7 +231,7 @@ public static class PrStatusFetcher
                       comments(first: 1) {
                         totalCount
                         nodes {
-                          author { login }
+                          author { login __typename }
                           body
                           url
                           path
@@ -240,7 +240,7 @@ public static class PrStatusFetcher
                       }
                       lastReply: comments(last: 1) {
                         nodes {
-                          author { login }
+                          author { login __typename }
                           createdAt
                         }
                       }
@@ -275,7 +275,7 @@ public static class PrStatusFetcher
 
             var totalCount = firstComments.GetProperty("totalCount").GetInt32();
             var firstComment = nodes[0];
-            var author = firstComment.GetProperty("author").GetProperty("login").GetString() ?? "";
+            var author = NormalizeBotLogin(firstComment.GetProperty("author"));
 
             // Skip CI bot comments (but NOT copilot-pull-request-reviewer[bot])
             if (IsCiBot(author))
@@ -290,7 +290,7 @@ public static class PrStatusFetcher
                 var lastNodes = lastReply.GetProperty("nodes");
                 if (lastNodes.GetArrayLength() > 0)
                 {
-                    lastReplyAuthor = lastNodes[0].GetProperty("author").GetProperty("login").GetString() ?? "";
+                    lastReplyAuthor = NormalizeBotLogin(lastNodes[0].GetProperty("author"));
                     if (lastNodes[0].TryGetProperty("createdAt", out var ca) && ca.ValueKind == JsonValueKind.String)
                         lastReplyAt = DateTime.Parse(ca.GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind);
 
@@ -424,6 +424,33 @@ public static class PrStatusFetcher
     }
 
     /// <summary>
+    /// Fetches the list of currently requested reviewers on a PR.
+    /// Returns login names (e.g. ["reviewer1", "reviewer2"]).
+    /// </summary>
+    public static async Task<HashSet<string>?> FetchRequestedReviewersAsync(string owner, string repo, int prNumber)
+    {
+        try
+        {
+            var json = await RunGhAsync(
+                $"api repos/{owner}/{repo}/pulls/{prNumber}/requested_reviewers --jq \"[.users[].login]\"");
+            using var doc = JsonDocument.Parse(json);
+            var reviewers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var item in doc.RootElement.EnumerateArray())
+            {
+                var login = item.GetString();
+                if (!string.IsNullOrEmpty(login))
+                    reviewers.Add(login);
+            }
+            return reviewers;
+        }
+        catch (Exception ex)
+        {
+            DebugLogger.Log("FetchRequestedReviewers", $"Failed (non-critical): {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Checks whether the given branch requires all review conversations to be resolved before merging.
     /// Uses the repository rulesets API, which is accessible to anyone with read access.
     /// Returns false on API failure (permissions, older GH Enterprise, etc.).
@@ -503,6 +530,31 @@ public static class PrStatusFetcher
     public static bool IsBotReviewer(string username)
     {
         return !string.IsNullOrEmpty(username) && username.EndsWith("[bot]", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Normalizes a GraphQL author login to include the [bot] suffix when the actor is a Bot.
+    /// GraphQL returns bot logins without [bot] (e.g. "copilot-pull-request-reviewer"),
+    /// while the REST API includes it (e.g. "copilot-pull-request-reviewer[bot]").
+    /// This ensures consistent login format for IsBotReviewer/IsCiBot checks.
+    /// </summary>
+    internal static string NormalizeBotLogin(JsonElement authorElement)
+    {
+        // Guard against null/non-object author (e.g. deleted/ghost users)
+        if (authorElement.ValueKind != JsonValueKind.Object)
+            return "";
+
+        if (!authorElement.TryGetProperty("login", out var loginProp))
+            return "";
+
+        var login = loginProp.GetString() ?? "";
+        if (authorElement.TryGetProperty("__typename", out var tn) &&
+            string.Equals(tn.GetString(), "Bot", StringComparison.OrdinalIgnoreCase) &&
+            !login.EndsWith("[bot]", StringComparison.OrdinalIgnoreCase))
+        {
+            return login + "[bot]";
+        }
+        return login;
     }
 
     private static void ClassifyCheckRun(string status, string conclusion, CheckRunCounts counts)
