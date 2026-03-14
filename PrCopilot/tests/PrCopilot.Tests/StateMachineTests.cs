@@ -718,6 +718,9 @@ public class StateMachineTests
 
         Assert.Equal("ask_user", action.Action);
         Assert.Contains("Unexpected state", action.Question);
+        // Question should show the original state, not the recovery state
+        Assert.Contains("Stopped", action.Question);
+        Assert.DoesNotContain("AwaitingUser", action.Question);
         Assert.NotNull(action.Choices);
         // Verify recovery: state transitions to AwaitingUser so next user_chose won't loop
         Assert.Equal(MonitorStateId.AwaitingUser, state.CurrentState);

@@ -296,12 +296,13 @@ public static class MonitorTransitions
 
     private static MonitorAction RecoverFromUnexpectedState(MonitorState state, string eventType)
     {
-        DebugLogger.Log("StateMachine", $"RECOVERY: Unexpected state {state.CurrentState}/{eventType}. Transitioning to AwaitingUser so next user_chose can recover.");
+        var priorState = state.CurrentState;
+        DebugLogger.Log("StateMachine", $"RECOVERY: Unexpected state {priorState}/{eventType}. Transitioning to AwaitingUser so next user_chose can recover.");
         state.CurrentState = MonitorStateId.AwaitingUser;
         return new MonitorAction
         {
             Action = "ask_user",
-            Question = $"Unexpected state: {state.CurrentState}/{eventType}. What would you like to do?",
+            Question = $"Unexpected state: {priorState}/{eventType}. What would you like to do?",
             Choices = ["Resume monitoring", "Stop monitoring"]
         };
     }
