@@ -370,7 +370,7 @@ public static class MonitorTransitions
         state.WaitingForReplyComments.RemoveAll(c => c.Id == comment.Id);
 
         // Always auto-explain — skip the choice prompt
-        return BeginExplainComment(state);
+        return BeginExplainComment(state, isReplyEvent: true);
     }
 
     private static MonitorAction BuildCommentAction(MonitorState state, string timestamp)
@@ -558,16 +558,20 @@ public static class MonitorTransitions
         };
     }
 
-    private static MonitorAction BeginExplainComment(MonitorState state)
+    private static MonitorAction BeginExplainComment(MonitorState state, bool isReplyEvent = false)
     {
         var c = state.UnresolvedComments[state.CurrentCommentIndex];
         state.CurrentState = MonitorStateId.ExecutingTask;
         state.PendingExplainResult = true;
+        var replyContext = isReplyEvent && !string.IsNullOrEmpty(c.LastReplyAuthor)
+            ? $"Note: This is a reply from {c.LastReplyAuthor} (at {c.LastReplyAt:u}, {c.ReplyCount} replies in thread) to an existing review thread — not a brand-new comment. "
+            : "";
         return new MonitorAction
         {
             Action = "execute",
             Task = "explain_comment",
-            Instructions = $"Read and explain this review comment. Recommend whether to implement the change or push back. " +
+            Instructions = $"Read and explain this review comment ({c.ReplyCount}/{state.UnresolvedComments.Count}). Recommend whether to implement the change or push back. " +
+                replyContext +
                 $"If you lean toward pushing back, consider what test evidence would prove the comment is wrong — a strong pushback recommendation should explain what test could validate your position. " +
                 $"ONLY analyze THIS SPECIFIC comment — do NOT address, reply to, or fix any other comments. DO NOT make any code changes, DO NOT commit, DO NOT push, DO NOT reply to the comment thread — ONLY explain and recommend. Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{c.Body}\". URL: {c.Url}. After explaining, call pr_monitor_next_step with event=task_complete.",
             Context = c
