@@ -324,18 +324,18 @@ public class StateMachineTests
     }
 
     [Fact]
-    public void BuildTerminalAction_SingleComment_SetsSingleCommentPrompt()
+    public void BuildTerminalAction_SingleComment_AutoExplains()
     {
         var state = CreateState();
         state.UnresolvedComments = [MakeComment()];
 
         var action = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.NewComment);
 
-        Assert.Equal("ask_user", action.Action);
+        Assert.Equal("execute", action.Action);
+        Assert.Equal("explain_comment", action.Task);
         Assert.Equal(CommentFlowState.SingleCommentPrompt, state.CommentFlow);
-        Assert.Contains("new comment", action.Question, StringComparison.OrdinalIgnoreCase);
-        Assert.NotNull(action.Choices);
-        Assert.Equal(3, action.Choices.Count);
+        Assert.Equal(MonitorStateId.ExecutingTask, state.CurrentState);
+        Assert.True(state.PendingExplainResult);
     }
 
     [Fact]
@@ -482,16 +482,16 @@ public class StateMachineTests
             if (action.Choices != null) allChoices.UnionWith(action.Choices);
         }
 
-        // Single comment flow
+        // Single comment flow — now auto-explains, so we get execute action (no choices)
+        // but after explain completes, post-explain choices appear
         ResetState(state);
         state.UnresolvedComments = [MakeComment()];
-        state.CurrentState = MonitorStateId.AwaitingUser;
-        var commentAction = MonitorTransitions.ProcessEvent(state, "ready", null, null);
-        // Simulate terminal detection → new comment → BuildCommentAction (1 comment)
         state.CommentFlow = CommentFlowState.SingleCommentPrompt;
         state.CurrentCommentIndex = 0;
-        // The BuildCommentAction for 1 comment gives: Address/Explain/Handle
-        if (commentAction.Choices != null) allChoices.UnionWith(commentAction.Choices);
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.PendingExplainResult = true;
+        var postExplainAction = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        if (postExplainAction.Choices != null) allChoices.UnionWith(postExplainAction.Choices);
 
         // Multi comment flow
         ResetState(state);
