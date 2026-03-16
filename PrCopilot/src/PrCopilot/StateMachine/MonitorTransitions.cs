@@ -564,7 +564,7 @@ public static class MonitorTransitions
         state.CurrentState = MonitorStateId.ExecutingTask;
         state.PendingExplainResult = true;
         var replyContext = isReplyEvent && !string.IsNullOrEmpty(c.LastReplyAuthor)
-            ? $"Note: This is a reply from {c.LastReplyAuthor} (at {c.LastReplyAt:u}, {c.ReplyCount} replies in thread) to an existing review thread — not a brand-new comment. "
+            ? $"Note: This is a reply from {c.LastReplyAuthor} ({(c.LastReplyAt.HasValue ? $"at {c.LastReplyAt.Value:u}, " : "")}{c.ReplyCount} replies in thread) to an existing review thread — not a brand-new comment. "
             : "";
         return new MonitorAction
         {
