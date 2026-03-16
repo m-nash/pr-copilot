@@ -115,11 +115,12 @@ public class MonitorFlowTools
     /// </summary>
     private static async Task<bool> TryRequestCopilotReviewAsync(MonitorState state, ReviewResult reviewResult)
     {
-        // The bot's login varies by context:
-        //   Request via API: "copilot-pull-request-reviewer[bot]"
-        //   Shows in requested_reviewers: "Copilot"
-        //   Shows in reviews: "copilot-pull-request-reviewer[bot]"
-        //   GraphQL reviews: "copilot-pull-request-reviewer" (no [bot] suffix)
+        // The bot's login varies by GitHub API context:
+        //   Request reviewer API: "copilot-pull-request-reviewer[bot]"
+        //   requested_reviewers response: "Copilot" (login field)
+        //   REST /pulls/{n}/reviews: "copilot-pull-request-reviewer[bot]"
+        // The no-[bot] alias is defensive — AllReviewAuthors comes from REST reviews,
+        // but other code paths use GraphQL which may strip the [bot] suffix.
         const string copilotRequestName = "copilot-pull-request-reviewer[bot]";
         string[] copilotAliases = ["Copilot", "copilot-pull-request-reviewer[bot]", "copilot-pull-request-reviewer"];
 
