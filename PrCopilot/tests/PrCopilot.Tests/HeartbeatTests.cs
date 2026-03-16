@@ -5,16 +5,34 @@ using PrCopilot.Tools;
 
 namespace PrCopilot.Tests;
 
-public class HeartbeatTests
+public class HeartbeatTests : IDisposable
 {
-    private static MonitorState CreateState() => new()
+    private readonly string _tempDir;
+
+    public HeartbeatTests()
+    {
+        // Use a temp folder inside the repo for test artifacts
+        _tempDir = Path.Combine(
+            Path.GetDirectoryName(typeof(HeartbeatTests).Assembly.Location)!,
+            "test-tmp",
+            Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(_tempDir);
+    }
+
+    public void Dispose()
+    {
+        try { Directory.Delete(_tempDir, recursive: true); }
+        catch { /* best effort cleanup */ }
+    }
+
+    private MonitorState CreateState() => new()
     {
         Owner = "test-owner",
         Repo = "test-repo",
         PrNumber = 42,
         HeadSha = "abc123",
         HeadBranch = "feature/test",
-        SessionFolder = Path.GetTempPath()
+        SessionFolder = _tempDir
     };
 
     [Fact]
@@ -169,44 +187,63 @@ public class HeartbeatTests
     }
 
     [Fact]
-    public void StopGeneration_MatchingGen_StopsHeartbeat()
+    public async Task StopGeneration_MatchingGen_StopsRunningHeartbeat()
     {
+        await using var server = new FakeMcpServer();
         using var hb = new HeartbeatManager();
         var state = CreateState();
 
-        var gen = hb.StartForPr(null, state);
+        var gen = hb.StartForPr(server, state);
+        Assert.True(hb.IsRunning);
+
+        // Let at least one heartbeat fire
+        await Task.Delay(100);
 
         hb.StopGeneration(gen);
         Assert.False(hb.IsRunning);
     }
 
     [Fact]
-    public void StopGeneration_StaleGen_DoesNotStopHeartbeat()
+    public async Task StopGeneration_StaleGen_DoesNotStopRunningHeartbeat()
     {
+        await using var server = new FakeMcpServer();
         using var hb = new HeartbeatManager();
         var state = CreateState();
 
-        var gen1 = hb.StartForPr(null, state);
-        var gen2 = hb.StartForPr(null, state);
+        var gen1 = hb.StartForPr(server, state);
+        var gen2 = hb.StartForPr(server, state);
+
+        // Let heartbeat run
+        await Task.Delay(100);
 
         // Stale gen1 should NOT kill the heartbeat started by gen2
         hb.StopGeneration(gen1);
+        Assert.True(hb.IsRunning);
         Assert.Equal(gen2, hb.Generation);
-        // Generation should still be gen2 (not stopped by gen1)
     }
 
     [Fact]
-    public void StartForPr_StopsExistingHeartbeatFirst()
+    public async Task StartForPr_StopsExistingHeartbeatFirst_OnlyOneRunning()
     {
+        await using var server = new FakeMcpServer();
         using var hb = new HeartbeatManager();
         var state = CreateState();
 
-        var gen1 = hb.StartForPr(null, state);
-        var gen2 = hb.StartForPr(null, state);
+        var gen1 = hb.StartForPr(server, state);
+        Assert.True(hb.IsRunning);
 
-        // gen1 is no longer the current generation
+        // Let first heartbeat send some messages
+        await Task.Delay(200);
+        var countAfterFirst = server.SentMessages.Count;
+
+        // Start second — first should be stopped
+        var gen2 = hb.StartForPr(server, state);
+        Assert.True(hb.IsRunning);
         Assert.NotEqual(gen1, hb.Generation);
         Assert.Equal(gen2, hb.Generation);
+
+        // Verify messages were sent (proves heartbeat was actually running)
+        Assert.True(countAfterFirst > 0, "Expected at least one message from the first heartbeat");
     }
 
     [Fact]
@@ -221,60 +258,144 @@ public class HeartbeatTests
     }
 
     [Fact]
-    public void StopGeneration_AfterMultiPrStart_MatchingGen_Stops()
+    public async Task StopGeneration_AfterMultiPrStart_MatchingGen_Stops()
     {
+        await using var server = new FakeMcpServer();
         using var hb = new HeartbeatManager();
 
-        var gen = hb.StartForMultiPr(null, () => 2);
+        var gen = hb.StartForMultiPr(server, () => 2);
+        Assert.True(hb.IsRunning);
+
+        await Task.Delay(100);
 
         hb.StopGeneration(gen);
         Assert.False(hb.IsRunning);
     }
 
     [Fact]
-    public void StopGeneration_CrossMode_StaleGen_DoesNotStop()
+    public async Task StopGeneration_CrossMode_StaleGen_DoesNotStop()
     {
+        await using var server = new FakeMcpServer();
         using var hb = new HeartbeatManager();
         var state = CreateState();
 
-        var gen1 = hb.StartForPr(null, state);
-        var gen2 = hb.StartForMultiPr(null, () => 2);
+        var gen1 = hb.StartForPr(server, state);
+        var gen2 = hb.StartForMultiPr(server, () => 2);
+
+        await Task.Delay(100);
 
         // Stale PR gen should not kill multi-PR heartbeat
         hb.StopGeneration(gen1);
+        Assert.True(hb.IsRunning);
         Assert.Equal(gen2, hb.Generation);
     }
 
     [Fact]
-    public void RaceCondition_OldFinallyDoesNotKillNewHeartbeat()
+    public async Task RaceCondition_OldFinallyDoesNotKillNewHeartbeat()
     {
         // Simulates the exact race condition from the bug:
         // 1. Call A starts heartbeat (gen1)
         // 2. Call B starts heartbeat (gen2) — kills gen1, starts new
         // 3. Call A's finally runs StopGeneration(gen1) — should be no-op
+        await using var server = new FakeMcpServer();
         using var hb = new HeartbeatManager();
         var state = CreateState();
 
-        var gen1 = hb.StartForPr(null, state);  // Call A starts
-        var gen2 = hb.StartForPr(null, state);  // Call B replaces
+        var gen1 = hb.StartForPr(server, state);  // Call A starts
+        var gen2 = hb.StartForPr(server, state);  // Call B replaces
+        Assert.True(hb.IsRunning);
+
+        await Task.Delay(100);
 
         // Call A's finally block runs with stale generation
         hb.StopGeneration(gen1);
 
         // gen2's heartbeat should still be alive
+        Assert.True(hb.IsRunning);
         Assert.Equal(gen2, hb.Generation);
     }
 
     [Fact]
-    public void Stop_AlwaysStopsRegardlessOfGeneration()
+    public async Task Stop_AlwaysStopsRegardlessOfGeneration()
     {
+        await using var server = new FakeMcpServer();
         using var hb = new HeartbeatManager();
         var state = CreateState();
 
-        hb.StartForPr(null, state);
+        hb.StartForPr(server, state);
+        Assert.True(hb.IsRunning);
+
+        await Task.Delay(100);
 
         // Unconditional Stop always works (for Dispose/cleanup)
         hb.Stop();
         Assert.False(hb.IsRunning);
+    }
+
+    [Fact]
+    public async Task StartForPr_WithServer_SendsMessages()
+    {
+        await using var server = new FakeMcpServer();
+        using var hb = new HeartbeatManager();
+        var state = CreateState();
+        state.Checks = new CheckRunCounts { Passed = 5, InProgress = 3, Total = 8 };
+
+        hb.StartForPr(server, state);
+
+        // Wait for at least the initial + one interval message
+        await Task.Delay(6_500);
+
+        hb.Stop();
+
+        // Initial send + at least one loop send
+        Assert.True(server.SentMessages.Count >= 2,
+            $"Expected at least 2 messages, got {server.SentMessages.Count}");
+    }
+
+    [Fact]
+    public async Task StopGeneration_StopsMessages_MatchingGen()
+    {
+        await using var server = new FakeMcpServer();
+        using var hb = new HeartbeatManager();
+        var state = CreateState();
+
+        var gen = hb.StartForPr(server, state);
+
+        // Let some messages accumulate
+        await Task.Delay(200);
+        var countBefore = server.SentMessages.Count;
+        Assert.True(countBefore > 0);
+
+        hb.StopGeneration(gen);
+
+        // Wait and verify no new messages
+        await Task.Delay(300);
+        var countAfter = server.SentMessages.Count;
+        Assert.Equal(countBefore, countAfter);
+    }
+
+    [Fact]
+    public async Task StopGeneration_StaleGen_MessagesContinue()
+    {
+        await using var server = new FakeMcpServer();
+        using var hb = new HeartbeatManager();
+        var state = CreateState();
+
+        var gen1 = hb.StartForPr(server, state);
+        var gen2 = hb.StartForPr(server, state);
+
+        // Let some messages accumulate
+        await Task.Delay(200);
+        var countBefore = server.SentMessages.Count;
+
+        // Stale stop — should not affect running heartbeat
+        hb.StopGeneration(gen1);
+
+        // Wait for more messages
+        await Task.Delay(6_000);
+        var countAfter = server.SentMessages.Count;
+
+        Assert.True(countAfter > countBefore,
+            $"Expected messages to continue after stale stop, but count stayed at {countBefore}");
     }
 }
