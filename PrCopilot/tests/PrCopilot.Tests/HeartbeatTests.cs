@@ -153,4 +153,128 @@ public class HeartbeatTests
 
         Assert.Contains("Background Monitoring", message);
     }
+
+    [Fact]
+    public void StartForPr_ReturnsIncrementingGeneration()
+    {
+        using var hb = new HeartbeatManager();
+        var state = CreateState();
+
+        var gen1 = hb.StartForPr(null, state);
+        var gen2 = hb.StartForPr(null, state);
+        var gen3 = hb.StartForPr(null, state);
+
+        Assert.True(gen2 > gen1);
+        Assert.True(gen3 > gen2);
+    }
+
+    [Fact]
+    public void StopGeneration_MatchingGen_StopsHeartbeat()
+    {
+        using var hb = new HeartbeatManager();
+        var state = CreateState();
+
+        var gen = hb.StartForPr(null, state);
+
+        hb.StopGeneration(gen);
+        Assert.False(hb.IsRunning);
+    }
+
+    [Fact]
+    public void StopGeneration_StaleGen_DoesNotStopHeartbeat()
+    {
+        using var hb = new HeartbeatManager();
+        var state = CreateState();
+
+        var gen1 = hb.StartForPr(null, state);
+        var gen2 = hb.StartForPr(null, state);
+
+        // Stale gen1 should NOT kill the heartbeat started by gen2
+        hb.StopGeneration(gen1);
+        Assert.Equal(gen2, hb.Generation);
+        // Generation should still be gen2 (not stopped by gen1)
+    }
+
+    [Fact]
+    public void StartForPr_StopsExistingHeartbeatFirst()
+    {
+        using var hb = new HeartbeatManager();
+        var state = CreateState();
+
+        var gen1 = hb.StartForPr(null, state);
+        var gen2 = hb.StartForPr(null, state);
+
+        // gen1 is no longer the current generation
+        Assert.NotEqual(gen1, hb.Generation);
+        Assert.Equal(gen2, hb.Generation);
+    }
+
+    [Fact]
+    public void StartForMultiPr_ReturnsIncrementingGeneration()
+    {
+        using var hb = new HeartbeatManager();
+
+        var gen1 = hb.StartForMultiPr(null, () => 2);
+        var gen2 = hb.StartForMultiPr(null, () => 3);
+
+        Assert.True(gen2 > gen1);
+    }
+
+    [Fact]
+    public void StopGeneration_AfterMultiPrStart_MatchingGen_Stops()
+    {
+        using var hb = new HeartbeatManager();
+
+        var gen = hb.StartForMultiPr(null, () => 2);
+
+        hb.StopGeneration(gen);
+        Assert.False(hb.IsRunning);
+    }
+
+    [Fact]
+    public void StopGeneration_CrossMode_StaleGen_DoesNotStop()
+    {
+        using var hb = new HeartbeatManager();
+        var state = CreateState();
+
+        var gen1 = hb.StartForPr(null, state);
+        var gen2 = hb.StartForMultiPr(null, () => 2);
+
+        // Stale PR gen should not kill multi-PR heartbeat
+        hb.StopGeneration(gen1);
+        Assert.Equal(gen2, hb.Generation);
+    }
+
+    [Fact]
+    public void RaceCondition_OldFinallyDoesNotKillNewHeartbeat()
+    {
+        // Simulates the exact race condition from the bug:
+        // 1. Call A starts heartbeat (gen1)
+        // 2. Call B starts heartbeat (gen2) — kills gen1, starts new
+        // 3. Call A's finally runs StopGeneration(gen1) — should be no-op
+        using var hb = new HeartbeatManager();
+        var state = CreateState();
+
+        var gen1 = hb.StartForPr(null, state);  // Call A starts
+        var gen2 = hb.StartForPr(null, state);  // Call B replaces
+
+        // Call A's finally block runs with stale generation
+        hb.StopGeneration(gen1);
+
+        // gen2's heartbeat should still be alive
+        Assert.Equal(gen2, hb.Generation);
+    }
+
+    [Fact]
+    public void Stop_AlwaysStopsRegardlessOfGeneration()
+    {
+        using var hb = new HeartbeatManager();
+        var state = CreateState();
+
+        hb.StartForPr(null, state);
+
+        // Unconditional Stop always works (for Dispose/cleanup)
+        hb.Stop();
+        Assert.False(hb.IsRunning);
+    }
 }
