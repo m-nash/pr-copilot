@@ -171,7 +171,7 @@ public class MonitorFlowTools
         }
         catch (Exception ex)
         {
-            DebugLogger.Log("CopilotReview", $"Failed to request copilot review (non-critical): {ex.Message}");
+            DebugLogger.Log("CopilotReview", $"Failed to request copilot review (non-critical): {ex}");
             return false;
         }
     }
