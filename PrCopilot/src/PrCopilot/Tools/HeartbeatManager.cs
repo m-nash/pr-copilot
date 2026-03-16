@@ -28,7 +28,7 @@ internal sealed class HeartbeatManager : IDisposable
     private const int IntervalSeconds = 5;
 
     /// <summary>Current generation, exposed for testing.</summary>
-    internal long Generation => _generation;
+    internal long Generation => Interlocked.Read(ref _generation);
 
     /// <summary>Whether the heartbeat is currently running.</summary>
     internal bool IsRunning => _cts != null && !_cts.IsCancellationRequested;
@@ -42,7 +42,7 @@ internal sealed class HeartbeatManager : IDisposable
     public long StartForPr(McpServer? server, MonitorState state, ProgressToken? progressToken = null)
     {
         Stop();
-        var gen = ++_generation;
+        var gen = Interlocked.Increment(ref _generation);
         if (server == null) { DebugLogger.Log("Heartbeat", "No McpServer — heartbeat disabled"); return gen; }
 
         DebugLogger.Log("Heartbeat", $"Starting heartbeat for PR #{state.PrNumber} (gen={gen})");
@@ -62,7 +62,7 @@ internal sealed class HeartbeatManager : IDisposable
     public long StartForMultiPr(McpServer? server, Func<int> sessionCountProvider, ProgressToken? progressToken = null)
     {
         Stop();
-        var gen = ++_generation;
+        var gen = Interlocked.Increment(ref _generation);
         if (server == null) { DebugLogger.Log("Heartbeat", "No McpServer — heartbeat disabled"); return gen; }
 
         DebugLogger.Log("Heartbeat", $"Starting multi-PR heartbeat (gen={gen})");
@@ -91,13 +91,13 @@ internal sealed class HeartbeatManager : IDisposable
     /// </summary>
     public void StopGeneration(long generation)
     {
-        if (_generation == generation)
+        if (Interlocked.Read(ref _generation) == generation)
         {
             Stop();
         }
         else
         {
-            DebugLogger.Log("Heartbeat", $"StopGeneration skipped: requested gen={generation}, current gen={_generation}");
+            DebugLogger.Log("Heartbeat", $"StopGeneration skipped: requested gen={generation}, current gen={Interlocked.Read(ref _generation)}");
         }
     }
 
