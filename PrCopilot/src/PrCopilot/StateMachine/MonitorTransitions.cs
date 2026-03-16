@@ -570,7 +570,7 @@ public static class MonitorTransitions
         {
             Action = "execute",
             Task = "explain_comment",
-            Instructions = $"Read and explain this review comment ({c.ReplyCount}/{state.UnresolvedComments.Count}). Recommend whether to implement the change or push back. " +
+            Instructions = $"Read and explain this review comment ({state.CurrentCommentIndex + 1}/{state.UnresolvedComments.Count}). Recommend whether to implement the change or push back. " +
                 replyContext +
                 $"If you lean toward pushing back, consider what test evidence would prove the comment is wrong — a strong pushback recommendation should explain what test could validate your position. " +
                 $"ONLY analyze THIS SPECIFIC comment — do NOT address, reply to, or fix any other comments. DO NOT make any code changes, DO NOT commit, DO NOT push, DO NOT reply to the comment thread — ONLY explain and recommend. Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{c.Body}\". URL: {c.Url}. After explaining, call pr_monitor_next_step with event=task_complete.",
