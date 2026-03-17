@@ -549,13 +549,14 @@ public class MonitorFlowTools
             });
         }
 
+        // Start session-level heartbeat to keep MCP client alive.
+        // Capture generation before try so the finally block can use it.
+        var heartbeatGen = session.StartHeartbeat(server, progressToken);
+
         try
         {
             var state = session.State;
             DebugLogger.Log("NextStep", $"Called: event={@event}, choice={choice ?? "null"}, state={state.CurrentState}");
-
-            // Start session-level heartbeat to keep MCP client alive
-            session.StartHeartbeat(server, progressToken);
             // Check for pending viewer action (captured by FileSystemWatcher even when not polling)
             if (session.PendingTriggerContent != null && session.PendingTriggerContent.StartsWith("ACTION|") &&
                 state.ActiveWaitingComment == null && @event != "user_chose")
@@ -579,7 +580,6 @@ public class MonitorFlowTools
                         if (triggerResult.IsFreeform)
                         {
                             state.CurrentState = MonitorStateId.ExecutingTask;
-                            session.StopHeartbeat();
                             return SerializeAction(BuildFreeformInterpretAction(triggerResult, state));
                         }
 
@@ -730,8 +730,10 @@ public class MonitorFlowTools
         }
         finally
         {
-            // Stop heartbeat when tool call returns (agent will re-invoke and restart it)
-            session.StopHeartbeat();
+            // Stop heartbeat when tool call returns — but only if a newer call hasn't
+            // already started a new heartbeat (prevents stale finally blocks from killing
+            // a replacement call's heartbeat).
+            session.StopHeartbeat(heartbeatGen);
         }
     }
 

@@ -24,50 +24,90 @@ internal sealed class HeartbeatManager : IDisposable
     internal static int HeartbeatCounter { get => s_heartbeatCounter; set => s_heartbeatCounter = value; }
 
     private CancellationTokenSource? _cts;
+    private long _generation;
     private const int IntervalSeconds = 5;
+
+    /// <summary>Current generation, exposed for testing.</summary>
+    internal long Generation => Interlocked.Read(ref _generation);
+
+    /// <summary>Whether the heartbeat is currently running.</summary>
+    internal bool IsRunning
+    {
+        get
+        {
+            var cts = Volatile.Read(ref _cts);
+            return cts != null && !cts.IsCancellationRequested;
+        }
+    }
 
     /// <summary>
     /// Start a heartbeat that sends single-PR status messages every 5 seconds.
     /// Automatically sends the first message immediately.
+    /// Stops any existing heartbeat first to prevent duplicates.
+    /// Returns a generation token for use with <see cref="StopGeneration"/>.
     /// </summary>
-    public void StartForPr(McpServer? server, MonitorState state, ProgressToken? progressToken = null)
+    public long StartForPr(McpServer? server, MonitorState state, ProgressToken? progressToken = null)
     {
         Stop();
-        if (server == null) { DebugLogger.Log("Heartbeat", "No McpServer — heartbeat disabled"); return; }
+        var gen = Interlocked.Increment(ref _generation);
+        if (server == null) { DebugLogger.Log("Heartbeat", "No McpServer — heartbeat disabled"); return gen; }
 
-        DebugLogger.Log("Heartbeat", $"Starting heartbeat for PR #{state.PrNumber}");
+        DebugLogger.Log("Heartbeat", $"Starting heartbeat for PR #{state.PrNumber} (gen={gen})");
         _cts = new CancellationTokenSource();
         var ct = _cts.Token;
 
         _ = SendAsync(server, BuildHeartbeatMessage(state), progressToken);
         _ = RunLoopAsync(server, () => BuildHeartbeatMessage(state), progressToken, ct);
+        return gen;
     }
 
     /// <summary>
     /// Start a heartbeat that sends multi-PR status messages every 5 seconds.
-    /// Returns a disposable scope — dispose it to stop the heartbeat.
+    /// Stops any existing heartbeat first to prevent duplicates.
+    /// Returns a generation token for use with <see cref="StopGeneration"/>.
     /// </summary>
-    public void StartForMultiPr(McpServer? server, Func<int> sessionCountProvider, ProgressToken? progressToken = null)
+    public long StartForMultiPr(McpServer? server, Func<int> sessionCountProvider, ProgressToken? progressToken = null)
     {
         Stop();
-        if (server == null) { DebugLogger.Log("Heartbeat", "No McpServer — heartbeat disabled"); return; }
+        var gen = Interlocked.Increment(ref _generation);
+        if (server == null) { DebugLogger.Log("Heartbeat", "No McpServer — heartbeat disabled"); return gen; }
 
-        DebugLogger.Log("Heartbeat", "Starting multi-PR heartbeat");
+        DebugLogger.Log("Heartbeat", $"Starting multi-PR heartbeat (gen={gen})");
         _cts = new CancellationTokenSource();
         var ct = _cts.Token;
 
         _ = SendAsync(server, BuildMultiPrHeartbeatMessage(sessionCountProvider()), progressToken);
         _ = RunLoopAsync(server, () => BuildMultiPrHeartbeatMessage(sessionCountProvider()), progressToken, ct);
+        return gen;
     }
 
-    /// <summary>Stop the heartbeat timer.</summary>
+    /// <summary>Stop the heartbeat unconditionally.</summary>
     public void Stop()
     {
-        if (_cts != null)
+        var cts = Interlocked.Exchange(ref _cts, null);
+        if (cts != null)
+        {
             DebugLogger.Log("Heartbeat", "Stopping heartbeat");
-        _cts?.Cancel();
-        _cts?.Dispose();
-        _cts = null;
+            cts.Cancel();
+            cts.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Stop the heartbeat only if the given generation matches the current one.
+    /// This prevents a stale caller (e.g., a replaced tool call's finally block)
+    /// from killing a heartbeat started by a newer call.
+    /// </summary>
+    public void StopGeneration(long generation)
+    {
+        if (Interlocked.Read(ref _generation) == generation)
+        {
+            Stop();
+        }
+        else
+        {
+            DebugLogger.Log("Heartbeat", $"StopGeneration skipped: requested gen={generation}, current gen={Interlocked.Read(ref _generation)}");
+        }
     }
 
     public void Dispose() => Stop();

@@ -114,10 +114,16 @@ internal class MonitorSession : IDisposable
     // --- Session-level heartbeat for MCP keepalive ---
     private readonly HeartbeatManager _heartbeat = new();
 
-    public void StartHeartbeat(McpServer? server, ProgressToken? progressToken = null)
+    public long StartHeartbeat(McpServer? server, ProgressToken? progressToken = null)
         => _heartbeat.StartForPr(server, State, progressToken);
 
     public void StopHeartbeat() => _heartbeat.Stop();
+
+    /// <summary>
+    /// Stop the heartbeat only if the given generation matches the current one.
+    /// Prevents a stale tool call's finally block from killing a newer heartbeat.
+    /// </summary>
+    public void StopHeartbeat(long generation) => _heartbeat.StopGeneration(generation);
 
     public void Dispose()
     {
