@@ -11,7 +11,7 @@ public class HeartbeatTests : IDisposable
 
     public HeartbeatTests()
     {
-        // Use a temp folder inside the repo for test artifacts
+        // Use a temp folder under the test output directory for test artifacts
         _tempDir = Path.Combine(
             Path.GetDirectoryName(typeof(HeartbeatTests).Assembly.Location)!,
             "test-tmp",
