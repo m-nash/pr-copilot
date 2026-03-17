@@ -1,5 +1,6 @@
 // Licensed under the MIT License.
 
+using System.Collections.Concurrent;
 using System.Text.Json;
 using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
@@ -16,10 +17,10 @@ namespace PrCopilot.Tests;
 internal class FakeMcpServer : McpServer
 #pragma warning restore MCPEXP002
 {
-    private readonly List<JsonRpcMessage> _sentMessages = [];
+    private readonly ConcurrentQueue<JsonRpcMessage> _sentMessages = new();
 
     /// <summary>All messages sent via SendMessageAsync (notifications, etc.)</summary>
-    public IReadOnlyList<JsonRpcMessage> SentMessages => _sentMessages;
+    public IReadOnlyCollection<JsonRpcMessage> SentMessages => _sentMessages;
 
     public override string SessionId => "fake-session";
     public override string NegotiatedProtocolVersion => "2024-11-05";
@@ -37,7 +38,7 @@ internal class FakeMcpServer : McpServer
 
     public override Task SendMessageAsync(JsonRpcMessage message, CancellationToken ct = default)
     {
-        _sentMessages.Add(message);
+        _sentMessages.Enqueue(message);
         return Task.CompletedTask;
     }
 
