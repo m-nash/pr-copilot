@@ -31,7 +31,14 @@ internal sealed class HeartbeatManager : IDisposable
     internal long Generation => Interlocked.Read(ref _generation);
 
     /// <summary>Whether the heartbeat is currently running.</summary>
-    internal bool IsRunning => _cts != null && !_cts.IsCancellationRequested;
+    internal bool IsRunning
+    {
+        get
+        {
+            var cts = Volatile.Read(ref _cts);
+            return cts != null && !cts.IsCancellationRequested;
+        }
+    }
 
     /// <summary>
     /// Start a heartbeat that sends single-PR status messages every 5 seconds.
@@ -77,11 +84,13 @@ internal sealed class HeartbeatManager : IDisposable
     /// <summary>Stop the heartbeat unconditionally.</summary>
     public void Stop()
     {
-        if (_cts != null)
+        var cts = Interlocked.Exchange(ref _cts, null);
+        if (cts != null)
+        {
             DebugLogger.Log("Heartbeat", "Stopping heartbeat");
-        _cts?.Cancel();
-        _cts?.Dispose();
-        _cts = null;
+            cts.Cancel();
+            cts.Dispose();
+        }
     }
 
     /// <summary>
