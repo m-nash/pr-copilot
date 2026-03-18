@@ -1444,6 +1444,62 @@ public class StateMachineTests
     }
 
     [Fact]
+    public void CommentReplied_MultipleBotComments_ReRequestsAfterLast()
+    {
+        // BUG REPRO: When a bot reviewer has multiple comments and the agent pushes back
+        // on all of them via comment_replied, the re-request must still fire after the last
+        // one. Previously, comment_replied on bots didn't mark IsAddressed=true, so
+        // ShouldReRequestReview saw earlier replied-to comments as "still needs action"
+        // and never triggered a re-request.
+        var state = CreateState();
+        state.PrAuthor = "pr-author";
+        state.CurrentUser = "current-user";
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.AddressAllIterating;
+        state.UnresolvedComments =
+        [
+            MakeComment("c1", "copilot-pull-request-reviewer[bot]"),
+            MakeComment("c2", "copilot-pull-request-reviewer[bot]", "src/Other.cs"),
+            MakeComment("c3", "copilot-pull-request-reviewer[bot]", "src/Third.cs")
+        ];
+        state.CurrentCommentIndex = 0;
+
+        // === Reply to comment 0 (bot) ===
+        // comment_replied → auto-resolve (bot path)
+        var resolve1 = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
+        Assert.Equal("resolve_thread", resolve1.Task);
+        Assert.True(state.UnresolvedComments[0].IsAddressed);
+
+        // resolve completes → should NOT re-request yet (c2, c3 still pending)
+        var advance1 = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        Assert.NotEqual("request_review", advance1.Task);
+        Assert.Equal(1, state.CurrentCommentIndex);
+
+        // === Reply to comment 1 (bot) ===
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        var resolve2 = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
+        Assert.Equal("resolve_thread", resolve2.Task);
+        Assert.True(state.UnresolvedComments[1].IsAddressed);
+
+        // resolve completes → should NOT re-request yet (c3 still pending)
+        var advance2 = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        Assert.NotEqual("request_review", advance2.Task);
+        Assert.Equal(2, state.CurrentCommentIndex);
+
+        // === Reply to comment 2 (bot, last one) ===
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        var resolve3 = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
+        Assert.Equal("resolve_thread", resolve3.Task);
+        Assert.True(state.UnresolvedComments[2].IsAddressed);
+
+        // resolve completes → SHOULD re-request now (all bot comments handled)
+        var reRequest = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        Assert.Equal("auto_execute", reRequest.Action);
+        Assert.Equal("request_review", reRequest.Task);
+        Assert.Equal("copilot-pull-request-reviewer[bot]", state.PendingReRequestReviewer);
+    }
+
+    [Fact]
     public void CommentAddressed_PostResolve_UsesAddressedSummary()
     {
         // Verify comment_addressed still uses "Comment addressed" after auto-resolve and re-request

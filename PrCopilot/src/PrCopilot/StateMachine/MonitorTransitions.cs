@@ -628,7 +628,10 @@ public static class MonitorTransitions
         {
             if (PrStatusFetcher.IsBotReviewer(comment.Author))
             {
-                // Bot reviewer — auto-resolve, they won't respond
+                // Bot reviewer — auto-resolve, they won't respond.
+                // Mark as addressed so ShouldReRequestReview doesn't see it as "still needs action"
+                // when checking whether all comments from this reviewer have been handled.
+                comment.IsAddressed = true;
                 state.ActiveWaitingComment = comment;
                 state.PendingResolveAfterAddress = true;
                 state.PendingResolveSummary = "Replied to comment";
