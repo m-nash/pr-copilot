@@ -1470,7 +1470,7 @@ public class StateMachineTests
         Assert.Equal("resolve_thread", resolve1.Task);
         Assert.True(state.UnresolvedComments[0].IsAddressed);
 
-        // resolve completes → should NOT re-request yet (c1, c2 still pending)
+        // resolve completes → should NOT re-request yet (c2, c3 still pending)
         var advance1 = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
         Assert.NotEqual("request_review", advance1.Task);
         Assert.Equal(1, state.CurrentCommentIndex);
@@ -1481,7 +1481,7 @@ public class StateMachineTests
         Assert.Equal("resolve_thread", resolve2.Task);
         Assert.True(state.UnresolvedComments[1].IsAddressed);
 
-        // resolve completes → should NOT re-request yet (c2 still pending)
+        // resolve completes → should NOT re-request yet (c3 still pending)
         var advance2 = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
         Assert.NotEqual("request_review", advance2.Task);
         Assert.Equal(2, state.CurrentCommentIndex);
