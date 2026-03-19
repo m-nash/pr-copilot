@@ -612,7 +612,7 @@ public static class MonitorTransitions
         {
             Action = "execute",
             Task = "address_comment",
-            Instructions = $"Read the comment, implement the fix. ONLY address THIS SPECIFIC comment — do NOT address, reply to, or fix any other comments. STOP and present your changes to the user for review before committing — use ask_user to show what you changed and ask for approval. Only commit/push after the user approves (honor user's custom instructions for git workflow). After pushing, compose a reply describing what was changed and link the commit (use `git rev-parse HEAD` to get the SHA, then format as {state.Owner}/{state.Repo}@SHA). {ReplyDataInstruction()} Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{c.Body}\". URL: {c.Url}.{CopilotFooter(state)}",
+            Instructions = $"Read the comment, implement the fix. ONLY address THIS SPECIFIC comment — do NOT address, reply to, or fix any other comments. STOP and present your changes to the user for review before committing — use ask_user to show what you changed and ask for approval. Only commit/push after the user approves (honor user's custom instructions for git workflow). After pushing, compose a reply describing what was changed and link the commit (use `git rev-parse HEAD` to get the SHA, then format as {state.Owner}/{state.Repo}@SHA). {ReplyDataInstruction()} Then call pr_monitor_next_step with event=comment_addressed and data containing reply_text. Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{c.Body}\". URL: {c.Url}.{CopilotFooter(state)}",
             Context = c
         };
     }
