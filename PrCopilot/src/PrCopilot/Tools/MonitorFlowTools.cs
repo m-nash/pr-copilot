@@ -1185,7 +1185,7 @@ public class MonitorFlowTools
                     // Post pending reply before resolving (agent composed the text, server posts it)
                     if (!await PostPendingReplyAsync(state, comment))
                     {
-                        state.ActiveWaitingComment = null;
+                        state.ClearPendingCommentState();
                         state.CurrentState = MonitorStateId.AwaitingUser;
                         return new MonitorAction
                         {
@@ -1200,7 +1200,7 @@ public class MonitorFlowTools
 
                     if (!success)
                     {
-                        state.ActiveWaitingComment = null;
+                        state.ClearPendingCommentState();
                         state.CurrentState = MonitorStateId.AwaitingUser;
                         return new MonitorAction
                         {
@@ -1220,7 +1220,7 @@ public class MonitorFlowTools
                     var comment = state.ActiveWaitingComment;
                     if (comment != null && !await PostPendingReplyAsync(state, comment))
                     {
-                        state.ActiveWaitingComment = null;
+                        state.ClearPendingCommentState();
                         state.CurrentState = MonitorStateId.AwaitingUser;
                         return new MonitorAction
                         {

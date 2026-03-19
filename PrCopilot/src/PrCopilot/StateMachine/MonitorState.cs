@@ -99,6 +99,21 @@ public class MonitorState
     public string? PendingAdvanceAfterReply { get; set; }
 
     /// <summary>
+    /// Clears all pending comment-flow state in one call. Used by TransitionToPolling
+    /// and error paths that bail to ask_user to ensure no stale flags leak across flows.
+    /// </summary>
+    public void ClearPendingCommentState()
+    {
+        PendingReplyText = null;
+        PendingResolveAfterAddress = false;
+        PendingResolveSummary = null;
+        PendingAdvanceAfterReply = null;
+        PendingExplainResult = false;
+        ActiveWaitingComment = null;
+        PendingReRequestReviewer = null;
+    }
+
+    /// <summary>
     /// Comment that received a reviewer reply (detected during polling).
     /// Set when ReviewerReplied terminal state is detected.
     /// </summary>

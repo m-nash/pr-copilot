@@ -330,8 +330,7 @@ public static class MonitorTransitions
         state.CurrentState = MonitorStateId.Polling;
         state.CommentFlow = CommentFlowState.None;
         state.CiFailureFlow = CiFailureFlowState.None;
-        state.ActiveWaitingComment = null;
-        state.PendingReRequestReviewer = null;
+        state.ClearPendingCommentState();
         state.ReviewsReRequested.Clear();
         // The MCP tool will detect this state and start the blocking poll loop
         return new MonitorAction { Action = "polling", Message = "Monitoring..." };
