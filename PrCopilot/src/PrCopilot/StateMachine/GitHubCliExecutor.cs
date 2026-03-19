@@ -43,18 +43,25 @@ public static class GitHubCliExecutor
     public static async Task<(bool success, string output)> PostThreadReplyAsync(
         string owner, string repo, int prNumber, long commentId, string body)
     {
-        // Escape the body for JSON: encode as a temp file to avoid shell escaping issues
-        var tempFile = Path.GetTempFileName();
+        var tempFile = "";
         try
         {
+            // Encode as a temp file to avoid shell escaping issues
+            tempFile = Path.GetTempFileName();
             var json = System.Text.Json.JsonSerializer.Serialize(new { body });
             await File.WriteAllTextAsync(tempFile, json);
             return await RunGhAsync(
                 $"api repos/{owner}/{repo}/pulls/{prNumber}/comments/{commentId}/replies --input \"{tempFile}\"");
         }
+        catch (Exception ex)
+        {
+            DebugLogger.Error("GhCli", ex);
+            return (false, ex.Message);
+        }
         finally
         {
-            try { File.Delete(tempFile); } catch { }
+            if (!string.IsNullOrEmpty(tempFile))
+                try { File.Delete(tempFile); } catch { }
         }
     }
 
