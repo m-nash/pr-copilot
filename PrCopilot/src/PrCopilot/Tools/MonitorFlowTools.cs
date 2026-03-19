@@ -601,6 +601,10 @@ public class MonitorFlowTools
                 }
             }
 
+            // Clear stale reply text before parsing — prevents a prior comment's reply leaking to this one
+            if (@event == "comment_addressed" || @event == "comment_replied")
+                state.PendingReplyText = null;
+
             // Parse data if provided
             if (!string.IsNullOrEmpty(data))
             {
