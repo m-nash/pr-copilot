@@ -1398,6 +1398,8 @@ public class MonitorFlowTools
                 await Task.Delay(TimeSpan.FromSeconds(2 * attempt));
         }
 
+        // All attempts failed; clear pending reply to avoid posting stale text to another thread
+        state.PendingReplyText = null;
         return false;
     }
 
