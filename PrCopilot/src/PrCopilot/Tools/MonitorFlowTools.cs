@@ -1380,6 +1380,7 @@ public class MonitorFlowTools
         if (!comment.RestCommentId.HasValue)
         {
             DebugLogger.Error("AutoExec", $"Cannot post reply — no RestCommentId for thread {comment.Id}");
+            state.PendingReplyText = null;
             return false;
         }
 
