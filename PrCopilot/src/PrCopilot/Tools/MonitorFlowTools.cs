@@ -615,7 +615,11 @@ public class MonitorFlowTools
                     if (root.TryGetProperty("issue_type", out var issueType))
                         state.IssueType = issueType.GetString();
                     if (root.TryGetProperty("reply_text", out var replyText))
-                        state.PendingReplyText = replyText.GetString();
+                    {
+                        // Only accept reply_text for comment events to prevent stale values leaking across steps
+                        if (@event == "comment_addressed" || @event == "comment_replied")
+                            state.PendingReplyText = replyText.GetString();
+                    }
                 }
                 catch { /* ignore parse errors in data */ }
             }
