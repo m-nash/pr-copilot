@@ -76,8 +76,8 @@ call pr_monitor_next_step(monitor_id, event, data)
 | Event | When to send | Additional fields |
 |-------|-------------|-------------------|
 | `ready` | After `pr_monitor_start`, or after resuming | — |
-| `comment_addressed` | Finished addressing a review comment (implemented fix or agreed) | — |
-| `comment_replied` | Replied to a comment without code changes (pushback or clarification) | — |
+| `comment_addressed` | Finished addressing a review comment (implemented fix or agreed) | `data`: JSON with `reply_text` |
+| `comment_replied` | Replied to a comment without code changes (pushback or clarification) | `data`: JSON with `reply_text` |
 | `investigation_complete` | Finished analyzing CI failures | `data`: JSON with `findings` and optional `suggested_fix` |
 | `push_completed` | Committed and pushed a fix | — |
 | `task_complete` | Finished any other execute task | — |
@@ -174,7 +174,9 @@ When any flow in this skill involves committing and pushing code changes (e.g., 
 
 ## Comment Reply Tone
 
-When replying to review comments on the PR (via `gh api .../replies`), always use **collaborative, respectful language**. You are representing the user in a professional code review conversation.
+When composing reply text for review comments, always use **collaborative, respectful language**. You are representing the user in a professional code review conversation.
+
+**⚠️ IMPORTANT: Do NOT post replies yourself.** Compose your reply text and pass it via `data='{"reply_text": "your reply"}'` in `pr_monitor_next_step`. The server posts it to the correct review thread automatically. Do NOT use `gh api`, `gh pr comment`, or any other method to post comments directly.
 
 **Rules:**
 - **Never use absolute or dismissive language** like "Won't fix", "Not applicable", "This is wrong", "No", or "Rejected"
@@ -197,11 +199,11 @@ When replying to review comments on the PR (via `gh api .../replies`), always us
 
 ## Commit Linking in Replies
 
-When replying to a review comment after making a code change, **always link the commit** that addressed the feedback. This gives the reviewer a direct link to verify the fix.
+When composing a reply after making a code change, **always link the commit** that addressed the feedback. This gives the reviewer a direct link to verify the fix.
 
-**How:** After pushing, run `git rev-parse HEAD` to get the SHA, then reference it as `owner/repo@SHA` in your reply. GitHub auto-links this to the commit.
+**How:** After pushing, run `git rev-parse HEAD` to get the SHA, then reference it as `owner/repo@SHA` in your reply text. GitHub auto-links this to the commit.
 
-**Example reply:** "Added the null check — Azure/azure-sdk-for-net@abc1234"
+**Example reply_text:** "Added the null check — Azure/azure-sdk-for-net@abc1234"
 
 ---
 

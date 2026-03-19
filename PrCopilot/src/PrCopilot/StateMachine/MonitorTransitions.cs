@@ -221,6 +221,26 @@ public static class MonitorTransitions
             return AdvanceAfterComment(state, summary);
         }
 
+        // If we just posted a reply (no resolve) — advance to next comment or re-request
+        if (state.PendingAdvanceAfterReply != null)
+        {
+            var summary = state.PendingAdvanceAfterReply;
+            state.PendingAdvanceAfterReply = null;
+
+            var comment = state.CurrentCommentIndex < state.UnresolvedComments.Count
+                ? state.UnresolvedComments[state.CurrentCommentIndex]
+                : null;
+            if (comment != null && ShouldReRequestReview(state, comment.Author))
+            {
+                state.PendingReRequestReviewer = comment.Author;
+                state.PendingResolveSummary = summary;
+                state.ReviewsReRequested.Add(comment.Author);
+                return BuildReRequestReviewAction(state, comment.Author);
+            }
+
+            return AdvanceAfterComment(state, summary);
+        }
+
         // Explain-all flow: after explain or freeform task, re-present per-comment choices
         if (state.CommentFlow == CommentFlowState.ExplainAllIterating &&
             state.CurrentCommentIndex < state.UnresolvedComments.Count)
@@ -547,12 +567,13 @@ public static class MonitorTransitions
             Action = "execute",
             Task = "apply_recommendation",
             Instructions = $"Apply the recommendation you made during your analysis of this comment. " +
-                $"If you recommended implementing the change, make the code changes. ONLY address THIS SPECIFIC comment — do NOT address, reply to, or fix any other comments. STOP and present your changes to the user for review before committing — use ask_user to show what you changed and ask for approval. Only commit/push after the user approves (honor user's custom instructions for git workflow). After pushing, reply in the thread with what was changed and link the commit (use `git rev-parse HEAD` to get the SHA, then format as {state.Owner}/{state.Repo}@SHA), then call pr_monitor_next_step with event=comment_addressed. " +
+                $"{ReplyDataInstruction()} " +
+                $"If you recommended implementing the change, make the code changes. ONLY address THIS SPECIFIC comment — do NOT address, reply to, or fix any other comments. STOP and present your changes to the user for review before committing — use ask_user to show what you changed and ask for approval. Only commit/push after the user approves (honor user's custom instructions for git workflow). After pushing, compose a reply describing what was changed and link the commit (use `git rev-parse HEAD` to get the SHA, then format as {state.Owner}/{state.Repo}@SHA), then call pr_monitor_next_step with event=comment_addressed and data containing reply_text. " +
                 $"If you recommended pushing back or disagreeing, first try to find or write a test that proves the comment is wrong. " +
                 $"If you CANNOT write such a test, reconsider — the comment may be valid — implement the change instead (follow the implement path above, use event=comment_addressed). " +
-                $"If you CAN write the test, check it in (present to user for approval first, commit/push after approval), reply in the thread referencing your analysis and the new test (link the commit), then call pr_monitor_next_step with event=comment_replied. " +
-                $"If you recommended asking a clarifying question, reply in the comment thread (referencing your analysis), then call pr_monitor_next_step with event=comment_replied. " +
-                $"If you recommended agreeing with the comment but no code changes are needed, reply acknowledging the comment, then call pr_monitor_next_step with event=comment_addressed. " +
+                $"If you CAN write the test, check it in (present to user for approval first, commit/push after approval), compose a reply referencing your analysis and the new test (link the commit), then call pr_monitor_next_step with event=comment_replied and data containing reply_text. " +
+                $"If you recommended asking a clarifying question, compose a reply referencing your analysis, then call pr_monitor_next_step with event=comment_replied and data containing reply_text. " +
+                $"If you recommended agreeing with the comment but no code changes are needed, compose a reply acknowledging the comment, then call pr_monitor_next_step with event=comment_addressed and data containing reply_text. " +
                 $"Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{c.Body}\". URL: {c.Url}.{CopilotFooter(state)}",
             Context = c
         };
@@ -592,19 +613,24 @@ public static class MonitorTransitions
         {
             Action = "execute",
             Task = "address_comment",
-            Instructions = $"Read the comment, implement the fix. ONLY address THIS SPECIFIC comment — do NOT address, reply to, or fix any other comments. STOP and present your changes to the user for review before committing — use ask_user to show what you changed and ask for approval. Only commit/push after the user approves (honor user's custom instructions for git workflow). After pushing, reply in the thread with what was changed and link the commit (use `git rev-parse HEAD` to get the SHA, then format as {state.Owner}/{state.Repo}@SHA), then call pr_monitor_next_step with event=comment_addressed. Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{c.Body}\". URL: {c.Url}.{CopilotFooter(state)}",
+            Instructions = $"Read the comment, implement the fix. ONLY address THIS SPECIFIC comment — do NOT address, reply to, or fix any other comments. STOP and present your changes to the user for review before committing — use ask_user to show what you changed and ask for approval. Only commit/push after the user approves (honor user's custom instructions for git workflow). After pushing, compose a reply describing what was changed and link the commit (use `git rev-parse HEAD` to get the SHA, then format as {state.Owner}/{state.Repo}@SHA). {ReplyDataInstruction()} Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{c.Body}\". URL: {c.Url}.{CopilotFooter(state)}",
             Context = c
         };
     }
 
     private static MonitorAction ProcessCommentAddressed(MonitorState state, object? data)
     {
-        // Auto-resolve the thread that was just addressed
         var addressedComment = state.UnresolvedComments.Count > state.CurrentCommentIndex
             ? state.UnresolvedComments[state.CurrentCommentIndex]
             : null;
         if (addressedComment != null)
         {
+            // If agent didn't provide reply text, ask for it before resolving
+            if (string.IsNullOrEmpty(state.PendingReplyText))
+            {
+                return EmitComposeReplyAction(state, addressedComment, "comment_addressed");
+            }
+
             addressedComment.IsAddressed = true;
             state.ActiveWaitingComment = addressedComment;
             state.PendingResolveAfterAddress = true;
@@ -626,6 +652,12 @@ public static class MonitorTransitions
 
         if (comment != null)
         {
+            // If agent didn't provide reply text, ask for it before proceeding
+            if (string.IsNullOrEmpty(state.PendingReplyText))
+            {
+                return EmitComposeReplyAction(state, comment, "comment_replied");
+            }
+
             if (PrStatusFetcher.IsBotReviewer(comment.Author))
             {
                 // Bot reviewer — auto-resolve, they won't respond.
@@ -638,22 +670,17 @@ public static class MonitorTransitions
                 return BuildResolveThreadAction(state, comment);
             }
 
-            // Human reviewer — track as waiting-for-reply, don't resolve
+            // Human reviewer — track as waiting-for-reply, don't resolve.
+            // Post the reply via auto_execute and advance after.
             if (!state.WaitingForReplyComments.Any(c => c.Id == comment.Id))
             {
                 comment.IsWaitingForReply = true;
                 state.WaitingForReplyComments.Add(comment);
             }
 
-            // Re-request review if this was the last comment from this reviewer.
-            // We've replied to all their feedback — let them know to look again.
-            if (ShouldReRequestReview(state, comment.Author))
-            {
-                state.PendingReRequestReviewer = comment.Author;
-                state.PendingResolveSummary = "Replied to comment";
-                state.ReviewsReRequested.Add(comment.Author);
-                return BuildReRequestReviewAction(state, comment.Author);
-            }
+            state.ActiveWaitingComment = comment;
+            state.PendingAdvanceAfterReply = "Replied to comment";
+            return BuildPostReplyAction(state, comment);
         }
 
         return AdvanceAfterComment(state, "Replied to comment");
@@ -778,6 +805,39 @@ public static class MonitorTransitions
             Task = "resolve_thread",
             Message = $"Resolving thread {comment.Id}...",
             Context = comment
+        };
+    }
+
+    private static MonitorAction BuildPostReplyAction(MonitorState state, CommentInfo comment)
+    {
+        DebugLogger.Log("StateMachine", $"Posting thread reply for {comment.Id}");
+        return new MonitorAction
+        {
+            Action = "auto_execute",
+            Task = "post_thread_reply",
+            Message = $"Posting reply to thread {comment.Id}...",
+            Context = comment
+        };
+    }
+
+    /// <summary>
+    /// When the agent calls comment_addressed/comment_replied without providing reply_text,
+    /// ask it to compose the reply. The agent calls back with the same event + reply_text.
+    /// </summary>
+    private static MonitorAction EmitComposeReplyAction(MonitorState state, CommentInfo c, string completionEvent)
+    {
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        return new MonitorAction
+        {
+            Action = "execute",
+            Task = "compose_reply",
+            Instructions = $"You called {completionEvent} but did not include the reply text. " +
+                $"Compose a brief reply for the review thread describing what you did to address this comment. " +
+                $"If you made code changes, link the commit (use `git rev-parse HEAD` to get the SHA, format as {state.Owner}/{state.Repo}@SHA). " +
+                $"{ReplyDataInstruction()} " +
+                $"Then call pr_monitor_next_step with event={completionEvent} and data containing reply_text. " +
+                $"Original comment from {c.Author} on {c.FilePath}:{c.Line}: \"{c.Body}\".{CopilotFooter(state)}",
+            Context = c
         };
     }
 
@@ -1085,4 +1145,13 @@ public static class MonitorTransitions
     /// </summary>
     internal static string CopilotFooter(MonitorState state) =>
         $" IMPORTANT: Append this footer to the END of every comment reply you post (after a blank line and ---): '\\n---\\n🤖 {state.CurrentUser}-copilot'";
+
+    /// <summary>
+    /// Instruction telling the agent to pass reply text in data instead of posting it directly.
+    /// The server posts the reply deterministically via the correct REST API endpoint.
+    /// </summary>
+    internal static string ReplyDataInstruction() =>
+        "Do NOT post the reply yourself (do NOT use `gh api`, `gh pr comment`, or any other method to post comments). " +
+        "Instead, pass your reply text in the data parameter as JSON: data='{\"reply_text\": \"your reply here\"}'. " +
+        "The server will post it to the correct review thread automatically.";
 }

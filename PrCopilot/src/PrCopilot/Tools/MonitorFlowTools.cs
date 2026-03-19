@@ -78,9 +78,10 @@ public class MonitorFlowTools
                 "(or has extra instructions beyond the choice), execute the user's request directly. " +
                 "If the instruction involves code changes: STOP and present your changes to the user for review before committing — " +
                 "honor the user's custom instructions for git workflow. Only commit/push after the user approves. " +
-                "After pushing, reply in the comment thread with what was changed and link the commit " +
+                "After pushing, compose a reply describing what was changed and link the commit " +
                 $"(use `git rev-parse HEAD` to get the SHA, then format as {state.Owner}/{state.Repo}@SHA). " +
-                "Then call pr_monitor_next_step with event='comment_addressed'." +
+                "Do NOT post the reply yourself — pass it via data='{{\"reply_text\": \"your reply\"}}' in pr_monitor_next_step. " +
+                "Then call pr_monitor_next_step with event='comment_addressed' and data containing reply_text." +
                 commentContext +
                 (state.CommentFlow != CommentFlowState.None ? MonitorTransitions.CopilotFooter(state) : "") +
                 " If the instruction does NOT involve code changes, execute it and call pr_monitor_next_step with event='task_complete'."
@@ -613,6 +614,8 @@ public class MonitorFlowTools
                         state.SuggestedFix = fix.GetString();
                     if (root.TryGetProperty("issue_type", out var issueType))
                         state.IssueType = issueType.GetString();
+                    if (root.TryGetProperty("reply_text", out var replyText))
+                        state.PendingReplyText = replyText.GetString();
                 }
                 catch { /* ignore parse errors in data */ }
             }
@@ -1171,6 +1174,9 @@ public class MonitorFlowTools
                     if (comment == null)
                         return MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
 
+                    // Post pending reply before resolving (agent composed the text, server posts it)
+                    await PostPendingReplyAsync(state, comment);
+
                     var (success, output) = await GitHubCliExecutor.ResolveThreadAsync(comment.Id);
                     DebugLogger.Log("AutoExec", $"resolve_thread {comment.Id}: success={success}");
 
@@ -1186,6 +1192,16 @@ public class MonitorFlowTools
                     }
 
                     // Clear the waiting comment and let the state machine decide next
+                    state.ActiveWaitingComment = null;
+                    return MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+                }
+            case "post_thread_reply":
+                {
+                    // Post reply without resolving (used for human reviewer pushback/clarification)
+                    var comment = state.ActiveWaitingComment;
+                    if (comment != null)
+                        await PostPendingReplyAsync(state, comment);
+
                     state.ActiveWaitingComment = null;
                     return MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
                 }
@@ -1320,6 +1336,32 @@ public class MonitorFlowTools
                 DebugLogger.Error("AutoExec", $"Unknown auto_execute task: {action.Task}");
                 return MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
         }
+    }
+
+    /// <summary>
+    /// Post the agent's pending reply text to the review thread via the REST API.
+    /// Clears PendingReplyText after posting (or on failure — we don't retry).
+    /// </summary>
+    private static async Task PostPendingReplyAsync(MonitorState state, CommentInfo comment)
+    {
+        if (string.IsNullOrEmpty(state.PendingReplyText))
+            return;
+
+        var replyText = state.PendingReplyText;
+        state.PendingReplyText = null;
+
+        if (!comment.RestCommentId.HasValue)
+        {
+            DebugLogger.Error("AutoExec", $"Cannot post reply — no RestCommentId for thread {comment.Id}");
+            return;
+        }
+
+        var (success, output) = await GitHubCliExecutor.PostThreadReplyAsync(
+            state.Owner, state.Repo, state.PrNumber, comment.RestCommentId.Value, replyText);
+        DebugLogger.Log("AutoExec", $"post_thread_reply {comment.Id} (REST ID {comment.RestCommentId.Value}): success={success}");
+
+        if (!success)
+            DebugLogger.Error("AutoExec", $"Failed to post reply: {output}");
     }
 
     private async Task SleepWithInterruptsAsync(MonitorSession session, int sleepSeconds, CancellationToken ct)

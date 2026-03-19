@@ -89,6 +89,15 @@ public class MonitorState
     // Set when user chooses rerun but other checks are still pending/queued — defer until complete
     public bool PendingRerunWhenChecksComplete { get; set; }
 
+    /// <summary>Reply text composed by the agent, to be posted by the server via the REST API.</summary>
+    public string? PendingReplyText { get; set; }
+
+    /// <summary>
+    /// When set, ProcessTaskComplete calls AdvanceAfterComment with this summary.
+    /// Used after posting a thread reply (auto_execute) when there's no subsequent resolve step.
+    /// </summary>
+    public string? PendingAdvanceAfterReply { get; set; }
+
     /// <summary>
     /// Comment that received a reviewer reply (detected during polling).
     /// Set when ReviewerReplied terminal state is detected.
