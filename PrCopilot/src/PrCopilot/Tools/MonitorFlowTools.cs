@@ -1175,7 +1175,16 @@ public class MonitorFlowTools
                         return MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
 
                     // Post pending reply before resolving (agent composed the text, server posts it)
-                    await PostPendingReplyAsync(state, comment);
+                    if (!await PostPendingReplyAsync(state, comment))
+                    {
+                        state.CurrentState = MonitorStateId.AwaitingUser;
+                        return new MonitorAction
+                        {
+                            Action = "ask_user",
+                            Question = "Failed to post thread reply after 3 attempts. What would you like to do?",
+                            Choices = ["Resume monitoring", "I'll handle it myself"]
+                        };
+                    }
 
                     var (success, output) = await GitHubCliExecutor.ResolveThreadAsync(comment.Id);
                     DebugLogger.Log("AutoExec", $"resolve_thread {comment.Id}: success={success}");
@@ -1199,8 +1208,16 @@ public class MonitorFlowTools
                 {
                     // Post reply without resolving (used for human reviewer pushback/clarification)
                     var comment = state.ActiveWaitingComment;
-                    if (comment != null)
-                        await PostPendingReplyAsync(state, comment);
+                    if (comment != null && !await PostPendingReplyAsync(state, comment))
+                    {
+                        state.CurrentState = MonitorStateId.AwaitingUser;
+                        return new MonitorAction
+                        {
+                            Action = "ask_user",
+                            Question = "Failed to post thread reply after 3 attempts. What would you like to do?",
+                            Choices = ["Resume monitoring", "I'll handle it myself"]
+                        };
+                    }
 
                     state.ActiveWaitingComment = null;
                     return MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
@@ -1340,28 +1357,40 @@ public class MonitorFlowTools
 
     /// <summary>
     /// Post the agent's pending reply text to the review thread via the REST API.
-    /// Clears PendingReplyText after posting (or on failure — we don't retry).
+    /// Retries up to 2 times on transient failures. Returns true if posted (or nothing to post).
     /// </summary>
-    private static async Task PostPendingReplyAsync(MonitorState state, CommentInfo comment)
+    private static async Task<bool> PostPendingReplyAsync(MonitorState state, CommentInfo comment)
     {
         if (string.IsNullOrEmpty(state.PendingReplyText))
-            return;
+            return true;
 
         var replyText = state.PendingReplyText;
-        state.PendingReplyText = null;
 
         if (!comment.RestCommentId.HasValue)
         {
             DebugLogger.Error("AutoExec", $"Cannot post reply — no RestCommentId for thread {comment.Id}");
-            return;
+            return false;
         }
 
-        var (success, output) = await GitHubCliExecutor.PostThreadReplyAsync(
-            state.Owner, state.Repo, state.PrNumber, comment.RestCommentId.Value, replyText);
-        DebugLogger.Log("AutoExec", $"post_thread_reply {comment.Id} (REST ID {comment.RestCommentId.Value}): success={success}");
+        const int maxRetries = 3;
+        for (int attempt = 1; attempt <= maxRetries; attempt++)
+        {
+            var (success, output) = await GitHubCliExecutor.PostThreadReplyAsync(
+                state.Owner, state.Repo, state.PrNumber, comment.RestCommentId.Value, replyText);
+            DebugLogger.Log("AutoExec", $"post_thread_reply {comment.Id} (REST ID {comment.RestCommentId.Value}): attempt={attempt}, success={success}");
 
-        if (!success)
-            DebugLogger.Error("AutoExec", $"Failed to post reply: {output}");
+            if (success)
+            {
+                state.PendingReplyText = null;
+                return true;
+            }
+
+            DebugLogger.Error("AutoExec", $"Failed to post reply (attempt {attempt}/{maxRetries}): {output}");
+            if (attempt < maxRetries)
+                await Task.Delay(TimeSpan.FromSeconds(2 * attempt));
+        }
+
+        return false;
     }
 
     private async Task SleepWithInterruptsAsync(MonitorSession session, int sleepSeconds, CancellationToken ct)
