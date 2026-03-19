@@ -1361,7 +1361,7 @@ public class MonitorFlowTools
     /// </summary>
     private static async Task<bool> PostPendingReplyAsync(MonitorState state, CommentInfo comment)
     {
-        if (string.IsNullOrEmpty(state.PendingReplyText))
+        if (string.IsNullOrWhiteSpace(state.PendingReplyText))
             return true;
 
         var replyText = state.PendingReplyText;

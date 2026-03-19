@@ -626,7 +626,7 @@ public static class MonitorTransitions
         if (addressedComment != null)
         {
             // If agent didn't provide reply text, ask for it before resolving
-            if (string.IsNullOrEmpty(state.PendingReplyText))
+            if (string.IsNullOrWhiteSpace(state.PendingReplyText))
             {
                 return EmitComposeReplyAction(state, addressedComment, "comment_addressed");
             }
@@ -653,7 +653,7 @@ public static class MonitorTransitions
         if (comment != null)
         {
             // If agent didn't provide reply text, ask for it before proceeding
-            if (string.IsNullOrEmpty(state.PendingReplyText))
+            if (string.IsNullOrWhiteSpace(state.PendingReplyText))
             {
                 return EmitComposeReplyAction(state, comment, "comment_replied");
             }
