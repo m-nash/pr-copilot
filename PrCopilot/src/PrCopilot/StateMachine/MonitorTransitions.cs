@@ -1144,7 +1144,7 @@ public static class MonitorTransitions
     /// Footer instruction for AI-generated comment replies so reviewers know it's bot-assisted.
     /// </summary>
     internal static string CopilotFooter(MonitorState state) =>
-        $" IMPORTANT: Append this footer to the END of every comment reply you post (after a blank line and ---): '\\n---\\n🤖 {state.CurrentUser}-copilot'";
+        $" IMPORTANT: Append this footer to the END of every reply you compose (after a blank line and ---): '\\n---\\n🤖 {state.CurrentUser}-copilot'";
 
     /// <summary>
     /// Instruction telling the agent to pass reply text in data instead of posting it directly.
