@@ -80,7 +80,7 @@ public class MonitorFlowTools
                 "honor the user's custom instructions for git workflow. Only commit/push after the user approves. " +
                 "After pushing, compose a reply describing what was changed and link the commit " +
                 $"(use `git rev-parse HEAD` to get the SHA, then format as {state.Owner}/{state.Repo}@SHA). " +
-                "Do NOT post the reply yourself — pass it via data='{{\"reply_text\": \"your reply\"}}' in pr_monitor_next_step. " +
+                "Do NOT post the reply yourself — pass it via data='{\"reply_text\": \"your reply\"}' in pr_monitor_next_step. " +
                 "Then call pr_monitor_next_step with event='comment_addressed' and data containing reply_text." +
                 commentContext +
                 (state.CommentFlow != CommentFlowState.None ? MonitorTransitions.CopilotFooter(state) : "") +
