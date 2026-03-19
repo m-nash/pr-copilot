@@ -51,7 +51,7 @@ public static class GitHubCliExecutor
             var json = System.Text.Json.JsonSerializer.Serialize(new { body });
             await File.WriteAllTextAsync(tempFile, json);
             return await RunGhAsync(
-                $"api repos/{owner}/{repo}/pulls/{prNumber}/comments/{commentId}/replies --input \"{tempFile}\"");
+                $"api repos/{owner}/{repo}/pulls/{prNumber}/comments/{commentId}/replies -X POST --input \"{tempFile}\"");
         }
         catch (Exception ex)
         {
