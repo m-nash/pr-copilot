@@ -40,10 +40,10 @@ public class MonitorSessionTests
 
         session.StopPermanently();
 
-        // Token should be cancelled
+        // Captured token should be cancelled
         Assert.True(tokenBefore.IsCancellationRequested);
-        // PollToken should still return the same cancelled token (not a new one)
-        Assert.True(session.PollToken.IsCancellationRequested);
+        // _pollCts is nulled out — PollToken returns CancellationToken.None (not a fresh live token)
+        Assert.False(session.PollToken.CanBeCanceled);
     }
 
     [Fact]
