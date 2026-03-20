@@ -100,6 +100,10 @@ public class MonitorFlowTools
             {
                 var line = $"STOPPED|{DateTime.Now:hh:mm tt}|Server shutting down";
                 File.AppendAllText(kvp.Value.State.LogFile, line + Environment.NewLine);
+            }
+            catch { }
+            try
+            {
                 kvp.Value.StopPermanently();
                 kvp.Value.Dispose();
             }
