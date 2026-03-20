@@ -37,6 +37,35 @@ public static class GitHubCliExecutor
     }
 
     /// <summary>
+    /// Post a reply to an existing review comment thread via the REST API.
+    /// This ensures the reply appears in the correct thread instead of as a top-level PR comment.
+    /// </summary>
+    public static async Task<(bool success, string output)> PostThreadReplyAsync(
+        string owner, string repo, int prNumber, long commentId, string body)
+    {
+        var tempFile = "";
+        try
+        {
+            // Encode as a temp file to avoid shell escaping issues
+            tempFile = Path.GetTempFileName();
+            var json = System.Text.Json.JsonSerializer.Serialize(new { body });
+            await File.WriteAllTextAsync(tempFile, json);
+            return await RunGhAsync(
+                $"api repos/{owner}/{repo}/pulls/{prNumber}/comments/{commentId}/replies -X POST --input \"{tempFile}\"");
+        }
+        catch (Exception ex)
+        {
+            DebugLogger.Error("GhCli", ex);
+            return (false, ex.Message);
+        }
+        finally
+        {
+            if (!string.IsNullOrEmpty(tempFile))
+                try { File.Delete(tempFile); } catch { }
+        }
+    }
+
+    /// <summary>
     /// Merge a PR using squash merge with --admin flag to bypass branch protection.
     /// </summary>
     public static async Task<(bool success, string output)> MergePrAdminAsync(string owner, string repo, int prNumber)

@@ -1227,6 +1227,7 @@ public class StateMachineTests
         state.CurrentCommentIndex = 0;
 
         // First: auto-resolve the addressed thread
+        state.PendingReplyText = "test reply";
         var action = MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
         Assert.Equal("auto_execute", action.Action);
         Assert.Equal("resolve_thread", action.Task);
@@ -1249,6 +1250,7 @@ public class StateMachineTests
         state.CurrentCommentIndex = 0;
 
         // First: auto-resolve
+        state.PendingReplyText = "test reply";
         var action = MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
         Assert.Equal("auto_execute", action.Action);
         Assert.Equal("resolve_thread", action.Task);
@@ -1274,6 +1276,7 @@ public class StateMachineTests
         state.CurrentCommentIndex = 0;
 
         // First: auto-resolve
+        state.PendingReplyText = "test reply";
         var action = MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
         Assert.Equal("auto_execute", action.Action);
         Assert.Equal("resolve_thread", action.Task);
@@ -1407,6 +1410,7 @@ public class StateMachineTests
         state.UnresolvedComments = [MakeComment("c1", "copilot-pull-request-reviewer[bot]")];
         state.CurrentCommentIndex = 0;
 
+        state.PendingReplyText = "test reply";
         var action = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
 
         // Bot reviewer → auto-resolve (same as comment_addressed)
@@ -1431,6 +1435,7 @@ public class StateMachineTests
         state.CurrentCommentIndex = 0;
 
         // comment_replied on bot → resolve_thread
+        state.PendingReplyText = "test reply";
         MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
         // resolve completes → re-request review for bot (last from them)
         var reRequestAction = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
@@ -1466,6 +1471,7 @@ public class StateMachineTests
 
         // === Reply to comment 0 (bot) ===
         // comment_replied → auto-resolve (bot path)
+        state.PendingReplyText = "test reply";
         var resolve1 = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
         Assert.Equal("resolve_thread", resolve1.Task);
         Assert.True(state.UnresolvedComments[0].IsAddressed);
@@ -1513,6 +1519,7 @@ public class StateMachineTests
         state.CurrentCommentIndex = 0;
 
         // comment_addressed → resolve_thread
+        state.PendingReplyText = "test reply";
         MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
         // resolve completes → re-request review for human-reviewer (last from them)
         var reRequestAction = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
@@ -1533,15 +1540,20 @@ public class StateMachineTests
         state.UnresolvedComments = [MakeComment("c1", "human-reviewer")];
         state.CurrentCommentIndex = 0;
 
+        state.PendingReplyText = "test reply";
         var action = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
 
         // Human reviewer → track as waiting-for-reply, don't auto-resolve
         Assert.Single(state.WaitingForReplyComments);
         Assert.True(state.WaitingForReplyComments[0].IsWaitingForReply);
         Assert.False(state.PendingResolveAfterAddress);
-        // Single comment, last from this reviewer → re-request review
+        // First: post the reply via auto_execute
         Assert.Equal("auto_execute", action.Action);
-        Assert.Equal("request_review", action.Task);
+        Assert.Equal("post_thread_reply", action.Task);
+        // After reply posted → re-request review (single comment, last from this reviewer)
+        var nextAction = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        Assert.Equal("auto_execute", nextAction.Action);
+        Assert.Equal("request_review", nextAction.Task);
     }
 
     [Fact]
@@ -1571,14 +1583,19 @@ public class StateMachineTests
         state.UnresolvedComments = [MakeComment("c1", "human-reviewer"), MakeComment("c2", "human-reviewer2", "src/Other.cs")];
         state.CurrentCommentIndex = 0;
 
+        state.PendingReplyText = "test reply";
         var action = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
 
         // Should track first comment as waiting-for-reply
         Assert.Single(state.WaitingForReplyComments);
         Assert.Equal("c1", state.WaitingForReplyComments[0].Id);
-        // Last comment from this reviewer → re-request review first
+        // First: post the reply via auto_execute
         Assert.Equal("auto_execute", action.Action);
-        Assert.Equal("request_review", action.Task);
+        Assert.Equal("post_thread_reply", action.Task);
+        // After reply posted → re-request review (last comment from this reviewer)
+        var reRequestAction = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        Assert.Equal("auto_execute", reRequestAction.Action);
+        Assert.Equal("request_review", reRequestAction.Task);
         // After re-request completes, should advance to explain next comment
         var nextAction = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
         Assert.Equal(1, state.CurrentCommentIndex);
@@ -1597,11 +1614,16 @@ public class StateMachineTests
         state.UnresolvedComments = [MakeComment("c1", "human-reviewer"), MakeComment("c2", "human-reviewer2", "src/Other.cs")];
         state.CurrentCommentIndex = 0;
 
+        state.PendingReplyText = "test reply";
         var action = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
 
-        // Last comment from this reviewer → re-request review first
+        // First: post the reply via auto_execute
         Assert.Equal("auto_execute", action.Action);
-        Assert.Equal("request_review", action.Task);
+        Assert.Equal("post_thread_reply", action.Task);
+        // After reply posted → re-request (last comment from this reviewer)
+        var reRequestAction = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        Assert.Equal("auto_execute", reRequestAction.Action);
+        Assert.Equal("request_review", reRequestAction.Task);
         // After re-request completes → should ask about remaining comments
         var nextAction = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
         Assert.Equal("ask_user", nextAction.Action);
@@ -1619,19 +1641,24 @@ public class StateMachineTests
         state.UnresolvedComments = [MakeComment("c1", "human-reviewer"), MakeComment("c2", "human-reviewer", "src/Other.cs")];
         state.CurrentCommentIndex = 0;
 
+        state.PendingReplyText = "test reply";
         var action = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
 
         // Should track as waiting-for-reply
         Assert.Single(state.WaitingForReplyComments);
-        // Reviewer has another comment (c2) → no re-request yet, advance to next
-        Assert.Equal("ask_user", action.Action);
+        // First: post the reply via auto_execute
+        Assert.Equal("auto_execute", action.Action);
+        Assert.Equal("post_thread_reply", action.Task);
+        // After reply posted → reviewer has another comment (c2) → no re-request, advance
+        var nextAction = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        Assert.Equal("ask_user", nextAction.Action);
         Assert.Null(state.PendingReRequestReviewer);
     }
 
     [Fact]
     public void CommentReplied_HumanReviewer_PostReRequest_AdvancesCorrectly()
     {
-        // After re-request completes for human, should advance with correct summary
+        // After reply post + re-request completes for human, should advance with correct summary
         var state = CreateState();
         state.CurrentState = MonitorStateId.ExecutingTask;
         state.CommentFlow = CommentFlowState.SingleCommentPrompt;
@@ -1641,9 +1668,14 @@ public class StateMachineTests
         ];
         state.CurrentCommentIndex = 0;
 
-        // comment_replied → re-request (last from this reviewer)
+        // comment_replied → post_thread_reply auto_execute
+        state.PendingReplyText = "test reply";
         var action = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
-        Assert.Equal("request_review", action.Task);
+        Assert.Equal("post_thread_reply", action.Task);
+
+        // reply posted → re-request (last from this reviewer)
+        var reRequestAction = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        Assert.Equal("request_review", reRequestAction.Task);
         Assert.Equal("human-reviewer", state.PendingReRequestReviewer);
 
         // re-request completes → advance
@@ -1663,21 +1695,30 @@ public class StateMachineTests
         state.UnresolvedComments = [MakeComment("c1", "human-reviewer"), MakeComment("c2", "human-reviewer", "src/Other.cs")];
         state.CurrentCommentIndex = 0;
 
-        // Reply to c1 — c2 still needs action → no re-request
+        // Reply to c1 → post_thread_reply auto_execute
+        state.PendingReplyText = "test reply";
         var action1 = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
         Assert.Single(state.WaitingForReplyComments);
-        Assert.Equal("ask_user", action1.Action);
+        Assert.Equal("auto_execute", action1.Action);
+        Assert.Equal("post_thread_reply", action1.Task);
+        // After reply posted → reviewer has another comment (c2) → no re-request yet, advance
+        var advanceAction = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
         Assert.Null(state.PendingReRequestReviewer);
+        Assert.Equal("ask_user", advanceAction.Action);
 
         // Simulate advancing to c2 and replying
         state.CurrentCommentIndex = 1;
         state.CurrentState = MonitorStateId.ExecutingTask;
         var action2 = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
 
-        // c1 is already waiting-for-reply → no remaining work → re-request
+        // c1 is already waiting-for-reply → post reply first
         Assert.Equal(2, state.WaitingForReplyComments.Count);
         Assert.Equal("auto_execute", action2.Action);
-        Assert.Equal("request_review", action2.Task);
+        Assert.Equal("post_thread_reply", action2.Task);
+        // After reply posted → no remaining work → re-request
+        var reRequestAction = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        Assert.Equal("auto_execute", reRequestAction.Action);
+        Assert.Equal("request_review", reRequestAction.Task);
         Assert.Equal("human-reviewer", state.PendingReRequestReviewer);
     }
 
@@ -2160,6 +2201,7 @@ public class StateMachineTests
         state.CurrentCommentIndex = 0;
 
         // Simulate: comment_addressed → resolve_thread → task_complete
+        state.PendingReplyText = "test reply";
         MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
         var action = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
 
@@ -2215,6 +2257,7 @@ public class StateMachineTests
 
         // === Address comment 0 ===
         // comment_addressed → sets PendingResolveAfterAddress, returns resolve_thread
+        state.PendingReplyText = "test reply";
         MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
         // resolve completes → should NOT re-request yet (comment 1 still pending)
         var action1 = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
@@ -2251,6 +2294,7 @@ public class StateMachineTests
         state.CurrentCommentIndex = 0;
 
         // Simulate full flow: address → resolve → re-request → task_complete
+        state.PendingReplyText = "test reply";
         MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
         // resolve completes → queues re-request
         var reRequestAction = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
@@ -2279,6 +2323,7 @@ public class StateMachineTests
         state.CurrentCommentIndex = 0;
 
         // Address first comment (reviewer1 — last from them)
+        state.PendingReplyText = "test reply";
         MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
         var action1 = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
         Assert.Equal("request_review", action1.Task);
@@ -2435,6 +2480,130 @@ public class StateMachineTests
             reviewer!, "pr-author", "current-user", alreadyRequested, comments);
 
         Assert.False(result);
+    }
+
+    #endregion
+
+    #region ReplyInstruction Tests
+
+    [Fact]
+    public void ReplyDataInstruction_TellsAgentToPassReplyTextInData()
+    {
+        var instruction = MonitorTransitions.ReplyDataInstruction();
+
+        Assert.Contains("reply_text", instruction);
+        Assert.Contains("Do NOT post the reply yourself", instruction);
+        Assert.Contains("do NOT use `gh api`", instruction);
+        Assert.Contains("do NOT use", instruction);
+    }
+
+    [Fact]
+    public void AddressComment_Instructions_TellAgentToPassReplyInData()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        var comment = MakeComment();
+        comment.RestCommentId = 99999;
+        state.UnresolvedComments = [comment];
+        state.CurrentCommentIndex = 0;
+
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "address", null);
+
+        Assert.Contains("reply_text", action.Instructions);
+        Assert.Contains("Do NOT post the reply yourself", action.Instructions);
+        Assert.DoesNotContain("gh api repos/", action.Instructions);
+    }
+
+    [Fact]
+    public void CommentReplied_HumanReviewer_ReturnsPostReplyAutoExecute()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        var comment = MakeComment("c1", "human-reviewer");
+        state.UnresolvedComments = [comment];
+        state.CurrentCommentIndex = 0;
+
+        state.PendingReplyText = "test reply";
+        var action = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
+
+        Assert.Equal("auto_execute", action.Action);
+        Assert.Equal("post_thread_reply", action.Task);
+        Assert.Equal("Replied to comment", state.PendingAdvanceAfterReply);
+    }
+
+    [Fact]
+    public void CommentAddressed_ReturnsResolveThread_WithPendingReplyPreserved()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.UnresolvedComments = [MakeComment()];
+        state.CurrentCommentIndex = 0;
+        state.PendingReplyText = "Fixed — test-owner/test-repo@abc1234";
+
+        var action = MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
+
+        Assert.Equal("auto_execute", action.Action);
+        Assert.Equal("resolve_thread", action.Task);
+        // PendingReplyText should still be set — ExecuteAutoAction will post it before resolving
+        Assert.Equal("Fixed — test-owner/test-repo@abc1234", state.PendingReplyText);
+    }
+
+    [Fact]
+    public void CommentAddressed_WithoutReplyText_EmitsComposeReply()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.UnresolvedComments = [MakeComment()];
+        state.CurrentCommentIndex = 0;
+        // PendingReplyText is null — agent forgot to include it
+
+        var action = MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
+
+        Assert.Equal("execute", action.Action);
+        Assert.Equal("compose_reply", action.Task);
+        Assert.Contains("reply_text", action.Instructions!);
+        Assert.Contains("comment_addressed", action.Instructions!);
+    }
+
+    [Fact]
+    public void CommentAddressed_ComposeReplyThenRetry_ProceedsToResolve()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.UnresolvedComments = [MakeComment()];
+        state.CurrentCommentIndex = 0;
+
+        // First call: no reply text → compose_reply
+        var action1 = MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
+        Assert.Equal("compose_reply", action1.Task);
+
+        // Agent composes reply, calls back with reply_text
+        state.PendingReplyText = "Sorted packages — test-owner/test-repo@abc1234";
+        var action2 = MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
+        Assert.Equal("auto_execute", action2.Action);
+        Assert.Equal("resolve_thread", action2.Task);
+    }
+
+    [Fact]
+    public void CommentReplied_WithoutReplyText_EmitsComposeReply()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.UnresolvedComments = [MakeComment("c1", "human-reviewer")];
+        state.CurrentCommentIndex = 0;
+
+        var action = MonitorTransitions.ProcessEvent(state, "comment_replied", null, null);
+
+        Assert.Equal("execute", action.Action);
+        Assert.Equal("compose_reply", action.Task);
+        Assert.Contains("reply_text", action.Instructions!);
+        Assert.Contains("comment_replied", action.Instructions!);
     }
 
     #endregion

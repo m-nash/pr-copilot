@@ -232,6 +232,7 @@ public static class PrStatusFetcher
                       comments(first: 1) {
                         totalCount
                         nodes {
+                          databaseId
                           author { login __typename }
                           body
                           url
@@ -311,6 +312,8 @@ public static class PrStatusFetcher
                 Author = author,
                 Body = firstComment.GetProperty("body").GetString() ?? "",
                 Url = firstComment.GetProperty("url").GetString() ?? "",
+                RestCommentId = firstComment.TryGetProperty("databaseId", out var dbId) && dbId.ValueKind == JsonValueKind.Number
+                    ? dbId.GetInt64() : null,
                 FilePath = firstComment.TryGetProperty("path", out var p) && p.ValueKind == JsonValueKind.String
                     ? p.GetString() ?? "" : "",
                 Line = firstComment.TryGetProperty("line", out var l) && l.ValueKind == JsonValueKind.Number

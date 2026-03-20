@@ -89,6 +89,30 @@ public class MonitorState
     // Set when user chooses rerun but other checks are still pending/queued — defer until complete
     public bool PendingRerunWhenChecksComplete { get; set; }
 
+    /// <summary>Reply text composed by the agent, to be posted by the server via the REST API.</summary>
+    public string? PendingReplyText { get; set; }
+
+    /// <summary>
+    /// When set, ProcessTaskComplete calls AdvanceAfterComment with this summary.
+    /// Used after posting a thread reply (auto_execute) when there's no subsequent resolve step.
+    /// </summary>
+    public string? PendingAdvanceAfterReply { get; set; }
+
+    /// <summary>
+    /// Clears all pending comment-flow state in one call. Used by TransitionToPolling
+    /// and error paths that bail to ask_user to ensure no stale flags leak across flows.
+    /// </summary>
+    public void ClearPendingCommentState()
+    {
+        PendingReplyText = null;
+        PendingResolveAfterAddress = false;
+        PendingResolveSummary = null;
+        PendingAdvanceAfterReply = null;
+        PendingExplainResult = false;
+        ActiveWaitingComment = null;
+        PendingReRequestReviewer = null;
+    }
+
     /// <summary>
     /// Comment that received a reviewer reply (detected during polling).
     /// Set when ReviewerReplied terminal state is detected.

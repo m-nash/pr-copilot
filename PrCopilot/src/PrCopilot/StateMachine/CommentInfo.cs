@@ -13,6 +13,8 @@ public class CommentInfo
     public int? Line { get; set; }
     public string Body { get; set; } = "";
     public string Url { get; set; } = "";
+    /// <summary>The numeric REST API comment ID (databaseId). Used for the /replies endpoint.</summary>
+    public long? RestCommentId { get; set; }
     public bool IsResolved { get; set; }
     /// <summary>True if the PR author is the last replier — ball is in reviewer's court.</summary>
     public bool IsWaitingForReply { get; set; }
