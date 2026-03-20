@@ -18,6 +18,7 @@ internal class MonitorSession : IDisposable
     public string? PendingTriggerContent { get; set; }
     private CancellationTokenSource? _pollCts = new();
     public CancellationToken PollToken => _pollCts?.Token ?? CancellationToken.None;
+    public volatile bool IsStopped;
 
     // Dedicated trigger file watcher — captures ACTION clicks even when not polling
     private FileSystemWatcher? _triggerWatcher;
@@ -109,6 +110,17 @@ internal class MonitorSession : IDisposable
         DebugLogger.Log("Session", "CancelPolling called");
         _pollCts?.Cancel();
         _pollCts = new CancellationTokenSource();
+    }
+
+    /// <summary>
+    /// Permanently stop the session. Unlike <see cref="CancelPolling"/>, this does
+    /// NOT create a new token — the session is done and cannot be resumed.
+    /// </summary>
+    public void StopPermanently()
+    {
+        DebugLogger.Log("Session", "StopPermanently called");
+        IsStopped = true;
+        _pollCts?.Cancel();
     }
 
     // --- Session-level heartbeat for MCP keepalive ---

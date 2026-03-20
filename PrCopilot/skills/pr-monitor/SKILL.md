@@ -9,6 +9,8 @@ description: "CRITICAL: When triggered, your FIRST action must be calling pr_mon
 
 When this skill is triggered, your **FIRST and ONLY action** must be to call `pr_monitor_start`. 
 
+**EXCEPTION:** If the user is asking to **stop** monitoring (e.g., "stop monitoring", "stop watching the PR"), skip `pr_monitor_start` and go directly to **Standalone Commands** below. Do NOT restart monitoring when the user wants to stop.
+
 **DO NOT** do any of the following before calling `pr_monitor_start` and receiving instructions from `pr_monitor_next_step`:
 - ❌ Reply to PR comments
 - ❌ Read code files  
@@ -31,7 +33,7 @@ This skill uses a **state machine architecture**: the `pr-copilot` MCP server ma
 2. Call pr_monitor_next_step(event="ready") → may block for hours (polling + user interaction)
 3. Response tells you exactly what to do:
    - action: "execute" → do the task described in instructions
-   - action: "stop" → monitoring is done
+   - action: "stop" → monitoring is done — display the message and stop (do NOT call pr_monitor_next_step again)
    - action: "merged" → PR was merged
 4. After executing a task, call pr_monitor_next_step with the completion event
 5. Repeat forever
@@ -65,7 +67,7 @@ After calling `pr_monitor_start`, the agent enters an infinite loop:
 call pr_monitor_next_step(monitor_id, event, data)
   → if action == "execute": do the work described in instructions
        → then call pr_monitor_next_step(monitor_id, event=<completion event>, data=<results>)
-  → if action == "stop": monitoring is done, tell the user
+  → if action == "stop": monitoring is done, tell the user (do NOT call pr_monitor_next_step again)
   → if action == "merged": PR was merged — display "🟣 PR merged" and stop (do NOT call pr_monitor_next_step again)
 ```
 
