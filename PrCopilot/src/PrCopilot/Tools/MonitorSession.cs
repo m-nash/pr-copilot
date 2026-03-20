@@ -18,6 +18,7 @@ internal class MonitorSession : IDisposable
     public string? PendingTriggerContent { get; set; }
     private CancellationTokenSource? _pollCts = new();
     public CancellationToken PollToken => _pollCts?.Token ?? CancellationToken.None;
+    public volatile bool IsStopped;
 
     // Dedicated trigger file watcher — captures ACTION clicks even when not polling
     private FileSystemWatcher? _triggerWatcher;
@@ -106,9 +107,32 @@ internal class MonitorSession : IDisposable
 
     public void CancelPolling()
     {
+        if (IsStopped) return;
         DebugLogger.Log("Session", "CancelPolling called");
-        _pollCts?.Cancel();
-        _pollCts = new CancellationTokenSource();
+        var newCts = new CancellationTokenSource();
+        var oldCts = Interlocked.Exchange(ref _pollCts, newCts);
+        if (oldCts != null)
+        {
+            try { oldCts.Cancel(); } catch (ObjectDisposedException) { }
+            oldCts.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Permanently stop the session. Unlike <see cref="CancelPolling"/>, this does
+    /// NOT create a new token — the session is done and cannot be resumed.
+    /// Uses Interlocked.Exchange so concurrent calls to StopPermanently/Dispose are safe.
+    /// </summary>
+    public void StopPermanently()
+    {
+        DebugLogger.Log("Session", "StopPermanently called");
+        IsStopped = true;
+        var cts = Interlocked.Exchange(ref _pollCts, null);
+        if (cts != null)
+        {
+            try { cts.Cancel(); } catch (ObjectDisposedException) { }
+            cts.Dispose();
+        }
     }
 
     // --- Session-level heartbeat for MCP keepalive ---
@@ -129,6 +153,7 @@ internal class MonitorSession : IDisposable
     {
         _heartbeat.Dispose();
         _triggerWatcher?.Dispose();
-        _pollCts?.Dispose();
+        var cts = Interlocked.Exchange(ref _pollCts, null);
+        cts?.Dispose();
     }
 }

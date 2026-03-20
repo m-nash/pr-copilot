@@ -100,7 +100,11 @@ public class MonitorFlowTools
             {
                 var line = $"STOPPED|{DateTime.Now:hh:mm tt}|Server shutting down";
                 File.AppendAllText(kvp.Value.State.LogFile, line + Environment.NewLine);
-                kvp.Value.CancelPolling();
+            }
+            catch { }
+            try
+            {
+                kvp.Value.StopPermanently();
                 kvp.Value.Dispose();
             }
             catch { }
@@ -762,7 +766,11 @@ public class MonitorFlowTools
                 {
                     var line = $"STOPPED|{DateTime.Now:hh:mm tt}|Monitoring stopped by user";
                     File.AppendAllText(kvp.Value.State.LogFile, line + Environment.NewLine);
-                    kvp.Value.CancelPolling();
+                }
+                catch { }
+                try
+                {
+                    kvp.Value.StopPermanently();
                     kvp.Value.Dispose();
                 }
                 catch { }
@@ -779,7 +787,13 @@ public class MonitorFlowTools
         if (_sessions.TryRemove(monitorId, out var session))
         {
             lock (_multiMonitorLock) { _multiMonitorIds.Remove(monitorId); }
-            session.CancelPolling();
+            try
+            {
+                var line = $"STOPPED|{DateTime.Now:hh:mm tt}|Monitoring stopped by user";
+                File.AppendAllText(session.State.LogFile, line + Environment.NewLine);
+            }
+            catch { }
+            session.StopPermanently();
             session.Dispose();
             return SerializeAction(new MonitorAction
             {
@@ -803,7 +817,7 @@ public class MonitorFlowTools
     {
         var state = session.State;
 
-        while (!cancellationToken.IsCancellationRequested)
+        while (!cancellationToken.IsCancellationRequested && !session.IsStopped)
         {
             state.PollCount++;
             state.LastPollTime = DateTime.UtcNow;
