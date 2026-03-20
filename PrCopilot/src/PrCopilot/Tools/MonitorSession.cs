@@ -107,9 +107,15 @@ internal class MonitorSession : IDisposable
 
     public void CancelPolling()
     {
+        if (IsStopped) return;
         DebugLogger.Log("Session", "CancelPolling called");
-        _pollCts?.Cancel();
-        _pollCts = new CancellationTokenSource();
+        var newCts = new CancellationTokenSource();
+        var oldCts = Interlocked.Exchange(ref _pollCts, newCts);
+        if (oldCts != null)
+        {
+            try { oldCts.Cancel(); } catch (ObjectDisposedException) { }
+            oldCts.Dispose();
+        }
     }
 
     /// <summary>
