@@ -79,7 +79,7 @@ public static class MonitorTransitions
             TerminalStateType.NewComment => BuildCommentAction(state, timestamp),
             TerminalStateType.ReviewerReplied => BuildReviewerRepliedAction(state, timestamp),
             TerminalStateType.MergeConflict => BuildMergeConflictAction(state, timestamp),
-            TerminalStateType.CiFailure => BuildCiFailureAction(state, timestamp),
+            TerminalStateType.CiFailure => BuildCiFailureAction(state),
             TerminalStateType.CiCancelled => BuildCiCancelledAction(state, timestamp),
             TerminalStateType.ApprovedCiGreen => BuildApprovedAction(state, timestamp),
             _ => new MonitorAction { Action = "stop", Message = "Unknown terminal state" }
@@ -907,7 +907,7 @@ public static class MonitorTransitions
 
     #region CI Failure Flow
 
-    private static MonitorAction BuildCiFailureAction(MonitorState state, string timestamp)
+    private static MonitorAction BuildCiFailureAction(MonitorState state)
     {
         // Always auto-investigate CI failures — skip the choice prompt.
         // Mirrors the comment flow's always-explain pattern.
