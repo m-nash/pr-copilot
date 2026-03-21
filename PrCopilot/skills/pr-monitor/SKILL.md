@@ -215,5 +215,5 @@ When composing a reply after making a code change, **always link the commit** th
 - **Resume by default** — after handling a terminal state, the state machine resumes polling automatically unless the user chose to stop.
 - **One monitor per PR** — if you push again to the same PR, call `pr_monitor_stop` then `pr_monitor_start` for a fresh baseline.
 - **Session-scoped** — monitoring only lasts for the current Copilot CLI session.
-- **CI failure investigation** — when the state machine tells you to investigate, fetch logs, analyze, and report back. Always include your findings. If you have a suggested fix, include it in `data.suggested_fix`.
+- **CI failure investigation** — when the state machine tells you to investigate, fetch logs, analyze, and report back. Always include your findings. If you have a suggested fix, include a text description in `data.suggested_fix`. **Do NOT make any code changes, edit files, or apply fixes during investigation** — the user decides what to do after reviewing your analysis.
 - **NEVER use `/azp run` or `/azp rerun` comments** to trigger CI reruns. These PR comments are not reliable, may trigger unintended pipelines, and bypass the state machine's deferred rerun logic. Always use the Playwright browser automation (via `rerun_via_browser` task) or the state machine's built-in mechanisms to rerun failed jobs.
