@@ -121,7 +121,6 @@ public static class MonitorTransitions
         ["Done, continue monitoring"] = "done_handling",
 
         // CI failure flow choices (ProcessCiFailureChoice)
-        ["Investigate the failures"] = "investigate",
         ["Re-run failed jobs"] = "rerun",
         ["Apply the recommendation"] = "apply_fix",
         ["Run a new build"] = "run_new",
@@ -910,26 +909,15 @@ public static class MonitorTransitions
 
     private static MonitorAction BuildCiFailureAction(MonitorState state, string timestamp)
     {
-        state.CiFailureFlow = CiFailureFlowState.CiFailurePrompt;
-        var failedNames = string.Join(", ", state.FailedChecks.Select(f => f.Name).Take(5));
-        var c = state.Checks;
-        return new MonitorAction
-        {
-            Action = "ask_user",
-            Question = $"[{timestamp}] ❌ PR #{state.PrNumber} has CI failures. Failed: {failedNames}. {c.Passed}/{c.Total} passed, {c.Failed} failed.",
-            Choices = ["Investigate the failures", "Re-run failed jobs", "I'll handle it myself"],
-            Context = new { state.FailedChecks, state.Checks }
-        };
+        // Always auto-investigate CI failures — skip the choice prompt.
+        // Mirrors the comment flow's always-explain pattern.
+        return BeginInvestigation(state);
     }
 
     private static MonitorAction ProcessCiFailureChoice(MonitorState state, string? choice)
     {
         return (state.CiFailureFlow, choice) switch
         {
-            (CiFailureFlowState.CiFailurePrompt, "investigate") => BeginInvestigation(state),
-            (CiFailureFlowState.CiFailurePrompt, "rerun") => BuildRerunAction(state),
-            (CiFailureFlowState.CiFailurePrompt, "handle_myself") => StopMonitoring(state),
-
             (CiFailureFlowState.InvestigationResults, "apply_fix") => BeginApplyFix(state),
             (CiFailureFlowState.InvestigationResults, "rerun") => BuildRerunAction(state),
             (CiFailureFlowState.InvestigationResults, "run_new") => BuildRunNewAction(state),

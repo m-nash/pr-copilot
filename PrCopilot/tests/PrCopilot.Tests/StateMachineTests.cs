@@ -315,12 +315,24 @@ public class StateMachineTests
     public void BuildTerminalAction_SetsLastTerminalStateAndAwaitingUser()
     {
         var state = CreateState();
+        state.Checks = new CheckRunCounts { Passed = 5, Cancelled = 1, Total = 6 };
+
+        MonitorTransitions.BuildTerminalAction(state, TerminalStateType.CiCancelled);
+
+        Assert.Equal(TerminalStateType.CiCancelled, state.LastTerminalState);
+        Assert.Equal(MonitorStateId.AwaitingUser, state.CurrentState);
+    }
+
+    [Fact]
+    public void BuildTerminalAction_CiFailure_SetsLastTerminalState()
+    {
+        var state = CreateState();
         SetChecksFailed(state);
 
         MonitorTransitions.BuildTerminalAction(state, TerminalStateType.CiFailure);
 
         Assert.Equal(TerminalStateType.CiFailure, state.LastTerminalState);
-        Assert.Equal(MonitorStateId.AwaitingUser, state.CurrentState);
+        Assert.Equal(MonitorStateId.Investigating, state.CurrentState);
     }
 
     [Fact]
@@ -355,18 +367,17 @@ public class StateMachineTests
     }
 
     [Fact]
-    public void BuildTerminalAction_CiFailure_ReturnsCiFailurePrompt()
+    public void BuildTerminalAction_CiFailure_AutoInvestigates()
     {
         var state = CreateState();
         SetChecksFailed(state);
 
         var action = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.CiFailure);
 
-        Assert.Equal("ask_user", action.Action);
-        Assert.Equal(CiFailureFlowState.CiFailurePrompt, state.CiFailureFlow);
-        Assert.Contains("CI failures", action.Question);
-        Assert.NotNull(action.Choices);
-        Assert.Contains("Investigate the failures", action.Choices);
+        Assert.Equal("execute", action.Action);
+        Assert.Equal("investigate_ci_failure", action.Task);
+        Assert.Equal(MonitorStateId.Investigating, state.CurrentState);
+        Assert.Equal(CiFailureFlowState.Investigating, state.CiFailureFlow);
     }
 
     [Fact]
@@ -429,7 +440,6 @@ public class StateMachineTests
 
     [Theory]
     [InlineData(TerminalStateType.ApprovedCiGreen)]
-    [InlineData(TerminalStateType.CiFailure)]
     [InlineData(TerminalStateType.CiCancelled)]
     [InlineData(TerminalStateType.MergeConflict)]
     public void BuildTerminalAction_AllStates_AllChoicesExistInValueMap(TerminalStateType terminal)
@@ -437,10 +447,6 @@ public class StateMachineTests
         var state = CreateState();
         SetChecksAllGreen(state);
         state.Approvals = [new ReviewInfo { Author = "alice", State = "APPROVED" }];
-        if (terminal == TerminalStateType.CiFailure)
-        {
-            SetChecksFailed(state);
-        }
         if (terminal == TerminalStateType.CiCancelled)
             state.Checks = new CheckRunCounts { Passed = 5, Cancelled = 1, Total = 6 };
 
@@ -465,7 +471,11 @@ public class StateMachineTests
             ResetState(state);
             SetChecksAllGreen(state);
             state.Approvals = [new ReviewInfo { Author = "alice", State = "APPROVED" }];
-            if (terminal == TerminalStateType.CiFailure) SetChecksFailed(state);
+            if (terminal == TerminalStateType.CiFailure)
+            {
+                SetChecksFailed(state);
+                continue; // CiFailure auto-investigates, covered below
+            }
             if (terminal == TerminalStateType.CiCancelled)
                 state.Checks = new CheckRunCounts { Passed = 5, Cancelled = 1, Total = 6 };
             if (terminal == TerminalStateType.NewComment)
@@ -548,16 +558,8 @@ public class StateMachineTests
         var manualAction = MonitorTransitions.ProcessEvent(state, "user_chose", "handle_myself", null);
         if (manualAction.Choices != null) allChoices.UnionWith(manualAction.Choices);
 
-        // CI failure flow
-        ResetState(state);
-        SetChecksFailed(state);
-        state.CiFailureFlow = CiFailureFlowState.CiFailurePrompt;
-        state.CurrentState = MonitorStateId.AwaitingUser;
-        // BuildCiFailureAction is private, but it's triggered through BuildTerminalAction for CiFailure
-        var ciAction = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.CiFailure);
-        if (ciAction.Choices != null) allChoices.UnionWith(ciAction.Choices);
-
-        // Investigation results (with suggested fix)
+        // CI failure flow — BuildTerminalAction auto-investigates (no choices),
+        // so we test investigation results directly
         ResetState(state);
         SetChecksFailed(state);
         state.CiFailureFlow = CiFailureFlowState.Investigating;
@@ -1071,27 +1073,38 @@ public class StateMachineTests
     #region ProcessEvent — CI Failure Flow Choices
 
     [Fact]
-    public void ProcessEvent_UserChoice_Investigate_CiFlow_BeginsInvestigation()
+    public void BuildTerminalAction_CiFailure_AutoInvestigates_ThenUserChoosesApplyFix()
     {
         var state = CreateState();
-        state.CurrentState = MonitorStateId.AwaitingUser;
-        state.CiFailureFlow = CiFailureFlowState.CiFailurePrompt;
         SetChecksFailed(state);
 
-        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "investigate", null);
-
-        Assert.Equal("execute", action.Action);
-        Assert.Equal("investigate_ci_failure", action.Task);
+        // CI failure auto-investigates
+        var investigateAction = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.CiFailure);
+        Assert.Equal("execute", investigateAction.Action);
+        Assert.Equal("investigate_ci_failure", investigateAction.Task);
         Assert.Equal(MonitorStateId.Investigating, state.CurrentState);
-        Assert.Equal(CiFailureFlowState.Investigating, state.CiFailureFlow);
+
+        // Investigation completes with a suggested fix
+        state.SuggestedFix = "Fix the null ref";
+        var resultsAction = MonitorTransitions.ProcessEvent(state, "investigation_complete", null, null);
+        Assert.Equal("ask_user", resultsAction.Action);
+        Assert.Contains("Apply the recommendation", resultsAction.Choices!);
+        Assert.Contains("Re-run failed jobs", resultsAction.Choices!);
+        Assert.Contains("I'll handle it myself", resultsAction.Choices!);
+
+        // User chooses to apply fix
+        var applyAction = MonitorTransitions.ProcessEvent(state, "user_chose", "apply_fix", null);
+        Assert.Equal("execute", applyAction.Action);
+        Assert.Equal("apply_fix", applyAction.Task);
+        Assert.Equal(MonitorStateId.ApplyingFix, state.CurrentState);
     }
 
     [Fact]
-    public void ProcessEvent_UserChoice_RerunFailed_CiFlow_ExecutesRerun()
+    public void ProcessEvent_UserChoice_RerunFailed_FromInvestigationResults_ExecutesRerun()
     {
         var state = CreateState();
         state.CurrentState = MonitorStateId.AwaitingUser;
-        state.CiFailureFlow = CiFailureFlowState.CiFailurePrompt;
+        state.CiFailureFlow = CiFailureFlowState.InvestigationResults;
         SetChecksFailed(state);
 
         var action = MonitorTransitions.ProcessEvent(state, "user_chose", "rerun", null);
@@ -1102,11 +1115,11 @@ public class StateMachineTests
     }
 
     [Fact]
-    public void ProcessEvent_UserChoice_HandleMyself_CiFlow_Stops()
+    public void ProcessEvent_UserChoice_HandleMyself_FromInvestigationResults_Stops()
     {
         var state = CreateState();
         state.CurrentState = MonitorStateId.AwaitingUser;
-        state.CiFailureFlow = CiFailureFlowState.CiFailurePrompt;
+        state.CiFailureFlow = CiFailureFlowState.InvestigationResults;
         SetChecksFailed(state);
 
         var action = MonitorTransitions.ProcessEvent(state, "user_chose", "handle_myself", null);
@@ -1731,7 +1744,7 @@ public class StateMachineTests
     {
         var state = CreateState();
         state.CurrentState = MonitorStateId.AwaitingUser;
-        state.CiFailureFlow = CiFailureFlowState.CiFailurePrompt;
+        state.CiFailureFlow = CiFailureFlowState.InvestigationResults;
         state.Checks = new CheckRunCounts { Passed = 2, Failed = 1, InProgress = 2, Total = 5 };
         state.FailedChecks = [new FailedCheckInfo { Name = "build", Conclusion = "failure", Url = "https://dev.azure.com/build/1" }];
 
@@ -1748,7 +1761,7 @@ public class StateMachineTests
     {
         var state = CreateState();
         state.CurrentState = MonitorStateId.AwaitingUser;
-        state.CiFailureFlow = CiFailureFlowState.CiFailurePrompt;
+        state.CiFailureFlow = CiFailureFlowState.InvestigationResults;
         state.Checks = new CheckRunCounts { Passed = 2, Failed = 1, Queued = 1, Total = 4 };
         state.FailedChecks = [new FailedCheckInfo { Name = "build", Conclusion = "failure", Url = "https://dev.azure.com/build/1" }];
 
@@ -1764,7 +1777,7 @@ public class StateMachineTests
         // Legacy pending (like policy checks) should NOT defer the rerun
         var state = CreateState();
         state.CurrentState = MonitorStateId.AwaitingUser;
-        state.CiFailureFlow = CiFailureFlowState.CiFailurePrompt;
+        state.CiFailureFlow = CiFailureFlowState.InvestigationResults;
         state.Checks = new CheckRunCounts { Passed = 3, Failed = 2, Pending = 1, Total = 6 };
         state.FailedChecks = [new FailedCheckInfo { Name = "build", Conclusion = "failure", Url = "https://dev.azure.com/build/1" }];
 
@@ -1780,7 +1793,7 @@ public class StateMachineTests
     {
         var state = CreateState();
         state.CurrentState = MonitorStateId.AwaitingUser;
-        state.CiFailureFlow = CiFailureFlowState.CiFailurePrompt;
+        state.CiFailureFlow = CiFailureFlowState.InvestigationResults;
         SetChecksFailed(state);
 
         var action = MonitorTransitions.ProcessEvent(state, "user_chose", "rerun", null);

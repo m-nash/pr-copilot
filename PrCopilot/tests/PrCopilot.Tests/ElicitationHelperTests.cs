@@ -149,13 +149,13 @@ public class ElicitationHelperTests
     }
 
     [Fact]
-    public void BuildElicitRequest_CiFailureChoices_CorrectMapping()
+    public void BuildElicitRequest_CiInvestigationResultsChoices_CorrectMapping()
     {
         var action = new MonitorAction
         {
             Action = "ask_user",
-            Question = "CI has failures",
-            Choices = ["Investigate the failures", "Re-run failed jobs", "I'll handle it myself"]
+            Question = "Investigation findings...",
+            Choices = ["Apply the recommendation", "Re-run failed jobs", "I'll handle it myself"]
         };
 
         var request = ElicitationHelper.BuildElicitRequest(action);
@@ -163,7 +163,7 @@ public class ElicitationHelperTests
             request.RequestedSchema!.Properties["choice"];
 
         Assert.Equal(3, schema.OneOf.Count);
-        Assert.Equal("investigate", schema.OneOf[0].Const);
+        Assert.Equal("apply_fix", schema.OneOf[0].Const);
         Assert.Equal("rerun", schema.OneOf[1].Const);
         Assert.Equal("handle_myself", schema.OneOf[2].Const);
     }
