@@ -949,8 +949,9 @@ public static class MonitorTransitions
             Task = "investigate_ci_failure",
             Instructions = "Fetch logs for the failed jobs, analyze root cause, then call pr_monitor_next_step with event=investigation_complete and data containing:\n" +
                 "- data.findings: your analysis of what went wrong (include links to the relevant log pages you found)\n" +
-                "- data.suggested_fix: (optional) a suggested code fix if applicable\n" +
+                "- data.suggested_fix: (optional) a TEXT DESCRIPTION of the suggested fix — do NOT include code blocks or diffs\n" +
                 "- data.issue_type: set to \"duplicate_artifact\" if the failure is due to artifacts already existing from a previous run attempt, otherwise set to \"code\" for code/test failures or \"unknown\"\n" +
+                "IMPORTANT: Do NOT make any code changes, edit files, or apply fixes during investigation. Your job is ONLY to analyze logs and report findings. The user will decide whether to apply the fix after reviewing your analysis.\n" +
                 "IMPORTANT: Ignoring the failure is NEVER an option — even if you think the failure is infrastructure-related, you must suggest a resolution (rerun, code fix, config change, etc.).",
             Context = new { state.FailedChecks }
         };
