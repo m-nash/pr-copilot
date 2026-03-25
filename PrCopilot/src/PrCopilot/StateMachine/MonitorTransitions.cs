@@ -174,6 +174,9 @@ public static class MonitorTransitions
             // Recovery: agent applied fix + pushed during investigation (skipped investigation_complete → apply_fix flow)
             (MonitorStateId.Investigating, "push_completed") => TransitionToPolling(state),
 
+            // Freeform Path B (CI flow): agent applied fix + pushed from freeform custom instruction
+            (MonitorStateId.ExecutingTask, "push_completed") => TransitionToPolling(state),
+
             // LLM finished executing a generic task
             (MonitorStateId.ExecutingTask, "task_complete") => ProcessTaskComplete(state),
 
@@ -256,28 +259,35 @@ public static class MonitorTransitions
             };
         }
 
-        // Single comment flow: after explain, show post-explain choices
+        // Single comment flow: after explain or freeform task, show post-explain choices
         if (state.CommentFlow == CommentFlowState.SingleCommentPrompt &&
             state.CurrentCommentIndex < state.UnresolvedComments.Count)
         {
             var c = state.UnresolvedComments[state.CurrentCommentIndex];
-
-            // After explain, show post-explain choices
-            if (state.PendingExplainResult)
+            state.PendingExplainResult = false;
+            state.CurrentState = MonitorStateId.AwaitingUser;
+            return new MonitorAction
             {
-                state.PendingExplainResult = false;
-                state.CurrentState = MonitorStateId.AwaitingUser;
-                return new MonitorAction
-                {
-                    Action = "ask_user",
-                    Question = $"Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{Truncate(c.Body, 500)}\"",
-                    Choices = ["Apply the recommendation", "I'll handle it myself"],
-                    Context = c
-                };
-            }
+                Action = "ask_user",
+                Question = $"Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{Truncate(c.Body, 500)}\"",
+                Choices = ["Apply the recommendation", "I'll handle it myself"],
+                Context = c
+            };
+        }
 
-            // Safety fallback: if we reach here without explain having run, trigger it
-            return BeginExplainComment(state);
+        // Multi-comment flow: after freeform task, re-present the multi-comment choices
+        if (state.CommentFlow == CommentFlowState.MultiCommentPrompt &&
+            state.UnresolvedComments.Count > 0)
+        {
+            state.CurrentState = MonitorStateId.AwaitingUser;
+            var timestamp = DateTime.Now.ToString("hh:mm tt");
+            return BuildCommentAction(state, timestamp);
+        }
+
+        // CI failure flow: after freeform task, re-present investigation results choices
+        if (state.CiFailureFlow == CiFailureFlowState.InvestigationResults)
+        {
+            return ProcessInvestigationComplete(state, null);
         }
 
         // If we were handling a waiting-for-reply comment action, return to monitoring
