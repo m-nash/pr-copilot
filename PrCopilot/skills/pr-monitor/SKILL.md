@@ -100,7 +100,7 @@ When a terminal state is detected, the user sees both enum choices and a text in
 **How to handle `interpret_freeform`:**
 1. If the text cleanly maps to ONE of the available choices with no extra instructions, tell the user "I'm interpreting this as [choice text]" and call `pr_monitor_next_step` with `event='user_chose'` and `choice=<mapped_value>`.
 2. If the text is a custom instruction (or has extra instructions beyond a choice), execute the user's request directly, then call `pr_monitor_next_step` with the appropriate event:
-   - **Comment flows:** Use `event='comment_addressed'` (with `reply_text` in data) if code was changed, or `event='task_complete'` if no code changes.
+   - **Comment flows:** Use `event='comment_addressed'` (with `reply_text` in data) if code was changed, `event='comment_replied'` (with `reply_text` in data) if replying without code changes, or `event='task_complete'` for non-reply tasks (analysis, questions).
    - **CI failure flows:** Use `event='push_completed'` if code was changed, or `event='task_complete'` if no code changes.
    - **No active flow:** Use `event='task_complete'`.
 
