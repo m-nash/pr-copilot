@@ -1068,6 +1068,86 @@ public class StateMachineTests
         Assert.Contains("Skip this comment", action.Choices!);
     }
 
+    [Fact]
+    public void ProcessEvent_SingleComment_FreeformTaskComplete_RepresentsChoices()
+    {
+        // After a freeform task completes in single-comment flow,
+        // re-present the post-explain choices instead of re-explaining.
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.PendingExplainResult = false; // explain already ran
+        state.UnresolvedComments = [MakeComment()];
+        state.CurrentCommentIndex = 0;
+
+        var action = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        Assert.Equal("ask_user", action.Action);
+        Assert.Equal(MonitorStateId.AwaitingUser, state.CurrentState);
+        Assert.Contains("Apply the recommendation", action.Choices!);
+        Assert.Contains("I'll handle it myself", action.Choices!);
+    }
+
+    [Fact]
+    public void ProcessEvent_MultiCommentPrompt_FreeformTaskComplete_RepresentsChoices()
+    {
+        // After a freeform task completes in multi-comment flow,
+        // re-present the multi-comment choices instead of transitioning to polling.
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.MultiCommentPrompt;
+        state.UnresolvedComments = [MakeComment("c1"), MakeComment("c2", "reviewer2", "src/Other.cs")];
+        state.CurrentCommentIndex = 0;
+
+        var action = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        Assert.Equal("ask_user", action.Action);
+        Assert.Equal(MonitorStateId.AwaitingUser, state.CurrentState);
+        Assert.Contains("Address all comments", action.Choices!);
+        Assert.Contains("Explain each one by one", action.Choices!);
+        Assert.Contains("I'll handle the comments myself", action.Choices!);
+    }
+
+    [Fact]
+    public void ProcessEvent_CiFailure_FreeformTaskComplete_RepresentsInvestigationChoices()
+    {
+        // After a freeform task completes during CI investigation results,
+        // re-present the investigation choices instead of transitioning to polling.
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CiFailureFlow = CiFailureFlowState.InvestigationResults;
+        state.InvestigationFindings = "The build failed due to a missing import.";
+        state.SuggestedFix = "Add the missing import statement.";
+        SetChecksFailed(state);
+
+        var action = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        Assert.Equal("ask_user", action.Action);
+        Assert.Equal(MonitorStateId.AwaitingUser, state.CurrentState);
+        Assert.Equal(CiFailureFlowState.InvestigationResults, state.CiFailureFlow);
+        Assert.Contains("Apply the recommendation", action.Choices!);
+        Assert.Contains("Re-run failed jobs", action.Choices!);
+        Assert.Contains("I'll handle it myself", action.Choices!);
+    }
+
+    [Fact]
+    public void ProcessEvent_CiFailure_FreeformTaskComplete_NoSuggestedFix_OmitsApply()
+    {
+        // If no suggested fix, "Apply the recommendation" should not appear.
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CiFailureFlow = CiFailureFlowState.InvestigationResults;
+        state.InvestigationFindings = "Infrastructure timeout — no code fix needed.";
+        state.SuggestedFix = null;
+        SetChecksFailed(state);
+
+        var action = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        Assert.Equal("ask_user", action.Action);
+        Assert.DoesNotContain("Apply the recommendation", action.Choices!);
+        Assert.Contains("Re-run failed jobs", action.Choices!);
+    }
+
     #endregion
 
     #region ProcessEvent — CI Failure Flow Choices

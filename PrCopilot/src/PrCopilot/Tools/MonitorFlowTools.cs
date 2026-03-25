@@ -54,14 +54,7 @@ public class MonitorFlowTools
             }))
             : "none";
 
-        // Build comment context for Path B (custom instruction that modifies code)
-        var commentContext = "";
-        if (state.CommentFlow != CommentFlowState.None &&
-            state.CurrentCommentIndex < state.UnresolvedComments.Count)
-        {
-            var c = state.UnresolvedComments[state.CurrentCommentIndex];
-            commentContext = $" Active comment from {c.Author} on {c.FilePath}:{c.Line}: \"{c.Body}\". URL: {c.Url}.";
-        }
+        var pathBInstructions = BuildFreeformPathBInstructions(state);
 
         return new MonitorAction
         {
@@ -74,7 +67,42 @@ public class MonitorFlowTools
                 "**Path A — clean choice match:** If the text cleanly maps to ONE of the available choices with NO extra instructions, " +
                 "tell the user 'I'm interpreting this as [choice display text]' and call pr_monitor_next_step " +
                 "with event='user_chose' and choice=<mapped_value>. " +
-                "**Path B — custom instruction:** If the text is a custom instruction that doesn't map to a single choice " +
+                pathBInstructions
+        };
+    }
+
+    /// <summary>
+    /// Build flow-specific Path B instructions for freeform interpretation.
+    /// CI failure flow uses push_completed; comment flow uses comment_addressed.
+    /// </summary>
+    private static string BuildFreeformPathBInstructions(MonitorState state)
+    {
+        // CI failure flow — no comment context, use push_completed for code changes
+        if (state.CiFailureFlow != CiFailureFlowState.None)
+        {
+            var ciContext = state.FailedChecks.Count > 0
+                ? $" Failed checks: {string.Join(", ", state.FailedChecks.Select(f => f.Name))}."
+                : "";
+            return "**Path B — custom instruction:** If the text is a custom instruction that doesn't map to a single choice " +
+                "(or has extra instructions beyond the choice), execute the user's request directly. " +
+                "If the instruction involves code changes: STOP and present your changes to the user for review before committing — " +
+                "honor the user's custom instructions for git workflow. Only commit/push after the user approves. " +
+                "Then call pr_monitor_next_step with event='push_completed'." +
+                ciContext +
+                " If the instruction does NOT involve code changes, execute it and call pr_monitor_next_step with event='task_complete'.";
+        }
+
+        // Comment flow — use comment_addressed for code changes, include comment context
+        if (state.CommentFlow != CommentFlowState.None)
+        {
+            var commentContext = "";
+            if (state.CurrentCommentIndex < state.UnresolvedComments.Count)
+            {
+                var c = state.UnresolvedComments[state.CurrentCommentIndex];
+                commentContext = $" Active comment from {c.Author} on {c.FilePath}:{c.Line}: \"{c.Body}\". URL: {c.Url}.";
+            }
+
+            return "**Path B — custom instruction:** If the text is a custom instruction that doesn't map to a single choice " +
                 "(or has extra instructions beyond the choice), execute the user's request directly. " +
                 "If the instruction involves code changes: STOP and present your changes to the user for review before committing — " +
                 "honor the user's custom instructions for git workflow. Only commit/push after the user approves. " +
@@ -83,9 +111,14 @@ public class MonitorFlowTools
                 "Do NOT post the reply yourself — pass it via data='{\"reply_text\": \"your reply\"}' in pr_monitor_next_step. " +
                 "Then call pr_monitor_next_step with event='comment_addressed' and data containing reply_text." +
                 commentContext +
-                (state.CommentFlow != CommentFlowState.None ? MonitorTransitions.CopilotFooter(state) : "") +
-                " If the instruction does NOT involve code changes, execute it and call pr_monitor_next_step with event='task_complete'."
-        };
+                MonitorTransitions.CopilotFooter(state) +
+                " If the instruction does NOT involve code changes, execute it and call pr_monitor_next_step with event='task_complete'.";
+        }
+
+        // No active flow — generic fallback
+        return "**Path B — custom instruction:** If the text is a custom instruction that doesn't map to a single choice " +
+            "(or has extra instructions beyond the choice), execute the user's request directly. " +
+            "Then call pr_monitor_next_step with event='task_complete'.";
     }
 
     /// <summary>
