@@ -112,7 +112,10 @@ public class MonitorFlowTools
                 "Then call pr_monitor_next_step with event='comment_addressed' and data containing reply_text." +
                 commentContext +
                 MonitorTransitions.CopilotFooter(state) +
-                " If the instruction does NOT involve code changes, execute it and call pr_monitor_next_step with event='task_complete'.";
+                " If the instruction does NOT involve code changes: " +
+                "If the instruction is to reply to the comment without changing code (e.g., clarification or pushback), " +
+                "compose the reply and call pr_monitor_next_step with event='comment_replied' and data='{\"reply_text\": \"your reply\"}'. " +
+                "If the instruction is some other non-reply task (analysis, questions, etc.), execute it and call pr_monitor_next_step with event='task_complete'.";
         }
 
         // No active flow — generic fallback
