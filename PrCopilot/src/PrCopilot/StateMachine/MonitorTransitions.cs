@@ -174,6 +174,9 @@ public static class MonitorTransitions
             // Recovery: agent applied fix + pushed during investigation (skipped investigation_complete → apply_fix flow)
             (MonitorStateId.Investigating, "push_completed") => TransitionToPolling(state),
 
+            // Freeform Path B (CI flow): agent applied fix + pushed from freeform custom instruction
+            (MonitorStateId.ExecutingTask, "push_completed") => TransitionToPolling(state),
+
             // LLM finished executing a generic task
             (MonitorStateId.ExecutingTask, "task_complete") => ProcessTaskComplete(state),
 

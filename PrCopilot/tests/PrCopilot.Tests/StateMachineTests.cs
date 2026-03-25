@@ -1148,6 +1148,22 @@ public class StateMachineTests
         Assert.Contains("Re-run failed jobs", action.Choices!);
     }
 
+    [Fact]
+    public void ProcessEvent_CiFailure_FreeformPushCompleted_TransitionsToPolling()
+    {
+        // Freeform Path B in CI flow: agent applied a fix and pushed from ExecutingTask.
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CiFailureFlow = CiFailureFlowState.InvestigationResults;
+        SetChecksFailed(state);
+
+        var action = MonitorTransitions.ProcessEvent(state, "push_completed", null, null);
+
+        Assert.Equal("polling", action.Action);
+        Assert.Equal(MonitorStateId.Polling, state.CurrentState);
+        Assert.Equal(CiFailureFlowState.None, state.CiFailureFlow);
+    }
+
     #endregion
 
     #region ProcessEvent — CI Failure Flow Choices
