@@ -6,6 +6,7 @@
     "csproj",
     "dedup",
     "dotnet",
+    "elicitations",
     "FEFF",
     "keepalive",
     "LASTEXITCODE",
