@@ -508,6 +508,7 @@ public static class MonitorTransitions
         var c = state.UnresolvedComments[state.CurrentCommentIndex];
         state.CurrentState = MonitorStateId.ExecutingTask;
         state.PendingExplainResult = true;
+        state.LastRecommendation = null;
         return new MonitorAction
         {
             Action = "execute",
@@ -597,6 +598,7 @@ public static class MonitorTransitions
         var c = state.UnresolvedComments[state.CurrentCommentIndex];
         state.CurrentState = MonitorStateId.ExecutingTask;
         state.PendingExplainResult = true;
+        state.LastRecommendation = null;
         var replyContext = isReplyEvent && !string.IsNullOrEmpty(c.LastReplyAuthor)
             ? $"Note: This is a reply from {c.LastReplyAuthor} ({(c.LastReplyAt.HasValue ? $"at {c.LastReplyAt.Value:u}, " : "")}{c.ReplyCount} replies in thread) to an existing review thread — not a brand-new comment. "
             : "";
