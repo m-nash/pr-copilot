@@ -532,7 +532,7 @@ public static class MonitorTransitions
     {
         state.CommentFlow = CommentFlowState.PickComment;
         var choices = state.UnresolvedComments
-            .Select((c, i) => $"{i + 1}. {c.Author}: {Truncate(StripSuggestionBlocks(c.Body), 300)} ({c.FilePath}:{c.Line})")
+            .Select((c, i) => $"{i + 1}. {c.Author}: {NormalizeWhitespace(Truncate(StripSuggestionBlocks(c.Body), 300))} ({c.FilePath}:{c.Line})")
             .ToList();
         choices.Add("I'll handle them myself");
 
@@ -1205,6 +1205,17 @@ public static class MonitorTransitions
         if (string.IsNullOrEmpty(text))
             return text;
         return SuggestionBlockRegex.Replace(text, "[code suggestion — see full comment for details]");
+    }
+
+    /// <summary>
+    /// Collapse newlines and multiple whitespace runs into single spaces.
+    /// Used for single-line contexts like choice titles where newlines would break rendering.
+    /// </summary>
+    internal static string NormalizeWhitespace(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return text;
+        return Regex.Replace(text, @"\s+", " ").Trim();
     }
 
     /// <summary>
