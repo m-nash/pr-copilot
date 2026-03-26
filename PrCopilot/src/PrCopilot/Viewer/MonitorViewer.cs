@@ -436,6 +436,22 @@ public static class MonitorViewer
         var versionFilePath = Path.Combine(AppContext.BaseDirectory, "version.txt");
         viewerLog($"Viewer started: version={currentVersion} versionFile={versionFilePath}");
 
+        // Server PID tracking: detect if the MCP server dies ungracefully (no STOPPED line written)
+        var serverPidFile = logFile + ".server.pid";
+        var lastServerPidCheck = DateTime.MinValue;
+        int? serverPid = null;
+        try
+        {
+            if (File.Exists(serverPidFile))
+            {
+                var pidText = File.ReadAllText(serverPidFile).Trim();
+                if (int.TryParse(pidText, out var pid))
+                    serverPid = pid;
+            }
+        }
+        catch { }
+        viewerLog($"Server PID file: {serverPidFile}, pid={serverPid?.ToString() ?? "not found"}");
+
         window.Add(headerButton, ciFrame, approvalsFrame, commentsFrame, waitingFrame,
                     updatedLabel, separator, debugToggleButton, debugFrame, progressBar, statusLabel, extendButton, checkButton,
                     versionLabel);
@@ -537,6 +553,46 @@ public static class MonitorViewer
                 {
                     viewerLog($"Version check error: {ex.Message}");
                 }
+            }
+
+            // Server PID liveness check: detect ungraceful server shutdown (every 10s)
+            if (!isTerminal && serverPid.HasValue && (DateTime.Now - lastServerPidCheck).TotalSeconds >= 10)
+            {
+                lastServerPidCheck = DateTime.Now;
+                try
+                {
+                    Process.GetProcessById(serverPid.Value);
+                    // Process exists — server is still alive
+                }
+                catch (ArgumentException)
+                {
+                    // Process no longer exists — server died without writing STOPPED
+                    viewerLog($"Server process {serverPid.Value} no longer running — treating as shutdown");
+                    isTerminal = true;
+                    terminalState = "stopped";
+                    terminalDescription = "Server process exited";
+                    isCountingDown = false;
+                }
+                catch { /* ignore other errors (access denied, etc.) */ }
+            }
+
+            // Re-read server PID file if we don't have one yet (server may start after viewer)
+            if (!serverPid.HasValue && (DateTime.Now - lastServerPidCheck).TotalSeconds >= 5)
+            {
+                lastServerPidCheck = DateTime.Now;
+                try
+                {
+                    if (File.Exists(serverPidFile))
+                    {
+                        var pidText = File.ReadAllText(serverPidFile).Trim();
+                        if (int.TryParse(pidText, out var pid))
+                        {
+                            serverPid = pid;
+                            viewerLog($"Server PID loaded: {pid}");
+                        }
+                    }
+                }
+                catch { }
             }
 
             // Terminal state reached — freeze the UI

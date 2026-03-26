@@ -86,6 +86,9 @@ public class MonitorState
     // Set when explain task completes — show post-explain choices instead of original prompt
     public bool PendingExplainResult { get; set; }
 
+    /// <summary>Last recommendation text from the agent's explain_comment analysis, shown in post-explain elicitations.</summary>
+    public string? LastRecommendation { get; set; }
+
     // Set when user chooses rerun but other checks are still pending/queued — defer until complete
     public bool PendingRerunWhenChecksComplete { get; set; }
 
@@ -109,6 +112,7 @@ public class MonitorState
         PendingResolveSummary = null;
         PendingAdvanceAfterReply = null;
         PendingExplainResult = false;
+        LastRecommendation = null;
         ActiveWaitingComment = null;
         PendingReRequestReviewer = null;
     }

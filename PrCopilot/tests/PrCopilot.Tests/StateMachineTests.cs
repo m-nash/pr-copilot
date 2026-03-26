@@ -2716,4 +2716,50 @@ public class StateMachineTests
     }
 
     #endregion
+
+    #region StripSuggestionBlocks
+
+    [Fact]
+    public void StripSuggestionBlocks_RemovesSuggestionBlock()
+    {
+        var body = "Consider adding a null check here.\n```suggestion\nif (x == null) throw new ArgumentNullException();\n```\nThis would prevent crashes.";
+        var result = MonitorTransitions.StripSuggestionBlocks(body);
+
+        Assert.DoesNotContain("```suggestion", result);
+        Assert.Contains("Consider adding a null check here.", result);
+        Assert.Contains("[code suggestion — see full comment for details]", result);
+        Assert.Contains("This would prevent crashes.", result);
+    }
+
+    [Fact]
+    public void StripSuggestionBlocks_HandlesMultipleSuggestions()
+    {
+        var body = "Fix A:\n```suggestion\ncode A\n```\nFix B:\n```suggestion\ncode B\n```";
+        var result = MonitorTransitions.StripSuggestionBlocks(body);
+
+        Assert.DoesNotContain("code A", result);
+        Assert.DoesNotContain("code B", result);
+        Assert.Equal(2, result.Split("[code suggestion — see full comment for details]").Length - 1);
+    }
+
+    [Fact]
+    public void StripSuggestionBlocks_PreservesNonSuggestionCodeBlocks()
+    {
+        var body = "Example:\n```csharp\nvar x = 1;\n```\nDone.";
+        var result = MonitorTransitions.StripSuggestionBlocks(body);
+
+        Assert.Contains("```csharp", result);
+        Assert.Contains("var x = 1;", result);
+    }
+
+    [Fact]
+    public void StripSuggestionBlocks_NoSuggestions_ReturnsOriginal()
+    {
+        var body = "Please fix this variable name.";
+        var result = MonitorTransitions.StripSuggestionBlocks(body);
+
+        Assert.Equal(body, result);
+    }
+
+    #endregion
 }
