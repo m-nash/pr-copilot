@@ -564,6 +564,7 @@ public static class MonitorViewer
             if (!isTerminal && (DateTime.Now - lastServerPidCheck).TotalSeconds >= 10)
             {
                 lastServerPidCheck = DateTime.Now;
+                var pidReadSucceeded = true;
 
                 // Re-read PID file to pick up new server PIDs (initial load or server restart)
                 try
@@ -571,17 +572,29 @@ public static class MonitorViewer
                     if (File.Exists(serverPidFile))
                     {
                         var pidText = File.ReadAllText(serverPidFile).Trim();
-                        if (int.TryParse(pidText, out var filePid) && filePid != serverPid)
+                        if (int.TryParse(pidText, out var filePid))
                         {
-                            viewerLog($"Server PID updated: {serverPid?.ToString() ?? "null"} → {filePid}");
-                            serverPid = filePid;
+                            if (filePid != serverPid)
+                            {
+                                viewerLog($"Server PID updated: {serverPid?.ToString() ?? "null"} → {filePid}");
+                                serverPid = filePid;
+                            }
+                        }
+                        else
+                        {
+                            pidReadSucceeded = false;
+                            viewerLog("PID file content is not a valid integer — skipping liveness check for this tick");
                         }
                     }
                 }
-                catch (Exception ex) { viewerLog($"PID file re-read error: {ex.Message}"); }
+                catch (Exception ex)
+                {
+                    pidReadSucceeded = false;
+                    viewerLog($"PID file re-read error: {ex.Message}");
+                }
 
-                // Check if the known server process is still alive
-                if (serverPid.HasValue)
+                // Check if the known server process is still alive (skip if PID read failed)
+                if (serverPid.HasValue && pidReadSucceeded)
                 {
                     try
                     {
@@ -589,7 +602,6 @@ public static class MonitorViewer
                     }
                     catch (ArgumentException)
                     {
-                        // Process no longer exists — server died without writing STOPPED
                         viewerLog($"Server process {serverPid.Value} no longer running — treating as shutdown");
                         isTerminal = true;
                         terminalState = "stopped";
