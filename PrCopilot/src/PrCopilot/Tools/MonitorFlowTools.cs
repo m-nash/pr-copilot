@@ -331,8 +331,22 @@ public class MonitorFlowTools
 
         // Write server PID file so the viewer can detect if the server dies ungracefully
         var serverPidFile = state.LogFile + ".server.pid";
-        try { await File.WriteAllTextAsync(serverPidFile, Environment.ProcessId.ToString(), cancellationToken); }
-        catch { /* non-fatal */ }
+        try
+        {
+            await File.WriteAllTextAsync(serverPidFile, Environment.ProcessId.ToString(), cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            DebugLogger.Log("PrMonitorStart", $"Failed to write server PID file to '{serverPidFile}': {ex}");
+            try
+            {
+                File.WriteAllText(serverPidFile, Environment.ProcessId.ToString());
+            }
+            catch (Exception fallbackEx)
+            {
+                DebugLogger.Log("PrMonitorStart", $"Fallback sync write of server PID file also failed: {fallbackEx}");
+            }
+        }
 
         // Launch viewer if not already running
         LaunchViewerIfNeeded(state);
