@@ -441,20 +441,28 @@ public static class MonitorViewer
         var serverPidFile = logFile + ".server.pid";
         var lastServerPidCheck = DateTime.MinValue;
         int? serverPid = null;
+        var serverPidInvalid = false;
         try
         {
             if (File.Exists(serverPidFile))
             {
                 var pidText = File.ReadAllText(serverPidFile).Trim();
                 if (int.TryParse(pidText, out var pid))
+                {
                     serverPid = pid;
+                }
+                else
+                {
+                    serverPidInvalid = true;
+                    viewerLog($"Server PID file '{serverPidFile}' contains invalid value '{pidText}'");
+                }
             }
         }
         catch (Exception ex)
         {
             viewerLog($"Failed to read server PID file '{serverPidFile}': {ex.Message}");
         }
-        viewerLog($"Server PID file: {serverPidFile}, pid={serverPid?.ToString() ?? "not found"}");
+        viewerLog($"Server PID file: {serverPidFile}, pid={serverPid?.ToString() ?? (serverPidInvalid ? "invalid" : "not found")}");
 
         window.Add(headerButton, ciFrame, approvalsFrame, commentsFrame, waitingFrame,
                     updatedLabel, separator, debugToggleButton, debugFrame, progressBar, statusLabel, extendButton, checkButton,
