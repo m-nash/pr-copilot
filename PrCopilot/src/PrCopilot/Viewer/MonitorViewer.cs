@@ -372,6 +372,7 @@ public static class MonitorViewer
         var isCountingDown = false;
         var isChecking = false;
         var isTerminal = false;
+        var stopTimeoutScheduled = false;
         var actionState = new bool[] { false }; // [0] = waitingOnAction, capturable in lambdas
         var isAfterHoursPaused = false; // true when sleeping until morning
         var terminalDescription = "";
@@ -435,6 +436,33 @@ public static class MonitorViewer
         var lastVersionCheck = DateTime.MinValue;
         var versionFilePath = Path.Combine(AppContext.BaseDirectory, "version.txt");
         viewerLog($"Viewer started: version={currentVersion} versionFile={versionFilePath}");
+
+        // Server PID tracking: detect if the MCP server dies ungracefully (no STOPPED line written)
+        var serverPidFile = logFile + ".server.pid";
+        var lastServerPidCheck = DateTime.MinValue;
+        int? serverPid = null;
+        var serverPidInvalid = false;
+        try
+        {
+            if (File.Exists(serverPidFile))
+            {
+                var pidText = File.ReadAllText(serverPidFile).Trim();
+                if (int.TryParse(pidText, out var pid))
+                {
+                    serverPid = pid;
+                }
+                else
+                {
+                    serverPidInvalid = true;
+                    viewerLog($"Server PID file '{serverPidFile}' contains invalid value '{pidText}'");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            viewerLog($"Failed to read server PID file '{serverPidFile}': {ex.Message}");
+        }
+        viewerLog($"Server PID file: {serverPidFile}, pid={serverPid?.ToString() ?? (serverPidInvalid ? "invalid" : "not found")}");
 
         window.Add(headerButton, ciFrame, approvalsFrame, commentsFrame, waitingFrame,
                     updatedLabel, separator, debugToggleButton, debugFrame, progressBar, statusLabel, extendButton, checkButton,
@@ -539,6 +567,59 @@ public static class MonitorViewer
                 }
             }
 
+            // Server PID liveness check: detect ungraceful server shutdown (every 10s)
+            // Also re-reads the PID file to pick up server restarts (new PID)
+            if (!isTerminal && (DateTime.Now - lastServerPidCheck).TotalSeconds >= 10)
+            {
+                lastServerPidCheck = DateTime.Now;
+                var pidReadSucceeded = true;
+
+                // Re-read PID file to pick up new server PIDs (initial load or server restart)
+                try
+                {
+                    if (File.Exists(serverPidFile))
+                    {
+                        var pidText = File.ReadAllText(serverPidFile).Trim();
+                        if (int.TryParse(pidText, out var filePid))
+                        {
+                            if (filePid != serverPid)
+                            {
+                                viewerLog($"Server PID updated: {serverPid?.ToString() ?? "null"} → {filePid}");
+                                serverPid = filePid;
+                            }
+                        }
+                        else
+                        {
+                            pidReadSucceeded = false;
+                            viewerLog("PID file content is not a valid integer — skipping liveness check for this tick");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    pidReadSucceeded = false;
+                    viewerLog($"PID file re-read error: {ex.Message}");
+                }
+
+                // Check if the known server process is still alive (skip if PID read failed)
+                if (serverPid.HasValue && pidReadSucceeded)
+                {
+                    try
+                    {
+                        Process.GetProcessById(serverPid.Value);
+                    }
+                    catch (ArgumentException)
+                    {
+                        viewerLog($"Server process {serverPid.Value} no longer running — treating as shutdown");
+                        isTerminal = true;
+                        terminalState = "stopped";
+                        terminalDescription = "Server process exited";
+                        isCountingDown = false;
+                    }
+                    catch (Exception ex) { viewerLog($"PID liveness check error: {ex.Message}"); }
+                }
+            }
+
             // Terminal state reached — freeze the UI
             if (isTerminal)
             {
@@ -577,9 +658,10 @@ public static class MonitorViewer
                 progressBar.ColorScheme = stateColor;
                 checkButton.Visible = false;
 
-                // Auto-close viewer when monitoring is stopped
-                if (terminalState == "stopped")
+                // Auto-close viewer when monitoring is stopped (schedule only once)
+                if (terminalState == "stopped" && !stopTimeoutScheduled)
                 {
+                    stopTimeoutScheduled = true;
                     Application.AddTimeout(TimeSpan.FromSeconds(5), () =>
                     {
                         Application.RequestStop();

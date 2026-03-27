@@ -82,7 +82,7 @@ call pr_monitor_next_step(monitor_id, event, data)
 | `comment_replied` | Replied to a comment without code changes (pushback or clarification) | `data`: JSON with `reply_text` |
 | `investigation_complete` | Finished analyzing CI failures | `data`: JSON with `findings` and optional `suggested_fix` |
 | `push_completed` | Committed and pushed a fix | — |
-| `task_complete` | Finished any other execute task | — |
+| `task_complete` | Finished any other execute task | `data`: JSON with optional `recommendation` (for explain_comment tasks — a detailed, actionable summary of what you recommend) |
 | `user_chose` | Used by freeform interpretation when text maps to a choice | `choice`: mapped value |
 
 ## Freeform Text Input

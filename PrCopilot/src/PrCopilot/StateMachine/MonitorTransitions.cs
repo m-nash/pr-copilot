@@ -1,5 +1,7 @@
 // Licensed under the MIT License.
 
+using System.Text;
+using System.Text.RegularExpressions;
 using PrCopilot.Services;
 
 namespace PrCopilot.StateMachine;
@@ -253,7 +255,7 @@ public static class MonitorTransitions
             return new MonitorAction
             {
                 Action = "ask_user",
-                Question = $"Comment ({state.CurrentCommentIndex + 1}/{state.UnresolvedComments.Count}) from {c.Author} on {c.FilePath}:{c.Line}: \"{Truncate(c.Body, 500)}\"",
+                Question = FormatCommentWithRecommendation(c, state, $"Comment ({state.CurrentCommentIndex + 1}/{state.UnresolvedComments.Count})"),
                 Choices = ["Apply the recommendation", "Skip this comment", "Done — resume monitoring"],
                 Context = c
             };
@@ -269,7 +271,7 @@ public static class MonitorTransitions
             return new MonitorAction
             {
                 Action = "ask_user",
-                Question = $"Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{Truncate(c.Body, 500)}\"",
+                Question = FormatCommentWithRecommendation(c, state),
                 Choices = ["Apply the recommendation", "I'll handle it myself"],
                 Context = c
             };
@@ -470,7 +472,7 @@ public static class MonitorTransitions
         return new MonitorAction
         {
             Action = "ask_user",
-            Question = $"Comment (1/{state.UnresolvedComments.Count}): {c.Author} on {c.FilePath}:{c.Line}: \"{Truncate(c.Body, 300)}\"",
+            Question = FormatComment(c, $"Comment (1/{state.UnresolvedComments.Count})"),
             Choices = ["Address this comment", "Skip this comment", "Done — resume monitoring"],
             Context = c
         };
@@ -486,7 +488,7 @@ public static class MonitorTransitions
             return new MonitorAction
             {
                 Action = "ask_user",
-                Question = $"Next comment ({state.CurrentCommentIndex + 1}/{state.UnresolvedComments.Count}): {next.Author} on {next.FilePath}:{next.Line}: \"{Truncate(next.Body, 300)}\"",
+                Question = FormatComment(next, $"Next comment ({state.CurrentCommentIndex + 1}/{state.UnresolvedComments.Count})"),
                 Choices = ["Address this comment", "Skip this comment", "Done — resume monitoring"],
                 Context = next
             };
@@ -506,11 +508,15 @@ public static class MonitorTransitions
         var c = state.UnresolvedComments[state.CurrentCommentIndex];
         state.CurrentState = MonitorStateId.ExecutingTask;
         state.PendingExplainResult = true;
+        state.LastRecommendation = null;
         return new MonitorAction
         {
             Action = "execute",
             Task = "explain_comment",
-            Instructions = $"Read and explain this review comment ({state.CurrentCommentIndex + 1}/{state.UnresolvedComments.Count}). Recommend whether to implement the change or push back. ONLY analyze THIS SPECIFIC comment — do NOT address, reply to, or fix any other comments. DO NOT make any code changes, DO NOT commit, DO NOT push, DO NOT reply to the comment thread — ONLY explain and recommend. Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{c.Body}\". URL: {c.Url}. After explaining, call pr_monitor_next_step with event=task_complete.",
+            Instructions = $"Read and explain this review comment ({state.CurrentCommentIndex + 1}/{state.UnresolvedComments.Count}). Recommend whether to implement the change or push back. " +
+                $"ONLY analyze THIS SPECIFIC comment — do NOT address, reply to, or fix any other comments. DO NOT make any code changes, DO NOT commit, DO NOT push, DO NOT reply to the comment thread — ONLY explain and recommend. " +
+                $"Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{c.Body}\". URL: {c.Url}. " +
+                RecommendationDataInstruction(),
             Context = c
         };
     }
@@ -527,7 +533,7 @@ public static class MonitorTransitions
     {
         state.CommentFlow = CommentFlowState.PickComment;
         var choices = state.UnresolvedComments
-            .Select((c, i) => $"{i + 1}. {c.Author}: {Truncate(c.Body, 120)} ({c.FilePath})")
+            .Select((c, i) => $"{i + 1}. {c.Author}: {NormalizeWhitespace(Truncate(StripSuggestionBlocks(c.Body), 300))} ({c.FilePath}:{c.Line})")
             .ToList();
         choices.Add("I'll handle them myself");
 
@@ -592,6 +598,7 @@ public static class MonitorTransitions
         var c = state.UnresolvedComments[state.CurrentCommentIndex];
         state.CurrentState = MonitorStateId.ExecutingTask;
         state.PendingExplainResult = true;
+        state.LastRecommendation = null;
         var replyContext = isReplyEvent && !string.IsNullOrEmpty(c.LastReplyAuthor)
             ? $"Note: This is a reply from {c.LastReplyAuthor} ({(c.LastReplyAt.HasValue ? $"at {c.LastReplyAt.Value:u}, " : "")}{c.ReplyCount} replies in thread) to an existing review thread — not a brand-new comment. "
             : "";
@@ -602,7 +609,9 @@ public static class MonitorTransitions
             Instructions = $"Read and explain this review comment ({state.CurrentCommentIndex + 1}/{state.UnresolvedComments.Count}). Recommend whether to implement the change or push back. " +
                 replyContext +
                 $"If you lean toward pushing back, consider what test evidence would prove the comment is wrong — a strong pushback recommendation should explain what test could validate your position. " +
-                $"ONLY analyze THIS SPECIFIC comment — do NOT address, reply to, or fix any other comments. DO NOT make any code changes, DO NOT commit, DO NOT push, DO NOT reply to the comment thread — ONLY explain and recommend. Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{c.Body}\". URL: {c.Url}. After explaining, call pr_monitor_next_step with event=task_complete.",
+                $"ONLY analyze THIS SPECIFIC comment — do NOT address, reply to, or fix any other comments. DO NOT make any code changes, DO NOT commit, DO NOT push, DO NOT reply to the comment thread — ONLY explain and recommend. " +
+                $"Comment from {c.Author} on {c.FilePath}:{c.Line}: \"{c.Body}\". URL: {c.Url}. " +
+                RecommendationDataInstruction(),
             Context = c
         };
     }
@@ -710,7 +719,7 @@ public static class MonitorTransitions
                 return new MonitorAction
                 {
                     Action = "ask_user",
-                    Question = $"Next comment ({state.CurrentCommentIndex + 1}/{state.UnresolvedComments.Count}): {next.Author} on {next.FilePath}:{next.Line}: \"{Truncate(next.Body, 300)}\"",
+                    Question = FormatComment(next, $"Next comment ({state.CurrentCommentIndex + 1}/{state.UnresolvedComments.Count})"),
                     Choices = ["Address this comment", "Skip this comment", "Done — resume monitoring"],
                     Context = next
                 };
@@ -784,7 +793,7 @@ public static class MonitorTransitions
         return new MonitorAction
         {
             Action = "ask_user",
-            Question = $"[{timestamp}] ⏳ Waiting comment from {comment.Author} on {comment.FilePath}:{comment.Line}: \"{Truncate(comment.Body, 400)}\" — You replied, ball is in reviewer's court.",
+            Question = FormatComment(comment, $"[{timestamp}] ⏳ Waiting — You replied, ball is in reviewer's court"),
             Choices = ["Resolve this thread", "Go back to monitoring"],
             Context = comment
         };
@@ -1131,11 +1140,84 @@ public static class MonitorTransitions
         return new MonitorAction { Action = "stop", Message = $"Monitoring stopped for PR #{state.PrNumber}." };
     }
 
+    /// <summary>
+    /// Format a comment for elicitation display with a clear visual header.
+    /// Used for pre-explain prompts where no recommendation exists yet.
+    /// Suggestion blocks are stripped to avoid noise from large Copilot suggestions.
+    /// </summary>
+    private static string FormatComment(CommentInfo c, string? prefix = null, int maxBodyLength = 1000)
+    {
+        var sb = new StringBuilder();
+        if (prefix != null)
+            sb.AppendLine(prefix);
+        sb.AppendLine();
+        sb.AppendLine("━━━ 💬 REVIEWER COMMENT ━━━");
+        sb.AppendLine($"{c.Author} on {c.FilePath}:{c.Line}");
+        sb.AppendLine();
+        sb.Append(Truncate(StripSuggestionBlocks(c.Body), maxBodyLength));
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Format a comment for post-explain elicitation display with both the original
+    /// reviewer comment and the agent's recommendation clearly separated.
+    /// Suggestion blocks are stripped to avoid noise from large Copilot suggestions.
+    /// </summary>
+    private static string FormatCommentWithRecommendation(CommentInfo c, MonitorState state, string? prefix = null)
+    {
+        var sb = new StringBuilder();
+        if (prefix != null)
+            sb.AppendLine(prefix);
+        sb.AppendLine();
+        sb.AppendLine("━━━ 💬 REVIEWER COMMENT ━━━");
+        sb.AppendLine($"{c.Author} on {c.FilePath}:{c.Line}");
+        sb.AppendLine();
+        sb.AppendLine(Truncate(StripSuggestionBlocks(c.Body), 2000));
+        sb.AppendLine();
+        sb.AppendLine("━━━ 🤖 AGENT RECOMMENDATION ━━━");
+        if (!string.IsNullOrWhiteSpace(state.LastRecommendation))
+            sb.Append(Truncate(state.LastRecommendation, 2000));
+        else
+            sb.Append("See analysis above in the conversation.");
+        return sb.ToString();
+    }
+
     private static string Truncate(string text, int maxLength)
     {
         if (string.IsNullOrEmpty(text) || text.Length <= maxLength)
             return text;
         return text[..maxLength] + "...";
+    }
+
+    /// <summary>
+    /// Regex matching GitHub suggestion blocks: ```suggestion ... ```
+    /// These can be very large (entire function rewrites from Copilot reviewer)
+    /// and are noisy in elicitation display.
+    /// </summary>
+    private static readonly Regex SuggestionBlockRegex = new(
+        @"```suggestion\b.*?```",
+        RegexOptions.Singleline | RegexOptions.Compiled);
+
+    /// <summary>
+    /// Replace GitHub suggestion code blocks with a short placeholder.
+    /// The full suggestion is still available to the agent via the Context/Body fields.
+    /// </summary>
+    internal static string StripSuggestionBlocks(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return text;
+        return SuggestionBlockRegex.Replace(text, "[code suggestion — see full comment for details]");
+    }
+
+    /// <summary>
+    /// Collapse newlines and multiple whitespace runs into single spaces.
+    /// Used for single-line contexts like choice titles where newlines would break rendering.
+    /// </summary>
+    internal static string NormalizeWhitespace(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return text;
+        return Regex.Replace(text, @"\s+", " ").Trim();
     }
 
     /// <summary>
@@ -1152,4 +1234,18 @@ public static class MonitorTransitions
         "Do NOT post the reply yourself (do NOT use `gh api`, `gh pr comment`, or any other method to post comments). " +
         "Instead, pass your reply text in the data parameter as JSON: data='{\"reply_text\": \"your reply here\"}'. " +
         "The server will post it to the correct review thread automatically.";
+
+    /// <summary>
+    /// Instruction telling the agent to include a detailed recommendation summary in the data parameter
+    /// when completing the explain_comment task. The recommendation is shown in the post-explain elicitation
+    /// so the user can see exactly what the agent plans to do without scrolling back through chat history.
+    /// </summary>
+    internal static string RecommendationDataInstruction() =>
+        "After explaining, call pr_monitor_next_step with event=task_complete and include a detailed recommendation " +
+        "in the data parameter: data='{\"recommendation\": \"your recommendation here\"}'. " +
+        "The recommendation MUST be specific and actionable — do NOT just say 'Implement it' or 'Push back'. " +
+        "Describe exactly what you would change: which file(s), what modification, and why. " +
+        "Example: 'Add a null check for the `options` parameter at the top of ProcessAsync() in src/Client.cs " +
+        "to prevent the NullReferenceException the reviewer identified.' " +
+        "If pushing back, explain the specific reasoning and what evidence supports your position.";
 }

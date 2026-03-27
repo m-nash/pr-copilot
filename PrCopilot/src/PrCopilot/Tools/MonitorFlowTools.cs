@@ -329,6 +329,25 @@ public class MonitorFlowTools
         session.StartTriggerWatcher(state.TriggerFile);
         _sessions[monitorId] = session;
 
+        // Write server PID file so the viewer can detect if the server dies ungracefully
+        var serverPidFile = state.LogFile + ".server.pid";
+        try
+        {
+            await File.WriteAllTextAsync(serverPidFile, Environment.ProcessId.ToString(), cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            DebugLogger.Log("PrMonitorStart", $"Failed to write server PID file to '{serverPidFile}': {ex}");
+            try
+            {
+                File.WriteAllText(serverPidFile, Environment.ProcessId.ToString());
+            }
+            catch (Exception fallbackEx)
+            {
+                DebugLogger.Log("PrMonitorStart", $"Fallback sync write of server PID file also failed: {fallbackEx}");
+            }
+        }
+
         // Launch viewer if not already running
         LaunchViewerIfNeeded(state);
         DebugLogger.Log("PrMonitorStart", $"Session stored, viewer checked, returning monitor_id={monitorId}");
@@ -664,6 +683,8 @@ public class MonitorFlowTools
                         if (@event == "comment_addressed" || @event == "comment_replied")
                             state.PendingReplyText = replyText.GetString();
                     }
+                    if (root.TryGetProperty("recommendation", out var recommendation))
+                        state.LastRecommendation = recommendation.GetString();
                 }
                 catch { /* ignore parse errors in data */ }
             }
