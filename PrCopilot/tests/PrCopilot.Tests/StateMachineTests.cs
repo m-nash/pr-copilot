@@ -2762,4 +2762,101 @@ public class StateMachineTests
     }
 
     #endregion
+
+    #region Recommendation Display and Clearing
+
+    [Fact]
+    public void PostExplain_SingleComment_QuestionIncludesRecommendation()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.PendingExplainResult = true;
+        state.UnresolvedComments = [MakeComment()];
+        state.CurrentCommentIndex = 0;
+        state.LastRecommendation = "Add a null check for options in ProcessAsync()";
+
+        var action = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        Assert.Equal("ask_user", action.Action);
+        Assert.Contains("AGENT RECOMMENDATION", action.Question!);
+        Assert.Contains("Add a null check for options in ProcessAsync()", action.Question!);
+    }
+
+    [Fact]
+    public void PostExplain_SingleComment_NullRecommendation_ShowsFallback()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.PendingExplainResult = true;
+        state.UnresolvedComments = [MakeComment()];
+        state.CurrentCommentIndex = 0;
+        state.LastRecommendation = null;
+
+        var action = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        Assert.Equal("ask_user", action.Action);
+        Assert.Contains("AGENT RECOMMENDATION", action.Question!);
+        Assert.Contains("See analysis above", action.Question!);
+    }
+
+    [Fact]
+    public void PostExplain_QuestionIncludesReviewerCommentHeader()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.PendingExplainResult = true;
+        state.UnresolvedComments = [MakeComment()];
+        state.CurrentCommentIndex = 0;
+
+        var action = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        Assert.Contains("REVIEWER COMMENT", action.Question!);
+        Assert.Contains("reviewer1", action.Question!);
+        Assert.Contains("src/File.cs", action.Question!);
+    }
+
+    [Fact]
+    public void BeginExplain_ClearsLastRecommendation()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.UnresolvedComments = [MakeComment()];
+        state.CurrentCommentIndex = 0;
+        state.LastRecommendation = "stale recommendation from previous comment";
+
+        MonitorTransitions.ProcessEvent(state, "user_chose", "explain", null);
+
+        Assert.Null(state.LastRecommendation);
+    }
+
+    [Fact]
+    public void ExplainAll_ClearsLastRecommendation_BetweenComments()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.CommentFlow = CommentFlowState.ExplainAllIterating;
+        state.UnresolvedComments = [MakeComment("c1"), MakeComment("c2", "reviewer2", "src/Other.cs")];
+        state.CurrentCommentIndex = 0;
+        state.LastRecommendation = "stale recommendation";
+
+        // Skip first comment → advances to explain next, should clear recommendation
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "skip", null);
+
+        Assert.Equal("explain_comment", action.Task);
+        Assert.Null(state.LastRecommendation);
+    }
+
+    [Fact]
+    public void NormalizeWhitespace_CollapsesNewlinesAndSpaces()
+    {
+        Assert.Equal("hello world foo", MonitorTransitions.NormalizeWhitespace("hello\n  world\r\n  foo"));
+        Assert.Equal("single line", MonitorTransitions.NormalizeWhitespace("  single   line  "));
+        Assert.Equal("", MonitorTransitions.NormalizeWhitespace(""));
+    }
+
+    #endregion
 }
