@@ -449,7 +449,10 @@ public static class MonitorViewer
                     serverPid = pid;
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            viewerLog($"Failed to read server PID file '{serverPidFile}': {ex.Message}");
+        }
         viewerLog($"Server PID file: {serverPidFile}, pid={serverPid?.ToString() ?? "not found"}");
 
         window.Add(headerButton, ciFrame, approvalsFrame, commentsFrame, waitingFrame,
@@ -574,7 +577,7 @@ public static class MonitorViewer
                         }
                     }
                 }
-                catch { }
+                catch (Exception ex) { viewerLog($"PID file re-read error: {ex.Message}"); }
 
                 // Check if the known server process is still alive
                 if (serverPid.HasValue)
@@ -592,7 +595,7 @@ public static class MonitorViewer
                         terminalDescription = "Server process exited";
                         isCountingDown = false;
                     }
-                    catch { /* ignore other errors (access denied, etc.) */ }
+                    catch (Exception ex) { viewerLog($"PID liveness check error: {ex.Message}"); }
                 }
             }
 
