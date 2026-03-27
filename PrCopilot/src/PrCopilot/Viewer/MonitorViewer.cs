@@ -372,6 +372,7 @@ public static class MonitorViewer
         var isCountingDown = false;
         var isChecking = false;
         var isTerminal = false;
+        var stopTimeoutScheduled = false;
         var actionState = new bool[] { false }; // [0] = waitingOnAction, capturable in lambdas
         var isAfterHoursPaused = false; // true when sleeping until morning
         var terminalDescription = "";
@@ -637,9 +638,10 @@ public static class MonitorViewer
                 progressBar.ColorScheme = stateColor;
                 checkButton.Visible = false;
 
-                // Auto-close viewer when monitoring is stopped
-                if (terminalState == "stopped")
+                // Auto-close viewer when monitoring is stopped (schedule only once)
+                if (terminalState == "stopped" && !stopTimeoutScheduled)
                 {
+                    stopTimeoutScheduled = true;
                     Application.AddTimeout(TimeSpan.FromSeconds(5), () =>
                     {
                         Application.RequestStop();
