@@ -556,43 +556,44 @@ public static class MonitorViewer
             }
 
             // Server PID liveness check: detect ungraceful server shutdown (every 10s)
-            if (!isTerminal && serverPid.HasValue && (DateTime.Now - lastServerPidCheck).TotalSeconds >= 10)
+            // Also re-reads the PID file to pick up server restarts (new PID)
+            if (!isTerminal && (DateTime.Now - lastServerPidCheck).TotalSeconds >= 10)
             {
                 lastServerPidCheck = DateTime.Now;
-                try
-                {
-                    Process.GetProcessById(serverPid.Value);
-                    // Process exists — server is still alive
-                }
-                catch (ArgumentException)
-                {
-                    // Process no longer exists — server died without writing STOPPED
-                    viewerLog($"Server process {serverPid.Value} no longer running — treating as shutdown");
-                    isTerminal = true;
-                    terminalState = "stopped";
-                    terminalDescription = "Server process exited";
-                    isCountingDown = false;
-                }
-                catch { /* ignore other errors (access denied, etc.) */ }
-            }
 
-            // Re-read server PID file if we don't have one yet (server may start after viewer)
-            if (!serverPid.HasValue && (DateTime.Now - lastServerPidCheck).TotalSeconds >= 5)
-            {
-                lastServerPidCheck = DateTime.Now;
+                // Re-read PID file to pick up new server PIDs (initial load or server restart)
                 try
                 {
                     if (File.Exists(serverPidFile))
                     {
                         var pidText = File.ReadAllText(serverPidFile).Trim();
-                        if (int.TryParse(pidText, out var pid))
+                        if (int.TryParse(pidText, out var filePid) && filePid != serverPid)
                         {
-                            serverPid = pid;
-                            viewerLog($"Server PID loaded: {pid}");
+                            viewerLog($"Server PID updated: {serverPid?.ToString() ?? "null"} → {filePid}");
+                            serverPid = filePid;
                         }
                     }
                 }
                 catch { }
+
+                // Check if the known server process is still alive
+                if (serverPid.HasValue)
+                {
+                    try
+                    {
+                        Process.GetProcessById(serverPid.Value);
+                    }
+                    catch (ArgumentException)
+                    {
+                        // Process no longer exists — server died without writing STOPPED
+                        viewerLog($"Server process {serverPid.Value} no longer running — treating as shutdown");
+                        isTerminal = true;
+                        terminalState = "stopped";
+                        terminalDescription = "Server process exited";
+                        isCountingDown = false;
+                    }
+                    catch { /* ignore other errors (access denied, etc.) */ }
+                }
             }
 
             // Terminal state reached — freeze the UI
