@@ -90,11 +90,16 @@ internal static class SamplingHelper
             DebugLogger.Log("Sampling", $"Parsed structured response: {typeof(T).Name}");
             return parsed;
         }
-        catch (Exception ex) when (ex is JsonException || ex.GetType().FullName?.Contains("Json") == true
-            || ex.StackTrace?.Contains("System.Text.Json") == true)
+        catch (JsonException ex)
+        {
+            DebugLogger.Log("Sampling", $"Failed to parse JSON response as {typeof(T).Name}: {ex.Message}");
+            DebugLogger.Log("Sampling", $"Raw response: {text}");
+            return null;
+        }
+        catch (FileNotFoundException ex)
         {
             // .NET single-file publishing can throw FileNotFoundException instead of JsonException
-            // when satellite assemblies for JSON error messages are missing. Catch broadly for parse failures.
+            // when satellite assemblies for JSON error messages are missing.
             DebugLogger.Log("Sampling", $"Failed to parse JSON response as {typeof(T).Name}: [{ex.GetType().Name}] {ex.Message}");
             DebugLogger.Log("Sampling", $"Raw response: {text}");
             return null;
