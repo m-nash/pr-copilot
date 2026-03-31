@@ -26,6 +26,9 @@ public class MonitorFlowTools
     private static readonly ConcurrentDictionary<string, MonitorSession> _sessions = new();
     private static readonly HashSet<string> _multiMonitorIds = new();
     private static readonly object _multiMonitorLock = new();
+
+    private static string ShortSha(string sha) =>
+        string.IsNullOrEmpty(sha) ? "(none)" : sha.Length <= 7 ? sha : sha[..7];
     private static readonly JsonSerializerOptions _jsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -1051,7 +1054,7 @@ public class MonitorFlowTools
                 // New commit pushed — cancel any deferred rerun (CI restarts fresh)
                 if (state.PendingRerunWhenChecksComplete && !string.Equals(previousHeadSha, state.HeadSha, StringComparison.OrdinalIgnoreCase))
                 {
-                    DebugLogger.Log("PollLoop", $"New commit detected ({previousHeadSha[..7]} → {state.HeadSha[..7]}) — cancelling deferred rerun");
+                    DebugLogger.Log("PollLoop", $"New commit detected ({ShortSha(previousHeadSha)} → {ShortSha(state.HeadSha)}) — cancelling deferred rerun");
                     state.PendingRerunWhenChecksComplete = false;
                 }
 
@@ -1560,10 +1563,25 @@ public class MonitorFlowTools
                 {
                     // Fetch the latest HEAD SHA — state.HeadSha may be stale if commits were pushed
                     var freshPr = await PrStatusFetcher.FetchPrInfoAsync(state.Owner, state.Repo, state.PrNumber);
-                    var latestSha = freshPr.HeadSha ?? state.HeadSha;
+                    var latestSha = !string.IsNullOrWhiteSpace(freshPr.HeadSha)
+                        ? freshPr.HeadSha
+                        : state.HeadSha;
+
+                    if (string.IsNullOrWhiteSpace(latestSha))
+                    {
+                        DebugLogger.Error("AutoExec", "run_new_build: Unable to determine latest HEAD SHA; aborting.");
+                        state.CurrentState = MonitorStateId.AwaitingUser;
+                        return new MonitorAction
+                        {
+                            Action = "ask_user",
+                            Question = "Failed to determine the latest commit SHA to trigger a new build. What would you like to do?",
+                            Choices = ["Resume monitoring", "I'll handle it myself"]
+                        };
+                    }
+
                     if (latestSha != state.HeadSha)
                     {
-                        DebugLogger.Log("AutoExec", $"HeadSha updated: {state.HeadSha[..7]} → {latestSha[..7]}");
+                        DebugLogger.Log("AutoExec", $"HeadSha updated: {ShortSha(state.HeadSha)} → {ShortSha(latestSha)}");
                         state.HeadSha = latestSha;
                     }
 
