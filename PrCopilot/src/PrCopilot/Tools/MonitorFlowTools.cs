@@ -695,10 +695,16 @@ public class MonitorFlowTools
                     Choices = ["Resume monitoring", "Stop monitoring"]
                 };
                 var errorResult = await ElicitationHelper.ElicitChoiceAsync(server!, errorAction, cancellationToken);
+                if (errorResult.Value == "stop")
+                {
+                    return SerializeAction(new MonitorAction { Action = "stop", Message = "Monitoring stopped." });
+                }
+
                 return SerializeAction(new MonitorAction
                 {
-                    Action = errorResult.Value == "stop" ? "stop" : "polling",
-                    Message = errorResult.Value == "stop" ? "Monitoring stopped." : "Resuming monitoring..."
+                    Action = "execute",
+                    Task = "resume_after_error",
+                    Instructions = "An error occurred but the user chose to resume. Call pr_monitor_next_step with monitorId='all' and event='ready' to resume monitoring all PRs."
                 });
             }
             finally
