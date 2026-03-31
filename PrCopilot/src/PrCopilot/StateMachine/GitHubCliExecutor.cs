@@ -81,7 +81,7 @@ public static class GitHubCliExecutor
         string owner, string repo, string filePath, string @ref, int? aroundLine = null, int contextLines = 50)
     {
         var (success, content) = await RunGhAsync(
-            $"api repos/{owner}/{repo}/contents/{filePath}?ref={@ref} --jq .content");
+            $"api \"repos/{owner}/{repo}/contents/{Uri.EscapeDataString(filePath)}?ref={Uri.EscapeDataString(@ref)}\" --jq .content");
         if (!success)
             return (false, content);
 
