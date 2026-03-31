@@ -988,10 +988,34 @@ public static class MonitorTransitions
         return new MonitorAction
         {
             Action = "ask_user",
-            Question = state.InvestigationFindings ?? "Investigation complete.",
+            Question = FormatCiWithRecommendation(state),
             Choices = choices,
             Context = new { state.InvestigationFindings, state.SuggestedFix, state.IssueType, state.FailedChecks }
         };
+    }
+
+    /// <summary>
+    /// Format CI investigation results with clear visual separation between
+    /// the analysis (what went wrong) and the recommendation (what to do).
+    /// Mirrors FormatCommentWithRecommendation for consistency.
+    /// </summary>
+    private static string FormatCiWithRecommendation(MonitorState state)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("━━━ 🔴 CI FAILURE ANALYSIS ━━━");
+        sb.AppendLine($"Failed checks: {string.Join(", ", state.FailedChecks.Select(f => f.Name))}");
+        sb.AppendLine();
+        if (!string.IsNullOrWhiteSpace(state.InvestigationFindings))
+            sb.AppendLine(Truncate(state.InvestigationFindings, 3000));
+        else
+            sb.AppendLine("No detailed findings available.");
+        sb.AppendLine();
+        sb.AppendLine("━━━ 🤖 RECOMMENDATION ━━━");
+        if (!string.IsNullOrWhiteSpace(state.SuggestedFix))
+            sb.Append(Truncate(state.SuggestedFix, 2000));
+        else
+            sb.Append("Re-run the failed jobs to check for flakiness.");
+        return sb.ToString();
     }
 
     private static MonitorAction BeginApplyFix(MonitorState state)

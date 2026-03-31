@@ -77,6 +77,80 @@ public static class GitHubCliExecutor
     /// Push an empty commit to the PR's head branch via Git Data API.
     /// This triggers a fresh CI run without any code changes.
     /// </summary>
+    /// <summary>
+    /// Fetch the content of a file at a specific ref (e.g., PR head branch).
+    /// Returns the raw file content, truncated around the target line if specified.
+    /// </summary>
+    public static async Task<(bool success, string output)> FetchFileContentAsync(
+        string owner, string repo, string filePath, string @ref, int? aroundLine = null, int contextLines = 50)
+    {
+        var (success, content) = await RunGhAsync(
+            $"api repos/{owner}/{repo}/contents/{filePath}?ref={@ref} --jq .content");
+        if (!success)
+            return (false, content);
+
+        // Content is base64-encoded
+        try
+        {
+            var decoded = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(content.Trim().Replace("\n", "")));
+
+            if (aroundLine.HasValue && aroundLine.Value > 0)
+            {
+                var lines = decoded.Split('\n');
+                var start = Math.Max(0, aroundLine.Value - contextLines - 1);
+                var end = Math.Min(lines.Length, aroundLine.Value + contextLines);
+                var numbered = lines[start..end]
+                    .Select((line, i) => $"{start + i + 1}: {line}");
+                return (true, string.Join("\n", numbered));
+            }
+
+            return (true, decoded);
+        }
+        catch
+        {
+            return (false, "Failed to decode file content");
+        }
+    }
+
+    /// <summary>
+    /// Fetch the diff for a specific file in a PR.
+    /// </summary>
+    public static async Task<(bool success, string output)> FetchPrFileDiffAsync(
+        string owner, string repo, int prNumber, string filePath)
+    {
+        var (success, diff) = await RunGhAsync(
+            $"pr diff {prNumber} --repo {owner}/{repo} -- \"{filePath}\"");
+        if (!success)
+            return (false, diff);
+
+        // Truncate very large diffs
+        if (diff.Length > 5000)
+            diff = diff[..5000] + "\n... [truncated]";
+
+        return (true, diff);
+    }
+
+    /// <summary>
+    /// Fetch logs for failed jobs in a workflow run.
+    /// </summary>
+    public static async Task<(bool success, string output)> FetchFailedJobLogsAsync(
+        string owner, string repo, long runId)
+    {
+        var (success, logs) = await RunGhAsync(
+            $"run view {runId} --repo {owner}/{repo} --log-failed");
+        if (!success)
+            return (false, logs);
+
+        // Truncate very large logs
+        if (logs.Length > 8000)
+        {
+            // Keep the last 6000 chars (most relevant — failures are at the end)
+            logs = "... [earlier output truncated]\n" + logs[^6000..];
+        }
+
+        return (true, logs);
+    }
+
     public static async Task<(bool success, string output)> PushEmptyCommitAsync(string owner, string repo, string branch, string headSha)
     {
         // 1. Get the tree SHA from the current HEAD commit

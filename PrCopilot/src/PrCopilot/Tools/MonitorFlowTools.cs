@@ -42,7 +42,95 @@ public class MonitorFlowTools
     }
 
     /// <summary>
+    /// Attempt to handle an execute action server-side via sampling.
+    /// If successful, sets state.SamplingCompletionEvent so the caller can feed
+    /// the result back to the state machine. Returns false only if the task is not
+    /// sampling-eligible. Throws if sampling fails for an eligible task.
+    /// </summary>
+    private static async Task<bool> TryHandleViaSamplingAsync(
+        McpServer server,
+        MonitorState state,
+        MonitorAction action,
+        CancellationToken cancellationToken)
+    {
+        switch (action.Task)
+        {
+            case "explain_comment":
+            {
+                var comment = action.Context as CommentInfo
+                    ?? throw new InvalidOperationException("explain_comment action missing CommentInfo context");
+
+                // Retry once on parse failure (LLM may return malformed JSON on first attempt)
+                var explanation = await SamplingHelper.ExplainCommentAsync(server, comment, state, cancellationToken);
+                if (explanation == null)
+                {
+                    DebugLogger.Log("Sampling", "First explain attempt returned null — retrying");
+                    explanation = await SamplingHelper.ExplainCommentAsync(server, comment, state, cancellationToken);
+                }
+                if (explanation == null)
+                    throw new InvalidOperationException("Sampling failed to explain comment after 2 attempts — LLM returned unparseable response");
+
+                state.LastRecommendation = explanation.Recommendation;
+                state.SamplingCompletionEvent = "task_complete";
+                DebugLogger.Log("Sampling", $"Comment explained: type={explanation.RecommendationType}, rec={Truncate(explanation.Recommendation, 100)}");
+                return true;
+            }
+
+            case "compose_reply":
+            {
+                var comment = action.Context as CommentInfo
+                    ?? throw new InvalidOperationException("compose_reply action missing CommentInfo context");
+
+                var completionEvent = action.Instructions?.Contains("comment_addressed") == true
+                    ? "comment_addressed" : "comment_replied";
+
+                // Retry once on parse failure
+                var reply = await SamplingHelper.ComposeReplyAsync(server, comment, state, completionEvent, cancellationToken);
+                if (reply?.ReplyText == null)
+                {
+                    DebugLogger.Log("Sampling", "First compose attempt returned null — retrying");
+                    reply = await SamplingHelper.ComposeReplyAsync(server, comment, state, completionEvent, cancellationToken);
+                }
+                if (reply?.ReplyText == null)
+                    throw new InvalidOperationException("Sampling failed to compose reply after 2 attempts — LLM returned unparseable response");
+
+                state.PendingReplyText = reply.ReplyText;
+                state.SamplingCompletionEvent = completionEvent;
+                DebugLogger.Log("Sampling", $"Reply composed: {Truncate(reply.ReplyText, 100)}");
+                return true;
+            }
+
+            default:
+                return false;
+        }
+    }
+
+    private static string Truncate(string? text, int maxLength) =>
+        text == null ? "" : (text.Length <= maxLength ? text : text[..maxLength] + "...");
+
+    /// <summary>
+    /// Attempt to classify freeform text via sampling. If the text maps to a choice,
+    /// returns the mapped choice value. If it's a custom instruction or sampling fails,
+    /// returns null (caller should fall back to agent interpretation via BuildFreeformInterpretAction).
+    /// </summary>
+    private static async Task<string?> TryClassifyFreeformViaSamplingAsync(
+        McpServer server,
+        ElicitChoiceResult result,
+        CancellationToken cancellationToken)
+    {
+        var classification = await SamplingHelper.ClassifyFreeformAsync(
+            server,
+            result.Value,
+            result.OriginalQuestion ?? "",
+            result.OriginalChoices,
+            cancellationToken);
+
+        return classification?.MapsToChoice;
+    }
+
+    /// <summary>
     /// Build an execute action for freeform text interpretation by the agent.
+    /// Only used when sampling classification returned null (custom instruction).
     /// </summary>
     private static MonitorAction BuildFreeformInterpretAction(ElicitChoiceResult result, MonitorState state, string? monitorId = null)
     {
@@ -106,15 +194,17 @@ public class MonitorFlowTools
                 "(or has extra instructions beyond the choice), execute the user's request directly. " +
                 "If the instruction involves code changes: STOP and present your changes to the user for review before committing — " +
                 "honor the user's custom instructions for git workflow. Only commit/push after the user approves. " +
-                "After pushing, compose a reply describing what was changed and link the commit " +
+                "After pushing, draft the reply text describing what was changed and link the commit " +
                 $"(use `git rev-parse HEAD` to get the SHA, then format as {state.Owner}/{state.Repo}@SHA). " +
                 "Do NOT post the reply yourself — pass it via data='{\"reply_text\": \"your reply\"}' in pr_monitor_next_step. " +
+                "The server will post it to the correct review thread. " +
                 "Then call pr_monitor_next_step with event='comment_addressed' and data containing reply_text." +
                 commentContext +
                 MonitorTransitions.CopilotFooter(state) +
                 " If the instruction does NOT involve code changes: " +
                 "If the instruction is to reply to the comment without changing code (e.g., clarification or pushback), " +
-                "compose the reply and call pr_monitor_next_step with event='comment_replied' and data='{\"reply_text\": \"your reply\"}'. " +
+                "draft the reply text and pass it via data='{\"reply_text\": \"your reply\"}' in pr_monitor_next_step — " +
+                "the server will post it. Then call pr_monitor_next_step with event='comment_replied' and data containing reply_text. " +
                 "If the instruction is some other non-reply task (analysis, questions, etc.), execute it and call pr_monitor_next_step with event='task_complete'.";
         }
 
@@ -551,9 +641,24 @@ public class MonitorFlowTools
                     if (action.MonitorId != null && _sessions.TryGetValue(action.MonitorId, out var elicitSession))
                         await WriteElicitedLogEntryAsync(elicitSession.State, elicitResult.Value);
 
-                    // Freeform text — let the agent interpret it
+                    // Freeform text — try sampling classification first, fall back to agent
                     if (elicitResult.IsFreeform)
                     {
+                        var mappedChoice = await TryClassifyFreeformViaSamplingAsync(server!, elicitResult, cancellationToken);
+                        if (mappedChoice != null)
+                        {
+                            DebugLogger.Log("NextStep", $"Multi-PR sampling classified freeform as choice: {mappedChoice}");
+                            // Return the classified choice to the agent to relay to the specific PR's monitor
+                            return SerializeAction(new MonitorAction
+                            {
+                                Action = "execute",
+                                MonitorId = action.MonitorId,
+                                Task = "relay_choice",
+                                Instructions = $"The user chose '{mappedChoice}' for PR monitor {action.MonitorId}. Call pr_monitor_next_step with monitorId='{action.MonitorId}', event='user_chose', choice='{mappedChoice}'. After handling, call pr_monitor_next_step with monitorId='all' and event='ready' to resume monitoring all PRs."
+                            });
+                        }
+
+                        // Custom instruction — delegate to agent
                         var freeformState = action.MonitorId != null && _sessions.TryGetValue(action.MonitorId, out var fs)
                             ? fs.State : heartbeatSession.State;
                         freeformState.CurrentState = MonitorStateId.ExecutingTask;
@@ -636,11 +741,22 @@ public class MonitorFlowTools
                         DebugLogger.Log("NextStep", $"Elicited viewer trigger: {(triggerResult.IsFreeform ? "freeform" : "choice")}={triggerResult.Value}");
                         await WriteElicitedLogEntryAsync(state, triggerResult.Value);
 
-                        // Freeform text — let the agent interpret it
+                        // Freeform text — try sampling classification first, fall back to agent
                         if (triggerResult.IsFreeform)
                         {
-                            state.CurrentState = MonitorStateId.ExecutingTask;
-                            return SerializeAction(BuildFreeformInterpretAction(triggerResult, state));
+                            var mappedChoice = await TryClassifyFreeformViaSamplingAsync(server, triggerResult, cancellationToken);
+                            if (mappedChoice != null)
+                            {
+                                DebugLogger.Log("NextStep", $"Trigger sampling classified freeform as choice: {mappedChoice}");
+                                @event = "user_chose";
+                                choice = mappedChoice;
+                            }
+                            else
+                            {
+                                // Custom instruction — delegate to agent
+                                state.CurrentState = MonitorStateId.ExecutingTask;
+                                return SerializeAction(BuildFreeformInterpretAction(triggerResult, state));
+                            }
                         }
 
                         // Override event/choice so the state machine processes the user's choice
@@ -753,9 +869,19 @@ public class MonitorFlowTools
                     DebugLogger.Log("NextStep", $"Elicited: {(elicitResult.IsFreeform ? "freeform" : "choice")}={elicitResult.Value}");
                     await WriteElicitedLogEntryAsync(state, elicitResult.Value);
 
-                    // Freeform text — transition to executing and let the agent interpret it
+                    // Freeform text — try sampling classification first, fall back to agent
                     if (elicitResult.IsFreeform)
                     {
+                        var mappedChoice = await TryClassifyFreeformViaSamplingAsync(server, elicitResult, cancellationToken);
+                        if (mappedChoice != null)
+                        {
+                            DebugLogger.Log("NextStep", $"Sampling classified freeform as choice: {mappedChoice}");
+                            action = MonitorTransitions.ProcessEvent(state, "user_chose", mappedChoice, null);
+                            DebugLogger.Log("NextStep", $"Post-sampling-classify: action={action.Action}, task={action.Task ?? "null"}");
+                            continue;
+                        }
+
+                        // Custom instruction — delegate to agent
                         state.CurrentState = MonitorStateId.ExecutingTask;
                         action = BuildFreeformInterpretAction(elicitResult, state);
                         break;
@@ -764,6 +890,17 @@ public class MonitorFlowTools
                     // Feed the user's choice back into the state machine and continue the loop
                     action = MonitorTransitions.ProcessEvent(state, "user_chose", elicitResult.Value, null);
                     DebugLogger.Log("NextStep", $"Post-elicit: action={action.Action}, task={action.Task ?? "null"}");
+                    continue;
+                }
+
+                // Sampling-eligible tasks: handle server-side instead of delegating to agent
+                if (action.Action == "execute" && await TryHandleViaSamplingAsync(server, state, action, cancellationToken))
+                {
+                    // Sampling handled it — feed result back to state machine and continue
+                    action = MonitorTransitions.ProcessEvent(state, state.SamplingCompletionEvent!, state.SamplingCompletionChoice, null);
+                    state.SamplingCompletionEvent = null;
+                    state.SamplingCompletionChoice = null;
+                    DebugLogger.Log("NextStep", $"Post-sampling: action={action.Action}, task={action.Task ?? "null"}");
                     continue;
                 }
 
@@ -788,10 +925,17 @@ public class MonitorFlowTools
             try
             {
                 var errorResult = await ElicitationHelper.ElicitChoiceAsync(server, errorAction, cancellationToken);
+                if (errorResult.Value == "stop")
+                {
+                    return SerializeAction(new MonitorAction { Action = "stop", Message = "Monitoring stopped." });
+                }
+
+                // Resume: tell agent to call pr_monitor_next_step again
                 return SerializeAction(new MonitorAction
                 {
-                    Action = errorResult.Value == "stop" ? "stop" : "polling",
-                    Message = errorResult.Value == "stop" ? "Monitoring stopped." : "Resuming monitoring..."
+                    Action = "execute",
+                    Task = "resume_after_error",
+                    Instructions = "An error occurred but the user chose to resume. Call pr_monitor_next_step with event='ready' to re-enter the monitoring loop."
                 });
             }
             catch
@@ -1414,8 +1558,17 @@ public class MonitorFlowTools
                 }
             case "run_new_build":
                 {
+                    // Fetch the latest HEAD SHA — state.HeadSha may be stale if commits were pushed
+                    var freshPr = await PrStatusFetcher.FetchPrInfoAsync(state.Owner, state.Repo, state.PrNumber);
+                    var latestSha = freshPr.HeadSha ?? state.HeadSha;
+                    if (latestSha != state.HeadSha)
+                    {
+                        DebugLogger.Log("AutoExec", $"HeadSha updated: {state.HeadSha[..7]} → {latestSha[..7]}");
+                        state.HeadSha = latestSha;
+                    }
+
                     var (success, output) = await GitHubCliExecutor.PushEmptyCommitAsync(
-                        state.Owner, state.Repo, state.HeadBranch, state.HeadSha);
+                        state.Owner, state.Repo, state.HeadBranch, latestSha);
                     DebugLogger.Log("AutoExec", $"run_new_build: success={success}, output={output}");
 
                     if (!success)

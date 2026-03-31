@@ -1,0 +1,442 @@
+// Licensed under the MIT License.
+
+using System.Text.Json;
+using ModelContextProtocol.Protocol;
+using ModelContextProtocol.Server;
+using PrCopilot.Services;
+using PrCopilot.StateMachine;
+
+namespace PrCopilot.Tools;
+
+/// <summary>
+/// Utility for making server-side MCP sampling requests.
+/// Allows the server to request LLM completions from the client
+/// for structured analysis without delegating to the agent.
+/// Throws if the client doesn't support sampling — all major
+/// CLI coding tools (Copilot CLI, etc.) support it.
+/// </summary>
+internal static class SamplingHelper
+{
+    private static readonly JsonSerializerOptions _jsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
+
+    /// <summary>
+    /// Request a plain text completion from the client's LLM.
+    /// Throws <see cref="InvalidOperationException"/> if the client doesn't support sampling.
+    /// </summary>
+    internal static async Task<string?> SampleTextAsync(
+        McpServer server,
+        string systemPrompt,
+        string userMessage,
+        int maxTokens = 1000,
+        float? temperature = null,
+        CancellationToken cancellationToken = default)
+    {
+        DebugLogger.Log("Sampling", $"Requesting text sample (maxTokens={maxTokens}, temp={temperature?.ToString() ?? "default"})");
+
+        var request = new CreateMessageRequestParams
+        {
+            MaxTokens = maxTokens,
+            SystemPrompt = systemPrompt,
+            Temperature = temperature,
+            Messages =
+            [
+                new SamplingMessage
+                {
+                    Role = Role.User,
+                    Content = [new TextContentBlock { Text = userMessage }]
+                }
+            ]
+        };
+
+        var result = await server.SampleAsync(request, cancellationToken);
+
+        var text = ExtractText(result);
+        DebugLogger.Log("Sampling", $"Received response: model={result.Model}, stopReason={result.StopReason ?? "null"}, length={text?.Length ?? 0}");
+
+        return text;
+    }
+
+    /// <summary>
+    /// Request a structured JSON completion from the client's LLM.
+    /// The system prompt should instruct the LLM to respond with valid JSON.
+    /// Throws <see cref="InvalidOperationException"/> if the client doesn't support sampling.
+    /// Returns null if the LLM produces invalid JSON.
+    /// </summary>
+    internal static async Task<T?> SampleStructuredAsync<T>(
+        McpServer server,
+        string systemPrompt,
+        string userMessage,
+        int maxTokens = 1000,
+        float? temperature = null,
+        CancellationToken cancellationToken = default) where T : class
+    {
+        var text = await SampleTextAsync(
+            server, systemPrompt, userMessage,
+            maxTokens, temperature, cancellationToken);
+
+        if (string.IsNullOrWhiteSpace(text))
+            return null;
+
+        try
+        {
+            // Strip markdown code fences if present (LLMs often wrap JSON in ```json ... ```)
+            text = StripCodeFences(text);
+
+            var parsed = JsonSerializer.Deserialize<T>(text, _jsonOptions);
+            DebugLogger.Log("Sampling", $"Parsed structured response: {typeof(T).Name}");
+            return parsed;
+        }
+        catch (Exception ex) when (ex is JsonException || ex.GetType().FullName?.Contains("Json") == true
+            || ex.StackTrace?.Contains("System.Text.Json") == true)
+        {
+            // .NET single-file publishing can throw FileNotFoundException instead of JsonException
+            // when satellite assemblies for JSON error messages are missing. Catch broadly for parse failures.
+            DebugLogger.Log("Sampling", $"Failed to parse JSON response as {typeof(T).Name}: [{ex.GetType().Name}] {ex.Message}");
+            DebugLogger.Log("Sampling", $"Raw response: {text}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Extract the text content from a sampling result.
+    /// </summary>
+    private static string? ExtractText(CreateMessageResult result)
+    {
+        foreach (var content in result.Content)
+        {
+            if (content is TextContentBlock textBlock)
+                return textBlock.Text;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Strip markdown code fences (```json ... ``` or ``` ... ```) from LLM responses.
+    /// </summary>
+    internal static string StripCodeFences(string text)
+    {
+        var trimmed = text.Trim();
+
+        // Handle ```json\n...\n``` or ```\n...\n```
+        if (trimmed.StartsWith("```"))
+        {
+            var firstNewline = trimmed.IndexOf('\n');
+            if (firstNewline > 0)
+                trimmed = trimmed[(firstNewline + 1)..];
+
+            if (trimmed.EndsWith("```"))
+                trimmed = trimmed[..^3];
+
+            return trimmed.Trim();
+        }
+
+        return trimmed;
+    }
+
+    /// <summary>
+    /// Result of classifying freeform user input via sampling.
+    /// </summary>
+    internal class FreeformClassification
+    {
+        /// <summary>
+        /// The mapped choice value if the text maps to a choice, or null if it's a custom instruction.
+        /// </summary>
+        public string? MapsToChoice { get; set; }
+
+        /// <summary>
+        /// Brief explanation of why the text was classified this way.
+        /// </summary>
+        public string? Reasoning { get; set; }
+    }
+
+    /// <summary>
+    /// Use sampling to classify freeform user input: does it map to one of
+    /// the available choices, or is it a custom instruction?
+    /// Returns null if sampling fails (caller should fall back to agent interpretation).
+    /// </summary>
+    internal static async Task<FreeformClassification?> ClassifyFreeformAsync(
+        McpServer server,
+        string userText,
+        string originalQuestion,
+        List<string>? choices,
+        CancellationToken cancellationToken = default)
+    {
+        if (choices == null || choices.Count == 0)
+            return null;
+
+        var choicesDescription = string.Join("\n", choices.Select(c =>
+        {
+            var mapped = StateMachine.MonitorTransitions.ChoiceValueMap.TryGetValue(c, out var v) ? v : c;
+            return $"  - \"{c}\" (value: \"{mapped}\")";
+        }));
+
+        var systemPrompt =
+            "You classify user input in a PR monitoring tool. " +
+            "Determine if the user's text maps to exactly ONE of the available choices, or if it's a custom instruction. " +
+            "Respond with ONLY valid JSON — no explanation, no markdown fences.\n" +
+            "Schema: {\"mapsToChoice\": \"<choice_value>\" or null, \"reasoning\": \"<brief explanation>\"}";
+
+        var userMessage =
+            $"The user was asked: \"{originalQuestion}\"\n\n" +
+            $"Available choices:\n{choicesDescription}\n\n" +
+            $"The user typed: \"{userText}\"\n\n" +
+            "If the text clearly means ONE of the choices (with no extra instructions beyond that choice), " +
+            "set mapsToChoice to that choice's value. " +
+            "If the text is a custom instruction, a question, or doesn't cleanly map to exactly one choice, " +
+            "set mapsToChoice to null.";
+
+        try
+        {
+            var result = await SampleStructuredAsync<FreeformClassification>(
+                server, systemPrompt, userMessage,
+                maxTokens: 150, temperature: 0.0f,
+                cancellationToken);
+
+            if (result != null)
+            {
+                DebugLogger.Log("Sampling", $"Freeform classification: mapsToChoice={result.MapsToChoice ?? "null"}, reasoning={result.Reasoning}");
+
+                // Validate the mapped choice is actually in the choice map
+                if (result.MapsToChoice != null)
+                {
+                    var validValues = choices
+                        .Select(c => StateMachine.MonitorTransitions.ChoiceValueMap.TryGetValue(c, out var v) ? v : c)
+                        .ToHashSet();
+
+                    if (!validValues.Contains(result.MapsToChoice))
+                    {
+                        DebugLogger.Log("Sampling", $"Classified choice '{result.MapsToChoice}' is not in valid set — treating as custom instruction");
+                        result.MapsToChoice = null;
+                    }
+                }
+            }
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            DebugLogger.Log("Sampling", $"Freeform classification failed: {ex.Message}");
+            return null;
+        }
+    }
+
+    // ── Phase 2: Comment Explanation ──────────────────────────────────
+
+    /// <summary>
+    /// Result of explaining a review comment via sampling.
+    /// </summary>
+    internal class CommentExplanation
+    {
+        public string? Explanation { get; set; }
+        public string? Recommendation { get; set; }
+        public string? RecommendationType { get; set; } // "implement", "pushback", "clarify", "agree"
+    }
+
+    /// <summary>
+    /// Explain a review comment and recommend an action using sampling.
+    /// Gathers code context server-side before calling the LLM.
+    /// Returns null if context fetching or sampling fails.
+    /// </summary>
+    internal static async Task<CommentExplanation?> ExplainCommentAsync(
+        McpServer server,
+        CommentInfo comment,
+        MonitorState state,
+        CancellationToken cancellationToken = default)
+    {
+        DebugLogger.Log("Sampling", $"Explaining comment from {comment.Author} on {comment.FilePath}:{comment.Line}");
+
+        // Gather code context server-side
+        var fileContext = "";
+        var diffContext = "";
+
+        if (!string.IsNullOrEmpty(comment.FilePath))
+        {
+            var (fileOk, fileContent) = await GitHubCliExecutor.FetchFileContentAsync(
+                state.Owner, state.Repo, comment.FilePath, state.HeadBranch,
+                aroundLine: comment.Line, contextLines: 30);
+            if (fileOk)
+                fileContext = $"\n\nFile content around line {comment.Line}:\n```\n{fileContent}\n```";
+
+            var (diffOk, diff) = await GitHubCliExecutor.FetchPrFileDiffAsync(
+                state.Owner, state.Repo, state.PrNumber, comment.FilePath);
+            if (diffOk)
+                diffContext = $"\n\nPR diff for {comment.FilePath}:\n```diff\n{diff}\n```";
+        }
+
+        var systemPrompt =
+            "You are a senior code reviewer assistant. Analyze a review comment on a pull request and recommend an action. " +
+            "Respond with ONLY valid JSON — no explanation outside the JSON, no markdown fences.\n" +
+            "Schema: {\"explanation\": \"<clear explanation of what the reviewer is asking>\", " +
+            "\"recommendation\": \"<specific, actionable recommendation — describe exactly what to change or why to push back>\", " +
+            "\"recommendationType\": \"implement\" | \"pushback\" | \"clarify\" | \"agree\"}";
+
+        var userMessage =
+            $"Review comment from {comment.Author} on {comment.FilePath}:{comment.Line}:\n" +
+            $"\"{comment.Body}\"\n" +
+            $"URL: {comment.Url}" +
+            fileContext +
+            diffContext;
+
+        return await SampleStructuredAsync<CommentExplanation>(
+            server, systemPrompt, userMessage,
+            maxTokens: 800, temperature: 0.2f,
+            cancellationToken);
+    }
+
+    // ── Phase 3: CI Investigation ────────────────────────────────────
+
+    /// <summary>
+    /// Result of investigating a CI failure via sampling.
+    /// </summary>
+    internal class CiInvestigation
+    {
+        public string? Findings { get; set; }
+        public string? SuggestedFix { get; set; }
+        public string? IssueType { get; set; } // "code", "infrastructure", "flaky", "duplicate_artifact", "unknown"
+    }
+
+    /// <summary>
+    /// Investigate CI failures using sampling. Fetches logs server-side.
+    /// Returns null if log fetching or sampling fails.
+    /// </summary>
+    internal static async Task<CiInvestigation?> InvestigateCiFailureAsync(
+        McpServer server,
+        MonitorState state,
+        CancellationToken cancellationToken = default)
+    {
+        DebugLogger.Log("Sampling", $"Investigating CI failure for PR #{state.PrNumber}");
+
+        // Fetch failed job logs server-side
+        var logsContext = new System.Text.StringBuilder();
+        var fetchedLogs = false;
+
+        foreach (var check in state.FailedChecks)
+        {
+            // Try to extract run ID from the check URL (GitHub Actions format: /actions/runs/{id}/...)
+            var runId = ExtractRunIdFromUrl(check.Url);
+            if (runId > 0)
+            {
+                var (logOk, logs) = await GitHubCliExecutor.FetchFailedJobLogsAsync(
+                    state.Owner, state.Repo, runId);
+                if (logOk)
+                {
+                    logsContext.AppendLine($"\n--- Failed job: {check.Name} ---");
+                    logsContext.AppendLine(logs);
+                    fetchedLogs = true;
+                    continue;
+                }
+            }
+
+            // Fallback: include what we have
+            logsContext.AppendLine($"\n--- Failed check: {check.Name} ---");
+            if (!string.IsNullOrEmpty(check.Reason))
+                logsContext.AppendLine($"Reason: {check.Reason}");
+            if (!string.IsNullOrEmpty(check.Url))
+                logsContext.AppendLine($"URL: {check.Url}");
+        }
+
+        if (logsContext.Length == 0)
+        {
+            throw new InvalidOperationException("No context available for failed checks — cannot investigate CI failure");
+        }
+
+        var hasLogs = fetchedLogs;
+
+        var systemPrompt =
+            "You are a CI/CD debugging expert. Your job is to give a CONCRETE diagnosis and action — NOT investigation steps.\n\n" +
+            "CRITICAL RULES:\n" +
+            "- Your findings must be a DIAGNOSIS, not a how-to-investigate guide. Say what IS wrong, not what to look for.\n" +
+            "- Your suggestedFix must be a CONCRETE ACTION the user can take right now, not a checklist of things to try.\n" +
+            "- NEVER recommend ignoring the failure. CI must pass to merge.\n" +
+            "- NEVER give generic advice like 'open the build log and look for errors' — that's the user's job, not yours.\n" +
+            (hasLogs
+                ? "- You have the actual build logs below. Identify the specific error and recommend the specific fix.\n"
+                : "- You do NOT have the actual build logs (they couldn't be fetched). Be honest about this. " +
+                  "State clearly that you cannot diagnose without logs and recommend re-running the failed jobs as the next step. " +
+                  "Keep findings and suggestedFix SHORT — don't speculate about possible causes.\n") +
+            "- If the failure looks flaky or intermittent, recommend re-running the failed jobs.\n" +
+            "- If it looks pre-existing (not caused by this PR), recommend verifying on main and suggest fix in this branch or a new PR.\n" +
+            "- If it's a code/test failure caused by this PR, describe the specific fix needed.\n\n" +
+            "Respond with ONLY valid JSON — no explanation outside the JSON, no markdown fences.\n" +
+            "Schema: {\n" +
+            "  \"findings\": \"<concrete diagnosis — what IS wrong, not what to look for>\",\n" +
+            "  \"suggestedFix\": \"<one specific action to take right now>\",\n" +
+            "  \"issueType\": \"code\" | \"infrastructure\" | \"flaky\" | \"duplicate_artifact\" | \"unknown\"\n" +
+            "}\n" +
+            "suggestedFix must ALWAYS be provided — never null.";
+
+        var userMessage =
+            $"PR #{state.PrNumber} in {state.Owner}/{state.Repo} has CI failures.\n\n" +
+            $"Failed checks: {string.Join(", ", state.FailedChecks.Select(f => f.Name))}\n\n" +
+            (hasLogs ? "Build logs:\n" : "Available info (no logs could be fetched):\n") +
+            logsContext;
+
+        return await SampleStructuredAsync<CiInvestigation>(
+            server, systemPrompt, userMessage,
+            maxTokens: 1500, temperature: 0.1f,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Extract run ID from a GitHub Actions URL like /actions/runs/12345/job/67890
+    /// </summary>
+    private static long ExtractRunIdFromUrl(string? url)
+    {
+        if (string.IsNullOrEmpty(url)) return 0;
+        var match = System.Text.RegularExpressions.Regex.Match(url, @"/actions/runs/(\d+)");
+        return match.Success && long.TryParse(match.Groups[1].Value, out var id) ? id : 0;
+    }
+
+    // ── Phase 4: Reply Composition ───────────────────────────────────
+
+    /// <summary>
+    /// Result of composing a reply via sampling.
+    /// </summary>
+    internal class ReplyComposition
+    {
+        public string? ReplyText { get; set; }
+    }
+
+    /// <summary>
+    /// Compose a professional reply for a review comment thread using sampling.
+    /// Returns null if sampling fails.
+    /// </summary>
+    internal static async Task<ReplyComposition?> ComposeReplyAsync(
+        McpServer server,
+        CommentInfo comment,
+        MonitorState state,
+        string completionEvent,
+        CancellationToken cancellationToken = default)
+    {
+        DebugLogger.Log("Sampling", $"Composing reply for comment {comment.Id} ({completionEvent})");
+
+        // Try to get the latest commit SHA for linking
+        var commitSha = state.HeadSha ?? "";
+
+        var action = completionEvent == "comment_addressed" ? "addressed (code was changed)" : "replied to (no code changes)";
+
+        var systemPrompt =
+            "You compose brief, professional replies for code review threads. " +
+            "Use collaborative, respectful language. Never dismissive. Always explain reasoning. " +
+            "If code was changed, link the commit. Keep replies under 150 words. " +
+            "Respond with ONLY valid JSON — no markdown fences.\n" +
+            "Schema: {\"replyText\": \"<the reply to post>\"}";
+
+        var userMessage =
+            $"The review comment was {action}.\n" +
+            $"Comment from {comment.Author} on {comment.FilePath}:{comment.Line}:\n\"{comment.Body}\"\n\n" +
+            (completionEvent == "comment_addressed" && !string.IsNullOrEmpty(commitSha)
+                ? $"Link the commit as: {state.Owner}/{state.Repo}@{commitSha}\n\n"
+                : "") +
+            "Compose a brief reply for this review thread.";
+
+        return await SampleStructuredAsync<ReplyComposition>(
+            server, systemPrompt, userMessage,
+            maxTokens: 300, temperature: 0.3f,
+            cancellationToken);
+    }
+}

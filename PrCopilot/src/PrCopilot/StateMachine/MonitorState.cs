@@ -95,6 +95,11 @@ public class MonitorState
     /// <summary>Reply text composed by the agent, to be posted by the server via the REST API.</summary>
     public string? PendingReplyText { get; set; }
 
+    /// <summary>Transient: completion event set by sampling handler for MonitorFlowTools to feed back to state machine.</summary>
+    public string? SamplingCompletionEvent { get; set; }
+    /// <summary>Transient: completion choice set by sampling handler (e.g., for user_chose events).</summary>
+    public string? SamplingCompletionChoice { get; set; }
+
     /// <summary>
     /// When set, ProcessTaskComplete calls AdvanceAfterComment with this summary.
     /// Used after posting a thread reply (auto_execute) when there's no subsequent resolve step.

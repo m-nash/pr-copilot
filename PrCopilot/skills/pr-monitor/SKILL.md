@@ -87,22 +87,17 @@ call pr_monitor_next_step(monitor_id, event, data)
 
 ## Freeform Text Input
 
-When a terminal state is detected, the user sees both enum choices and a text input field. If the user types freeform text instead of picking a choice, the agent receives:
+When a terminal state is detected, the user sees both enum choices and a text input field. If the user types freeform text instead of picking a choice, the **server uses MCP sampling** to classify it:
 
-```json
-{
-  "action": "execute",
-  "task": "interpret_freeform",
-  "instructions": "The user typed: '...'. The original question was: '...'. The available choices were: [...]."
-}
-```
+- If the text maps to one of the available choices, the server feeds it directly to the state machine — the agent is never involved.
+- If the text is a custom instruction, the agent receives an `interpret_freeform` task.
 
-**How to handle `interpret_freeform`:**
-1. If the text cleanly maps to ONE of the available choices with no extra instructions, tell the user "I'm interpreting this as [choice text]" and call `pr_monitor_next_step` with `event='user_chose'` and `choice=<mapped_value>`.
-2. If the text is a custom instruction (or has extra instructions beyond a choice), execute the user's request directly, then call `pr_monitor_next_step` with the appropriate event:
-   - **Comment flows:** Use `event='comment_addressed'` (with `reply_text` in data) if code was changed, `event='comment_replied'` (with `reply_text` in data) if replying without code changes, or `event='task_complete'` for non-reply tasks (analysis, questions).
-   - **CI failure flows:** Use `event='push_completed'` if code was changed, or `event='task_complete'` if no code changes.
-   - **No active flow:** Use `event='task_complete'`.
+**How to handle `interpret_freeform`** (custom instructions only — choice mapping is already handled):
+
+Execute the user's request directly, then call `pr_monitor_next_step` with the appropriate event:
+- **Comment flows:** Use `event='comment_addressed'` (with `reply_text` in data) if code was changed, `event='comment_replied'` (with `reply_text` in data) if replying without code changes, or `event='task_complete'` for non-reply tasks (analysis, questions).
+- **CI failure flows:** Use `event='push_completed'` if code was changed, or `event='task_complete'` if no code changes.
+- **No active flow:** Use `event='task_complete'`.
 
 After `task_complete`, the state machine re-presents the same choices so the user can continue deciding — it does NOT restart the flow from scratch.
 
@@ -220,5 +215,7 @@ When composing a reply after making a code change, **always link the commit** th
 - **Resume by default** — after handling a terminal state, the state machine resumes polling automatically unless the user chose to stop.
 - **One monitor per PR** — if you push again to the same PR, call `pr_monitor_stop` then `pr_monitor_start` for a fresh baseline.
 - **Session-scoped** — monitoring only lasts for the current Copilot CLI session.
-- **CI failure investigation** — when CI fails, the state machine **automatically begins investigation** — the agent fetches logs, analyzes root cause, and reports back without the user needing to choose "Investigate". Always include your findings. If you have a suggested fix, include a text description in `data.suggested_fix`. **Do NOT make any code changes, edit files, or apply fixes during investigation** — the user decides what to do after reviewing your analysis.
+- **CI failure investigation** — when CI fails, the state machine **automatically begins investigation** — the agent fetches logs (use Playwright browser automation to access build log pages if `gh` CLI can't fetch them), analyzes root cause, and reports findings. Provide a concrete diagnosis — not investigation steps. Always include a specific actionable recommendation in `data.suggested_fix`. **Do NOT make any code changes, edit files, or apply fixes during investigation** — the user decides what to do after reviewing your analysis.
+- **Comment explanation** — when a review comment is detected, the **server explains and recommends via sampling** — it gathers code context and analyzes the comment. The agent is only involved if the user chooses "Apply the recommendation" (to make code changes).
+- **Reply composition** — when the agent finishes addressing a comment but doesn't provide reply text, the **server composes the reply via sampling** with professional tone and commit linking. The agent does not compose replies.
 - **NEVER use `/azp run` or `/azp rerun` comments** to trigger CI reruns. These PR comments are not reliable, may trigger unintended pipelines, and bypass the state machine's deferred rerun logic. Always use the Playwright browser automation (via `rerun_via_browser` task) or the state machine's built-in mechanisms to rerun failed jobs.
