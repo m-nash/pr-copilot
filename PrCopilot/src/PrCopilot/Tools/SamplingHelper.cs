@@ -125,13 +125,33 @@ internal static class SamplingHelper
         if (trimmed.StartsWith("```"))
         {
             var firstNewline = trimmed.IndexOf('\n');
+
             if (firstNewline > 0)
+            {
+                // Multi-line: drop first line (fence + optional language), trim closing fence
                 trimmed = trimmed[(firstNewline + 1)..];
+                if (trimmed.EndsWith("```"))
+                    trimmed = trimmed[..^3];
+                return trimmed.Trim();
+            }
 
-            if (trimmed.EndsWith("```"))
-                trimmed = trimmed[..^3];
+            // Single-line: e.g. ```json {"a":1}``` or ```{"a":1}```
+            if (trimmed.EndsWith("```") && trimmed.Length >= 6)
+            {
+                var inner = trimmed[3..^3].TrimStart();
+                // Strip optional language token (e.g. "json ")
+                var spaceIdx = inner.IndexOf(' ');
+                if (spaceIdx > 0 && spaceIdx < 10 && inner[spaceIdx..].TrimStart().Length > 0)
+                {
+                    var token = inner[..spaceIdx];
+                    if (token.All(c => char.IsLetterOrDigit(c) || c is '+' or '#' or '-'))
+                        inner = inner[(spaceIdx + 1)..].TrimStart();
+                }
+                return inner.Trim();
+            }
 
-            return trimmed.Trim();
+            // No closing fence: best-effort strip opening ```
+            return trimmed[3..].TrimStart();
         }
 
         return trimmed;
