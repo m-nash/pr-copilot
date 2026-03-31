@@ -88,7 +88,8 @@ public static class GitHubCliExecutor
         // Content is base64-encoded
         try
         {
-            var decoded = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(content.Trim().Replace("\n", "")));
+            var decoded = System.Text.Encoding.UTF8.GetString(
+                Convert.FromBase64String(content.Trim().Replace("\r", "").Replace("\n", "")));
 
             if (aroundLine.HasValue && aroundLine.Value > 0)
             {
