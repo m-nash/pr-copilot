@@ -74,10 +74,6 @@ public static class GitHubCliExecutor
     }
 
     /// <summary>
-    /// Push an empty commit to the PR's head branch via Git Data API.
-    /// This triggers a fresh CI run without any code changes.
-    /// </summary>
-    /// <summary>
     /// Fetch the content of a file at a specific ref (e.g., PR head branch).
     /// Returns the raw file content, truncated around the target line if specified.
     /// </summary>
@@ -151,6 +147,10 @@ public static class GitHubCliExecutor
         return (true, logs);
     }
 
+    /// <summary>
+    /// Push an empty commit to the PR's head branch via Git Data API.
+    /// This triggers a fresh CI run without any code changes.
+    /// </summary>
     public static async Task<(bool success, string output)> PushEmptyCommitAsync(string owner, string repo, string branch, string headSha)
     {
         // 1. Get the tree SHA from the current HEAD commit
