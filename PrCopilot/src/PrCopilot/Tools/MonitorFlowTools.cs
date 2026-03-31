@@ -56,49 +56,49 @@ public class MonitorFlowTools
         switch (action.Task)
         {
             case "explain_comment":
-            {
-                var comment = action.Context as CommentInfo
-                    ?? throw new InvalidOperationException("explain_comment action missing CommentInfo context");
-
-                // Retry once on parse failure (LLM may return malformed JSON on first attempt)
-                var explanation = await SamplingHelper.ExplainCommentAsync(server, comment, state, cancellationToken);
-                if (explanation == null)
                 {
-                    DebugLogger.Log("Sampling", "First explain attempt returned null — retrying");
-                    explanation = await SamplingHelper.ExplainCommentAsync(server, comment, state, cancellationToken);
-                }
-                if (explanation == null)
-                    throw new InvalidOperationException("Sampling failed to explain comment after 2 attempts — LLM returned unparseable response");
+                    var comment = action.Context as CommentInfo
+                        ?? throw new InvalidOperationException("explain_comment action missing CommentInfo context");
 
-                state.LastRecommendation = explanation.Recommendation;
-                state.SamplingCompletionEvent = "task_complete";
-                DebugLogger.Log("Sampling", $"Comment explained: type={explanation.RecommendationType}, rec={Truncate(explanation.Recommendation, 100)}");
-                return true;
-            }
+                    // Retry once on parse failure (LLM may return malformed JSON on first attempt)
+                    var explanation = await SamplingHelper.ExplainCommentAsync(server, comment, state, cancellationToken);
+                    if (explanation == null)
+                    {
+                        DebugLogger.Log("Sampling", "First explain attempt returned null — retrying");
+                        explanation = await SamplingHelper.ExplainCommentAsync(server, comment, state, cancellationToken);
+                    }
+                    if (explanation == null)
+                        throw new InvalidOperationException("Sampling failed to explain comment after 2 attempts — LLM returned response that could not be parsed");
+
+                    state.LastRecommendation = explanation.Recommendation;
+                    state.SamplingCompletionEvent = "task_complete";
+                    DebugLogger.Log("Sampling", $"Comment explained: type={explanation.RecommendationType}, rec={Truncate(explanation.Recommendation, 100)}");
+                    return true;
+                }
 
             case "compose_reply":
-            {
-                var comment = action.Context as CommentInfo
-                    ?? throw new InvalidOperationException("compose_reply action missing CommentInfo context");
-
-                var completionEvent = action.Instructions?.Contains("comment_addressed") == true
-                    ? "comment_addressed" : "comment_replied";
-
-                // Retry once on parse failure
-                var reply = await SamplingHelper.ComposeReplyAsync(server, comment, state, completionEvent, cancellationToken);
-                if (reply?.ReplyText == null)
                 {
-                    DebugLogger.Log("Sampling", "First compose attempt returned null — retrying");
-                    reply = await SamplingHelper.ComposeReplyAsync(server, comment, state, completionEvent, cancellationToken);
-                }
-                if (reply?.ReplyText == null)
-                    throw new InvalidOperationException("Sampling failed to compose reply after 2 attempts — LLM returned unparseable response");
+                    var comment = action.Context as CommentInfo
+                        ?? throw new InvalidOperationException("compose_reply action missing CommentInfo context");
 
-                state.PendingReplyText = reply.ReplyText;
-                state.SamplingCompletionEvent = completionEvent;
-                DebugLogger.Log("Sampling", $"Reply composed: {Truncate(reply.ReplyText, 100)}");
-                return true;
-            }
+                    var completionEvent = action.Instructions?.Contains("comment_addressed") == true
+                        ? "comment_addressed" : "comment_replied";
+
+                    // Retry once on parse failure
+                    var reply = await SamplingHelper.ComposeReplyAsync(server, comment, state, completionEvent, cancellationToken);
+                    if (reply?.ReplyText == null)
+                    {
+                        DebugLogger.Log("Sampling", "First compose attempt returned null — retrying");
+                        reply = await SamplingHelper.ComposeReplyAsync(server, comment, state, completionEvent, cancellationToken);
+                    }
+                    if (reply?.ReplyText == null)
+                        throw new InvalidOperationException("Sampling failed to compose reply after 2 attempts — LLM returned response that could not be parsed");
+
+                    state.PendingReplyText = reply.ReplyText;
+                    state.SamplingCompletionEvent = completionEvent;
+                    DebugLogger.Log("Sampling", $"Reply composed: {Truncate(reply.ReplyText, 100)}");
+                    return true;
+                }
 
             default:
                 return false;

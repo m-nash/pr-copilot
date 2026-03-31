@@ -198,7 +198,9 @@ public class SamplingHelperTests
         var server = new FakeSamplingMcpServer(json);
         var state = new MonitorState
         {
-            Owner = "owner", Repo = "repo", PrNumber = 1,
+            Owner = "owner",
+            Repo = "repo",
+            PrNumber = 1,
             FailedChecks = [new FailedCheckInfo { Name = "tests", Url = "https://github.com/owner/repo/actions/runs/123/job/456" }]
         };
 
