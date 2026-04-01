@@ -103,6 +103,8 @@ After `task_complete`, the state machine re-presents the same choices so the use
 
 **How to handle `resume_after_error`**: An error occurred but the user chose to resume monitoring. Simply call `pr_monitor_next_step` with `event='ready'` (and `monitorId='all'` for multi-PR mode) to re-enter the monitoring loop. Do not take any other action.
 
+**How to handle `relay_choice`** (multi-PR only): The server classified freeform text as matching a choice for a specific PR monitor. Follow the instructions exactly — call `pr_monitor_next_step` with the specified `monitorId`, `event='user_chose'`, and `choice`, then call `pr_monitor_next_step` with `monitorId='all'` and `event='ready'` to resume monitoring all PRs.
+
 ## Monitor All My PRs
 
 When the user says "monitor all my PRs", "watch all my PRs", or similar:
