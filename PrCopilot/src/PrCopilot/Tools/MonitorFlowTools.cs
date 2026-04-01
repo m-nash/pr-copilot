@@ -147,7 +147,9 @@ public class MonitorFlowTools
 
     /// <summary>
     /// Build an execute action for freeform text interpretation by the agent.
-    /// Only used when sampling classification returned null (custom instruction).
+    /// Used when sampling classification returns null for a custom instruction, or when
+    /// sampling classification fails (e.g., invalid JSON, exceptions) and the caller falls
+    /// back to agent interpretation of the user's freeform text.
     /// </summary>
     private static MonitorAction BuildFreeformInterpretAction(ElicitChoiceResult result, MonitorState state, string? monitorId = null)
     {
