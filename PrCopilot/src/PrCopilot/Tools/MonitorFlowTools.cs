@@ -27,7 +27,7 @@ public class MonitorFlowTools
     private static readonly HashSet<string> _multiMonitorIds = new();
     private static readonly object _multiMonitorLock = new();
 
-    private static string ShortSha(string sha) =>
+    private static string ShortSha(string? sha) =>
         string.IsNullOrEmpty(sha) ? "(none)" : sha.Length <= 7 ? sha : sha[..7];
     private static readonly JsonSerializerOptions _jsonOptions = new()
     {
