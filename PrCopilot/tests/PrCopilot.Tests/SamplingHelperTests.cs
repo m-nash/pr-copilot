@@ -21,6 +21,7 @@ public class SamplingHelperTests
     [InlineData("```\nmulti\nline\ncontent\n```", "multi\nline\ncontent")]
     [InlineData("```json {\"foo\":1}```", "{\"foo\":1}")]
     [InlineData("```{\"foo\":1}```", "{\"foo\":1}")]
+    [InlineData("```json{\"foo\":1}```", "{\"foo\":1}")]
     public void StripCodeFences_RemovesFencesCorrectly(string input, string expected)
     {
         var result = SamplingHelper.StripCodeFences(input);

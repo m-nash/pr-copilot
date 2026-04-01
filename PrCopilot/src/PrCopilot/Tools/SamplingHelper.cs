@@ -140,26 +140,58 @@ internal static class SamplingHelper
                 return trimmed.Trim();
             }
 
-            // Single-line: e.g. ```json {"a":1}``` or ```{"a":1}```
+            // Single-line: e.g. ```json {"a":1}``` or ```{"a":1}``` or ```json{"a":1}```
             if (trimmed.EndsWith("```") && trimmed.Length >= 6)
             {
                 var inner = trimmed[3..^3].TrimStart();
-                // Strip optional language token (e.g. "json ")
-                var spaceIdx = inner.IndexOf(' ');
-                if (spaceIdx > 0 && spaceIdx < 10 && inner[spaceIdx..].TrimStart().Length > 0)
-                {
-                    var token = inner[..spaceIdx];
-                    if (token.All(c => char.IsLetterOrDigit(c) || c is '+' or '#' or '-'))
-                        inner = inner[(spaceIdx + 1)..].TrimStart();
-                }
+                inner = StripLeadingLanguageToken(inner);
                 return inner.Trim();
             }
 
-            // No closing fence: best-effort strip opening ```
-            return trimmed[3..].TrimStart();
+            // No closing fence: best-effort strip opening ``` and optional language token
+            var withoutFence = trimmed[3..].TrimStart();
+            withoutFence = StripLeadingLanguageToken(withoutFence);
+            return withoutFence.Trim();
         }
 
         return trimmed;
+    }
+
+    /// <summary>
+    /// Strip a leading language token (e.g. "json", "jsonc") if present.
+    /// Handles both space-separated (e.g. "json {"a":1}") and no-space forms (e.g. "json{"a":1}").
+    /// </summary>
+    private static string StripLeadingLanguageToken(string inner)
+    {
+        if (inner.Length == 0)
+            return inner;
+
+        var i = 0;
+        while (i < inner.Length && i < 10)
+        {
+            var c = inner[i];
+            if (char.IsLetterOrDigit(c) || c is '+' or '#' or '-')
+            {
+                i++;
+                continue;
+            }
+            break;
+        }
+
+        if (i == 0 || i >= 10 || i >= inner.Length)
+            return inner;
+
+        var separator = inner[i];
+
+        // Token followed by whitespace: e.g. "json {"a":1}"
+        if (separator is ' ' or '\t')
+            return inner[(i + 1)..].TrimStart();
+
+        // Token directly followed by JSON-like content: e.g. "json{"a":1}"
+        if (separator is '{' or '[' or '"')
+            return inner[i..];
+
+        return inner;
     }
 
     /// <summary>
