@@ -101,6 +101,8 @@ Execute the user's request directly, then call `pr_monitor_next_step` with the a
 
 After `task_complete`, the state machine re-presents the same choices so the user can continue deciding — it does NOT restart the flow from scratch.
 
+**How to handle `resume_after_error`**: An error occurred but the user chose to resume monitoring. Simply call `pr_monitor_next_step` with `event='ready'` (and `monitorId='all'` for multi-PR mode) to re-enter the monitoring loop. Do not take any other action.
+
 ## Monitor All My PRs
 
 When the user says "monitor all my PRs", "watch all my PRs", or similar:
