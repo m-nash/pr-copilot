@@ -73,9 +73,23 @@ public class MonitorFlowTools
                     if (explanation == null)
                         throw new InvalidOperationException("Sampling failed to explain comment after 2 attempts — LLM returned response that could not be parsed");
 
-                    state.LastRecommendation = explanation.Recommendation;
+                    // Prefer the structured recommendation; fall back to the full explanation text if needed
+                    if (!string.IsNullOrWhiteSpace(explanation.Recommendation))
+                    {
+                        state.LastRecommendation = explanation.Recommendation;
+                    }
+                    else if (!string.IsNullOrWhiteSpace(explanation.Explanation))
+                    {
+                        DebugLogger.Log("Sampling", "Explanation missing Recommendation; falling back to Explanation text");
+                        state.LastRecommendation = explanation.Explanation;
+                    }
+                    else
+                    {
+                        throw new InvalidOperationException("Sampling failed to provide a usable explanation — both Recommendation and Explanation are empty");
+                    }
+
                     state.SamplingCompletionEvent = "task_complete";
-                    DebugLogger.Log("Sampling", $"Comment explained: type={explanation.RecommendationType}, rec={Truncate(explanation.Recommendation, 100)}");
+                    DebugLogger.Log("Sampling", $"Comment explained: type={explanation.RecommendationType}, rec={Truncate(state.LastRecommendation, 100)}");
                     return true;
                 }
 
