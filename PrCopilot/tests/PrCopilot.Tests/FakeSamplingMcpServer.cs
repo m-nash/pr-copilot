@@ -2,7 +2,6 @@
 
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
 
 namespace PrCopilot.Tests;
