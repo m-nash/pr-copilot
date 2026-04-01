@@ -484,15 +484,16 @@ internal static class SamplingHelper
         var systemPrompt =
             "You compose brief, professional replies for code review threads. " +
             "Use collaborative, respectful language. Never dismissive. Always explain reasoning. " +
-            "If code was changed, link the commit. Keep replies under 150 words. " +
-            "Respond with ONLY valid JSON — no markdown fences.\n" +
+            "If you are confident that code was changed in response to the review, you may optionally mention or link the relevant commit. " +
+            "Keep replies under 150 words. Respond with ONLY valid JSON — no markdown fences.\n" +
             "Schema: {\"replyText\": \"<the reply to post>\"}";
 
         var userMessage =
-            $"The review comment was {action}.\n" +
+            $"The review comment has been {action}.\n" +
             $"Comment from {comment.Author} on {comment.FilePath}:{comment.Line}:\n\"{comment.Body}\"\n\n" +
             (completionEvent == "comment_addressed" && !string.IsNullOrEmpty(commitSha)
-                ? $"Link the commit as: {state.Owner}/{state.Repo}@{commitSha}\n\n"
+                ? $"The latest known head commit is {state.Owner}/{state.Repo}@{commitSha}. " +
+                  "Only reference this commit if you are confident it is relevant to the changes you are describing.\n\n"
                 : "") +
             "Compose a brief reply for this review thread.";
 
