@@ -99,6 +99,8 @@ public class MonitorState
     public string? SamplingCompletionEvent { get; set; }
     /// <summary>Transient: completion choice set by sampling handler (e.g., for user_chose events).</summary>
     public string? SamplingCompletionChoice { get; set; }
+    /// <summary>Transient: completion event set by EmitComposeReplyAction for the sampling compose_reply handler.</summary>
+    public string? PendingCompletionEvent { get; set; }
 
     /// <summary>
     /// When set, ProcessTaskComplete calls AdvanceAfterComment with this summary.

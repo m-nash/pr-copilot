@@ -844,6 +844,7 @@ public static class MonitorTransitions
     private static MonitorAction EmitComposeReplyAction(MonitorState state, CommentInfo c, string completionEvent)
     {
         state.CurrentState = MonitorStateId.ExecutingTask;
+        state.PendingCompletionEvent = completionEvent;
         return new MonitorAction
         {
             Action = "execute",

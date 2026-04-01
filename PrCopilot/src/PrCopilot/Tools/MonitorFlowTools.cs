@@ -98,8 +98,7 @@ public class MonitorFlowTools
                     var comment = action.Context as CommentInfo
                         ?? throw new InvalidOperationException("compose_reply action missing CommentInfo context");
 
-                    var completionEvent = action.Instructions?.Contains("comment_addressed") == true
-                        ? "comment_addressed" : "comment_replied";
+                    var completionEvent = state.PendingCompletionEvent ?? "comment_replied";
 
                     // Retry once on parse failure
                     var reply = await SamplingHelper.ComposeReplyAsync(server, comment, state, completionEvent, cancellationToken);
