@@ -103,12 +103,12 @@ public class MonitorFlowTools
 
                     // Retry once on parse failure
                     var reply = await SamplingHelper.ComposeReplyAsync(server, comment, state, completionEvent, cancellationToken);
-                    if (reply?.ReplyText == null)
+                    if (string.IsNullOrWhiteSpace(reply?.ReplyText))
                     {
-                        DebugLogger.Log("Sampling", "First compose attempt returned null — retrying");
+                        DebugLogger.Log("Sampling", "First compose attempt returned null/empty — retrying");
                         reply = await SamplingHelper.ComposeReplyAsync(server, comment, state, completionEvent, cancellationToken);
                     }
-                    if (reply?.ReplyText == null)
+                    if (string.IsNullOrWhiteSpace(reply?.ReplyText))
                         throw new InvalidOperationException("Sampling failed to compose reply after 2 attempts — LLM returned response that could not be parsed");
 
                     state.PendingReplyText = reply.ReplyText;
