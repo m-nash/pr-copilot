@@ -99,6 +99,7 @@ public class MonitorFlowTools
                         ?? throw new InvalidOperationException("compose_reply action missing CommentInfo context");
 
                     var completionEvent = state.PendingCompletionEvent ?? "comment_replied";
+                    state.PendingCompletionEvent = null;
 
                     // Retry once on parse failure
                     var reply = await SamplingHelper.ComposeReplyAsync(server, comment, state, completionEvent, cancellationToken);
