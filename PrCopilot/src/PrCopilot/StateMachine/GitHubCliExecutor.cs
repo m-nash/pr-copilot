@@ -130,27 +130,6 @@ public static class GitHubCliExecutor
     }
 
     /// <summary>
-    /// Fetch logs for failed jobs in a workflow run.
-    /// </summary>
-    public static async Task<(bool success, string output)> FetchFailedJobLogsAsync(
-        string owner, string repo, long runId)
-    {
-        var (success, logs) = await RunGhAsync(
-            $"run view {runId} --repo {owner}/{repo} --log-failed");
-        if (!success)
-            return (false, logs);
-
-        // Truncate very large logs
-        if (logs.Length > 8000)
-        {
-            // Keep the last 6000 chars (most relevant — failures are at the end)
-            logs = "... [earlier output truncated]\n" + logs[^6000..];
-        }
-
-        return (true, logs);
-    }
-
-    /// <summary>
     /// Push an empty commit to the PR's head branch via Git Data API.
     /// This triggers a fresh CI run without any code changes.
     /// </summary>

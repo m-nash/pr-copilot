@@ -194,28 +194,6 @@ public class SamplingHelperTests
     }
 
     [Fact]
-    public async Task InvestigateCiFailureAsync_ReturnsInvestigation()
-    {
-        var json = "{\"findings\": \"Test X failed with assertion error\", \"suggestedFix\": \"Update expected value\", \"issueType\": \"code\"}";
-        var server = new FakeSamplingMcpServer(json);
-        var state = new MonitorState
-        {
-            Owner = "owner",
-            Repo = "repo",
-            PrNumber = 1,
-            // Use a non-matching URL to avoid triggering gh CLI log fetching in this unit test.
-            FailedChecks = [new FailedCheckInfo { Name = "tests", Url = "https://example.com/ci/build/123" }]
-        };
-
-        var result = await SamplingHelper.InvestigateCiFailureAsync(server, state, CancellationToken.None);
-
-        Assert.NotNull(result);
-        Assert.Equal("Test X failed with assertion error", result!.Findings);
-        Assert.Equal("Update expected value", result.SuggestedFix);
-        Assert.Equal("code", result.IssueType);
-    }
-
-    [Fact]
     public async Task ComposeReplyAsync_ReturnsReply()
     {
         var json = "{\"replyText\": \"Added the null check — owner/repo@abc1234\"}";
