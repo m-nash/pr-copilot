@@ -108,15 +108,15 @@ internal static class SamplingHelper
 
     /// <summary>
     /// Extract the text content from a sampling result.
+    /// Concatenates all TextContentBlocks in case the response spans multiple blocks.
     /// </summary>
     private static string? ExtractText(CreateMessageResult result)
     {
-        foreach (var content in result.Content)
-        {
-            if (content is TextContentBlock textBlock)
-                return textBlock.Text;
-        }
-        return null;
+        var texts = result.Content
+            .OfType<TextContentBlock>()
+            .Select(b => b.Text)
+            .ToList();
+        return texts.Count > 0 ? string.Join("\n", texts) : null;
     }
 
     /// <summary>
