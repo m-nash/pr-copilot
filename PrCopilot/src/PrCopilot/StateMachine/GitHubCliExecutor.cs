@@ -80,8 +80,10 @@ public static class GitHubCliExecutor
     public static async Task<(bool success, string output)> FetchFileContentAsync(
         string owner, string repo, string filePath, string @ref, int? aroundLine = null, int contextLines = 50)
     {
+        // Escape each path segment individually to preserve '/' separators
+        var escapedPath = string.Join("/", filePath.Split('/').Select(Uri.EscapeDataString));
         var (success, content) = await RunGhAsync(
-            $"api \"repos/{owner}/{repo}/contents/{Uri.EscapeDataString(filePath)}?ref={Uri.EscapeDataString(@ref)}\" --jq .content");
+            $"api \"repos/{owner}/{repo}/contents/{escapedPath}?ref={Uri.EscapeDataString(@ref)}\" --jq .content");
         if (!success)
             return (false, content);
 
