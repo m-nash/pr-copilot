@@ -839,9 +839,9 @@ public static class MonitorTransitions
 
     /// <summary>
     /// When the agent calls comment_addressed/comment_replied without providing reply_text,
-    /// emit a compose_reply task. The server's sampling handler typically intercepts this
-    /// and composes the reply via sampling (stored in PendingReplyText). If sampling is
-    /// unavailable, the agent composes the reply and calls back with the same event + reply_text.
+    /// emit a compose_reply task. The server's sampling handler intercepts this and composes
+    /// the reply via sampling (stored in PendingReplyText). Sampling support is required for
+    /// this flow; if sampling is unavailable, the task will fail with no agent fallback.
     /// </summary>
     private static MonitorAction EmitComposeReplyAction(MonitorState state, CommentInfo c, string completionEvent)
     {
