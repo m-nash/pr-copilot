@@ -205,7 +205,8 @@ public class SamplingHelperTests
             Owner = "owner",
             Repo = "repo",
             PrNumber = 1,
-            FailedChecks = [new FailedCheckInfo { Name = "tests", Url = "https://github.com/owner/repo/actions/runs/123/job/456" }]
+            // Use a non-matching URL to avoid triggering gh CLI log fetching in this unit test.
+            FailedChecks = [new FailedCheckInfo { Name = "tests", Url = "https://example.com/ci/build/123" }]
         };
 
         var result = await SamplingHelper.InvestigateCiFailureAsync(server, state, CancellationToken.None);
