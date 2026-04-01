@@ -120,6 +120,8 @@ public class MonitorState
         LastRecommendation = null;
         ActiveWaitingComment = null;
         PendingReRequestReviewer = null;
+        SamplingCompletionEvent = null;
+        PendingCompletionEvent = null;
     }
 
     /// <summary>
