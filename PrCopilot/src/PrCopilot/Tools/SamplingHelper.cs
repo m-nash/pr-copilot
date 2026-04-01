@@ -375,7 +375,7 @@ internal static class SamplingHelper
         // Try to get the latest commit SHA for linking
         var commitSha = state.HeadSha ?? "";
 
-        var action = completionEvent == "comment_addressed" ? "addressed (code was changed)" : "replied to (no code changes)";
+        var action = completionEvent == "comment_addressed" ? "addressed" : "replied to";
 
         var systemPrompt =
             "You compose brief, professional replies for code review threads. " +
