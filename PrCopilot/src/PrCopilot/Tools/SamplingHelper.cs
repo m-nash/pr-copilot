@@ -167,7 +167,7 @@ internal static class SamplingHelper
             return inner;
 
         var i = 0;
-        while (i < inner.Length && i < 10)
+        while (i < inner.Length && i < 20)
         {
             var c = inner[i];
             if (char.IsLetterOrDigit(c) || c is '+' or '#' or '-')
@@ -178,7 +178,7 @@ internal static class SamplingHelper
             break;
         }
 
-        if (i == 0 || i >= 10 || i >= inner.Length)
+        if (i == 0 || i >= 20 || i >= inner.Length)
             return inner;
 
         var separator = inner[i];
