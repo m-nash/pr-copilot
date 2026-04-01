@@ -274,13 +274,8 @@ internal static class SamplingHelper
 
             return result;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException and not InvalidOperationException)
         {
-            if (ex is OperationCanceledException)
-            {
-                throw;
-            }
-
             DebugLogger.Log("Sampling", $"Freeform classification failed: {ex.Message}");
             return null;
         }
