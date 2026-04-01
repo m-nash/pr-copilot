@@ -103,6 +103,11 @@ public static class GitHubCliExecutor
                 return (true, string.Join("\n", numbered));
             }
 
+            // No specific line requested; truncate large files to keep prompts bounded
+            const int maxChars = 8000;
+            if (decoded.Length > maxChars)
+                decoded = decoded[..maxChars] + "\n... [truncated]";
+
             return (true, decoded);
         }
         catch
