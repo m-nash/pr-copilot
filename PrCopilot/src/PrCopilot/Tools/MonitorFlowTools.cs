@@ -922,9 +922,8 @@ public class MonitorFlowTools
                 if (action.Action == "execute" && await TryHandleViaSamplingAsync(server, state, action, cancellationToken))
                 {
                     // Sampling handled it — feed result back to state machine and continue
-                    action = MonitorTransitions.ProcessEvent(state, state.SamplingCompletionEvent!, state.SamplingCompletionChoice, null);
+                    action = MonitorTransitions.ProcessEvent(state, state.SamplingCompletionEvent!, null, null);
                     state.SamplingCompletionEvent = null;
-                    state.SamplingCompletionChoice = null;
                     DebugLogger.Log("NextStep", $"Post-sampling: action={action.Action}, task={action.Task ?? "null"}");
                     continue;
                 }
