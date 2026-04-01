@@ -183,7 +183,8 @@ public class SamplingHelperTests
     {
         var json = "{\"explanation\": \"The reviewer wants a null check\", \"recommendation\": \"Add null check at line 42\", \"recommendationType\": \"implement\"}";
         var server = new FakeSamplingMcpServer(json);
-        var comment = new CommentInfo { Author = "reviewer", FilePath = "src/Foo.cs", Line = 42, Body = "Add null check", Url = "https://github.com/test" };
+        // Use empty FilePath to avoid triggering GitHub CLI/file fetching in this unit test.
+        var comment = new CommentInfo { Author = "reviewer", FilePath = "", Line = 42, Body = "Add null check", Url = "https://github.com/test" };
         var state = new MonitorState { Owner = "owner", Repo = "repo", PrNumber = 1, HeadBranch = "feature" };
 
         var result = await SamplingHelper.ExplainCommentAsync(server, comment, state, CancellationToken.None);
