@@ -90,9 +90,9 @@ call pr_monitor_next_step(monitor_id, event, data)
 When a terminal state is detected, the user sees both enum choices and a text input field. If the user types freeform text instead of picking a choice, the **server uses MCP sampling** to classify it:
 
 - If the text maps to one of the available choices, the server feeds it directly to the state machine — the agent is never involved.
-- If the text is a custom instruction, the agent receives an `interpret_freeform` task.
+- If the text is a custom instruction (or sampling fails to classify it), the agent receives an `interpret_freeform` task.
 
-**How to handle `interpret_freeform`** (custom instructions only — choice mapping is already handled):
+**How to handle `interpret_freeform`** (usually custom instructions — but may also include unclassified freeform text if sampling failed; if the text clearly maps to one of the available choices, feed it to the state machine via `event='user_chose'` with the matching `choice`):
 
 Execute the user's request directly, then call `pr_monitor_next_step` with the appropriate event:
 - **Comment flows:** Use `event='comment_addressed'` (with `reply_text` in data) if code was changed, `event='comment_replied'` (with `reply_text` in data) if replying without code changes, or `event='task_complete'` for non-reply tasks (analysis, questions).
