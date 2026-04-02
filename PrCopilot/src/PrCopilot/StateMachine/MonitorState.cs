@@ -95,6 +95,11 @@ public class MonitorState
     /// <summary>Reply text composed by the agent, to be posted by the server via the REST API.</summary>
     public string? PendingReplyText { get; set; }
 
+    /// <summary>Transient: completion event set by sampling handler for MonitorFlowTools to feed back to state machine.</summary>
+    public string? SamplingCompletionEvent { get; set; }
+    /// <summary>Transient: completion event set by EmitComposeReplyAction for the sampling compose_reply handler.</summary>
+    public string? PendingCompletionEvent { get; set; }
+
     /// <summary>
     /// When set, ProcessTaskComplete calls AdvanceAfterComment with this summary.
     /// Used after posting a thread reply (auto_execute) when there's no subsequent resolve step.
@@ -115,6 +120,8 @@ public class MonitorState
         LastRecommendation = null;
         ActiveWaitingComment = null;
         PendingReRequestReviewer = null;
+        SamplingCompletionEvent = null;
+        PendingCompletionEvent = null;
     }
 
     /// <summary>
