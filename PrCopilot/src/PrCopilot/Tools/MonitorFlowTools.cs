@@ -190,7 +190,9 @@ public class MonitorFlowTools
                 "honor the user's custom instructions for git workflow. Only commit/push after the user approves. " +
                 "Then call pr_monitor_next_step with event='push_completed'." +
                 ciContext +
-                " If the instruction does NOT involve code changes, execute it and call pr_monitor_next_step with event='task_complete'.";
+                " If the instruction does NOT involve code changes, execute it and call pr_monitor_next_step with event='task_complete'. " +
+                "If your analysis leads to a different or updated recommendation, include it via " +
+                "data='{\"recommendation\": \"your updated recommendation\"}' so the next prompt reflects the updated analysis.";
         }
 
         // Comment flow — use comment_addressed for code changes, include comment context

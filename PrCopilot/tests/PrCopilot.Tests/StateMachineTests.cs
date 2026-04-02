@@ -1128,6 +1128,34 @@ public class StateMachineTests
         Assert.Contains("Apply the recommendation", action.Choices!);
         Assert.Contains("Re-run failed jobs", action.Choices!);
         Assert.Contains("I'll handle it myself", action.Choices!);
+        // Without an updated recommendation, the original SuggestedFix is preserved
+        Assert.Equal("Add the missing import statement.", state.SuggestedFix);
+    }
+
+    [Fact]
+    public void ProcessEvent_CiFailure_FreeformTaskComplete_UpdatesRecommendation()
+    {
+        // When the agent provides an updated recommendation via LastRecommendation
+        // during a freeform task (e.g., user asked for clarification and agent revised
+        // their analysis), SuggestedFix should be updated to reflect the new recommendation.
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CiFailureFlow = CiFailureFlowState.InvestigationResults;
+        state.InvestigationFindings = "The build failed due to a missing import.";
+        state.SuggestedFix = "Add the missing import statement.";
+        state.LastRecommendation = "Actually, the import is unused. Remove the reference from the csproj instead.";
+        SetChecksFailed(state);
+
+        var action = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        Assert.Equal("ask_user", action.Action);
+        // SuggestedFix should be updated with the new recommendation
+        Assert.Equal("Actually, the import is unused. Remove the reference from the csproj instead.", state.SuggestedFix);
+        // LastRecommendation should be cleared after propagation
+        Assert.Null(state.LastRecommendation);
+        // The updated recommendation should appear in the elicitation question
+        Assert.Contains("Remove the reference from the csproj instead", action.Question);
+        Assert.Contains("Apply the recommendation", action.Choices!);
     }
 
     [Fact]
@@ -1146,6 +1174,26 @@ public class StateMachineTests
         Assert.Equal("ask_user", action.Action);
         Assert.DoesNotContain("Apply the recommendation", action.Choices!);
         Assert.Contains("Re-run failed jobs", action.Choices!);
+    }
+
+    [Fact]
+    public void ProcessEvent_CiFailure_FreeformTaskComplete_NewRecommendation_AddsApplyChoice()
+    {
+        // When originally there was no suggested fix but the agent provides one via
+        // LastRecommendation during a freeform task, "Apply the recommendation" should appear.
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CiFailureFlow = CiFailureFlowState.InvestigationResults;
+        state.InvestigationFindings = "Infrastructure timeout — no code fix needed.";
+        state.SuggestedFix = null;
+        state.LastRecommendation = "Turns out there's a config file that needs updating.";
+        SetChecksFailed(state);
+
+        var action = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        Assert.Equal("ask_user", action.Action);
+        Assert.Equal("Turns out there's a config file that needs updating.", state.SuggestedFix);
+        Assert.Contains("Apply the recommendation", action.Choices!);
     }
 
     [Fact]
