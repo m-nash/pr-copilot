@@ -289,6 +289,14 @@ public static class MonitorTransitions
         // CI failure flow: after freeform task, re-present investigation results choices
         if (state.CiFailureFlow == CiFailureFlowState.InvestigationResults)
         {
+            // If the agent provided an updated recommendation during the freeform task,
+            // propagate it to SuggestedFix so the next elicitation (and "Apply the
+            // recommendation" action) reflect the updated analysis.
+            if (!string.IsNullOrWhiteSpace(state.LastRecommendation))
+            {
+                state.SuggestedFix = state.LastRecommendation;
+                state.LastRecommendation = null;
+            }
             return ProcessInvestigationComplete(state, null);
         }
 
