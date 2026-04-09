@@ -392,6 +392,7 @@ public class MonitorFlowTools
             Repo = repo,
             PrNumber = prNumber,
             PrTitle = prInfo.Title,
+            PrBody = prInfo.Body,
             PrUrl = prInfo.Url,
             PrAuthor = prInfo.Author,
             CurrentUser = currentUser,

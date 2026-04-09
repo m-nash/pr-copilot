@@ -13,6 +13,7 @@ public class MonitorState
     public string Repo { get; set; } = "";
     public int PrNumber { get; set; }
     public string PrTitle { get; set; } = "";
+    public string PrBody { get; set; } = "";
     public string PrUrl { get; set; } = "";
     public string PrAuthor { get; set; } = "";
 
