@@ -1217,12 +1217,8 @@ public static class MonitorTransitions
         return sb.ToString();
     }
 
-    private static string Truncate(string text, int maxLength)
-    {
-        if (string.IsNullOrEmpty(text) || text.Length <= maxLength)
-            return text;
-        return text[..maxLength] + "...";
-    }
+    private static string Truncate(string text, int maxLength) =>
+        text.Truncate(maxLength);
 
     /// <summary>
     /// Regex matching GitHub suggestion blocks: ```suggestion ... ```

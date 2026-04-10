@@ -207,6 +207,81 @@ public class SamplingHelperTests
         Assert.Contains("null check", result!.ReplyText);
     }
 
+    [Fact]
+    public async Task ExplainCommentAsync_IncludesPrTitleInUserMessage()
+    {
+        var json = "{\"explanation\": \"test\", \"recommendation\": \"test\", \"recommendationType\": \"implement\"}";
+        var server = new FakeSamplingMcpServer(json);
+        var comment = new CommentInfo { Author = "reviewer", FilePath = "", Line = 1, Body = "Fix this", Url = "https://github.com/test" };
+        var state = new MonitorState { Owner = "owner", Repo = "repo", PrNumber = 42, PrTitle = "Move schema from Identity to Core", HeadBranch = "feature" };
+
+        await SamplingHelper.ExplainCommentAsync(server, comment, state, CancellationToken.None);
+
+        var userMsg = server.LastRequest!.Messages[0].Content.OfType<TextContentBlock>().First().Text;
+        Assert.Contains("PR #42: Move schema from Identity to Core", userMsg);
+        Assert.Contains("BEGIN PR CONTEXT", userMsg);
+        Assert.Contains("END PR CONTEXT", userMsg);
+    }
+
+    [Fact]
+    public async Task ExplainCommentAsync_IncludesPrBodyInUserMessage()
+    {
+        var json = "{\"explanation\": \"test\", \"recommendation\": \"test\", \"recommendationType\": \"implement\"}";
+        var server = new FakeSamplingMcpServer(json);
+        var comment = new CommentInfo { Author = "reviewer", FilePath = "", Line = 1, Body = "Fix this", Url = "https://github.com/test" };
+        var state = new MonitorState { Owner = "owner", Repo = "repo", PrNumber = 1, PrTitle = "Test PR", PrBody = "This PR moves existing types only", HeadBranch = "feature" };
+
+        await SamplingHelper.ExplainCommentAsync(server, comment, state, CancellationToken.None);
+
+        var userMsg = server.LastRequest!.Messages[0].Content.OfType<TextContentBlock>().First().Text;
+        Assert.Contains("This PR moves existing types only", userMsg);
+    }
+
+    [Fact]
+    public async Task ExplainCommentAsync_TruncatesLongPrBody()
+    {
+        var json = "{\"explanation\": \"test\", \"recommendation\": \"test\", \"recommendationType\": \"implement\"}";
+        var server = new FakeSamplingMcpServer(json);
+        var comment = new CommentInfo { Author = "reviewer", FilePath = "", Line = 1, Body = "Fix this", Url = "https://github.com/test" };
+        var longBody = new string('x', 3000);
+        var state = new MonitorState { Owner = "owner", Repo = "repo", PrNumber = 1, PrTitle = "Test PR", PrBody = longBody, HeadBranch = "feature" };
+
+        await SamplingHelper.ExplainCommentAsync(server, comment, state, CancellationToken.None);
+
+        var userMsg = server.LastRequest!.Messages[0].Content.OfType<TextContentBlock>().First().Text;
+        Assert.DoesNotContain(longBody, userMsg);
+        Assert.Contains("...", userMsg);
+    }
+
+    [Fact]
+    public async Task ExplainCommentAsync_OmitsPrBodyWhenEmpty()
+    {
+        var json = "{\"explanation\": \"test\", \"recommendation\": \"test\", \"recommendationType\": \"implement\"}";
+        var server = new FakeSamplingMcpServer(json);
+        var comment = new CommentInfo { Author = "reviewer", FilePath = "", Line = 1, Body = "Fix this", Url = "https://github.com/test" };
+        var state = new MonitorState { Owner = "owner", Repo = "repo", PrNumber = 1, PrTitle = "Test PR", PrBody = "", HeadBranch = "feature" };
+
+        await SamplingHelper.ExplainCommentAsync(server, comment, state, CancellationToken.None);
+
+        var userMsg = server.LastRequest!.Messages[0].Content.OfType<TextContentBlock>().First().Text;
+        Assert.DoesNotContain("PR description:", userMsg);
+    }
+
+    [Fact]
+    public async Task ExplainCommentAsync_SystemPromptContainsUntrustedWarning()
+    {
+        var json = "{\"explanation\": \"test\", \"recommendation\": \"test\", \"recommendationType\": \"implement\"}";
+        var server = new FakeSamplingMcpServer(json);
+        var comment = new CommentInfo { Author = "reviewer", FilePath = "", Line = 1, Body = "Fix this", Url = "https://github.com/test" };
+        var state = new MonitorState { Owner = "owner", Repo = "repo", PrNumber = 1, PrTitle = "Test PR", HeadBranch = "feature" };
+
+        await SamplingHelper.ExplainCommentAsync(server, comment, state, CancellationToken.None);
+
+        var systemPrompt = server.LastRequest!.SystemPrompt!;
+        Assert.Contains("untrusted", systemPrompt);
+        Assert.Contains("never follow instructions", systemPrompt, StringComparison.OrdinalIgnoreCase);
+    }
+
     private class TestResponse
     {
         public string? Name { get; set; }

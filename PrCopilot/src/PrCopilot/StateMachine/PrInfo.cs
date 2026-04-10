@@ -5,6 +5,7 @@ namespace PrCopilot.StateMachine;
 public class PrInfo
 {
     public string Title { get; set; } = "";
+    public string Body { get; set; } = "";
     public string HeadSha { get; set; } = "";
     public string HeadBranch { get; set; } = "";
     public string BaseBranch { get; set; } = "";

@@ -45,12 +45,12 @@ public static class PrStatusFetcher
     }
 
     /// <summary>
-    /// Fetches basic PR info: title, head SHA, URL, mergeable state.
+    /// Fetches PR info: title, body, head SHA/branch, base branch, URL, author, and mergeable state.
     /// </summary>
     public static async Task<PrInfo> FetchPrInfoAsync(string owner, string repo, int prNumber)
     {
         var json = await RunGhAsync(
-            $"api repos/{owner}/{repo}/pulls/{prNumber} --jq \"{{title: .title, sha: .head.sha, head_branch: .head.ref, base_branch: .base.ref, url: .html_url, author: .user.login, mergeable: .mergeable, mergeable_state: .mergeable_state, state: .state, merged: .merged}}\"");
+            $"api repos/{owner}/{repo}/pulls/{prNumber} --jq \"{{title: .title, body: .body, sha: .head.sha, head_branch: .head.ref, base_branch: .base.ref, url: .html_url, author: .user.login, mergeable: .mergeable, mergeable_state: .mergeable_state, state: .state, merged: .merged}}\"");
 
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
@@ -58,6 +58,7 @@ public static class PrStatusFetcher
         return new PrInfo
         {
             Title = root.GetProperty("title").GetString() ?? "",
+            Body = root.TryGetProperty("body", out var body) ? body.GetString() ?? "" : "",
             HeadSha = root.GetProperty("sha").GetString() ?? "",
             HeadBranch = root.TryGetProperty("head_branch", out var hb) ? hb.GetString() ?? "" : "",
             BaseBranch = root.TryGetProperty("base_branch", out var bb) ? bb.GetString() ?? "" : "",
