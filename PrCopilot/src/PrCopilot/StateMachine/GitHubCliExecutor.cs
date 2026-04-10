@@ -234,5 +234,5 @@ public static class GitHubCliExecutor
     }
 
     private static string Truncate(string text, int maxLength) =>
-        text.Length <= maxLength ? text : text[..maxLength] + "...";
+        text.Truncate(maxLength);
 }

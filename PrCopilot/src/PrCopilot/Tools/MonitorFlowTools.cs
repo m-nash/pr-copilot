@@ -83,7 +83,7 @@ public class MonitorFlowTools
                     }
 
                     state.SamplingCompletionEvent = "task_complete";
-                    DebugLogger.Log("Sampling", $"Comment explained: type={explanation.RecommendationType}, rec={Truncate(state.LastRecommendation, 100)}");
+                    DebugLogger.Log("Sampling", $"Comment explained: type={explanation.RecommendationType}, rec={state.LastRecommendation.Truncate(100)}");
                     return true;
                 }
 
@@ -107,7 +107,7 @@ public class MonitorFlowTools
 
                     state.PendingReplyText = reply.ReplyText;
                     state.SamplingCompletionEvent = completionEvent;
-                    DebugLogger.Log("Sampling", $"Reply composed: {Truncate(reply.ReplyText, 100)}");
+                    DebugLogger.Log("Sampling", $"Reply composed: {reply.ReplyText.Truncate(100)}");
                     return true;
                 }
 
@@ -115,9 +115,6 @@ public class MonitorFlowTools
                 return false;
         }
     }
-
-    private static string Truncate(string? text, int maxLength) =>
-        text == null ? "" : (text.Length <= maxLength ? text : text[..maxLength] + "...");
 
     /// <summary>
     /// Attempt to classify freeform text via sampling. If the text maps to a choice,

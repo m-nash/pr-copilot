@@ -93,7 +93,7 @@ internal static class SamplingHelper
         catch (JsonException ex)
         {
             DebugLogger.Log("Sampling", $"Failed to parse JSON response as {typeof(T).Name}: {ex.Message}");
-            DebugLogger.Log("Sampling", $"Raw response ({text?.Length ?? 0} chars): {(text?.Length > 500 ? text[..500] + "…" : text)}");
+            DebugLogger.Log("Sampling", $"Raw response ({text?.Length ?? 0} chars): {text.Truncate(500)}");
             return null;
         }
         catch (FileNotFoundException ex)
@@ -101,7 +101,7 @@ internal static class SamplingHelper
             // .NET single-file publishing can throw FileNotFoundException instead of JsonException
             // when satellite assemblies for JSON error messages are missing.
             DebugLogger.Log("Sampling", $"Failed to parse JSON response as {typeof(T).Name}: [{ex.GetType().Name}] {ex.Message}");
-            DebugLogger.Log("Sampling", $"Raw response ({text?.Length ?? 0} chars): {(text?.Length > 500 ? text[..500] + "…" : text)}");
+            DebugLogger.Log("Sampling", $"Raw response ({text?.Length ?? 0} chars): {text.Truncate(500)}");
             return null;
         }
     }
@@ -344,8 +344,7 @@ internal static class SamplingHelper
         var prContext = $"--- BEGIN PR CONTEXT (untrusted) ---\nPR #{state.PrNumber}: {state.PrTitle}";
         if (!string.IsNullOrEmpty(state.PrBody))
         {
-            var body = state.PrBody.Length > 2000 ? state.PrBody[..2000] + "…" : state.PrBody;
-            prContext += $"\nPR description:\n{body}";
+            prContext += $"\nPR description:\n{state.PrBody.Truncate(2000)}";
         }
         prContext += "\n--- END PR CONTEXT ---";
 

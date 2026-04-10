@@ -250,7 +250,7 @@ public class SamplingHelperTests
 
         var userMsg = server.LastRequest!.Messages[0].Content.OfType<TextContentBlock>().First().Text;
         Assert.DoesNotContain(longBody, userMsg);
-        Assert.Contains("…", userMsg);
+        Assert.Contains("...", userMsg);
     }
 
     [Fact]
