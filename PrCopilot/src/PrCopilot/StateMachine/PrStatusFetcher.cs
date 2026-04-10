@@ -45,7 +45,7 @@ public static class PrStatusFetcher
     }
 
     /// <summary>
-    /// Fetches basic PR info: title, body, head SHA, URL, mergeable state.
+    /// Fetches PR info: title, body, head SHA/branch, base branch, URL, author, and mergeable state.
     /// </summary>
     public static async Task<PrInfo> FetchPrInfoAsync(string owner, string repo, int prNumber)
     {
