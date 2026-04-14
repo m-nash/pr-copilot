@@ -1,5 +1,6 @@
 // Licensed under the MIT License.
 
+using System.Text;
 using System.Text.Json;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
@@ -85,6 +86,10 @@ internal static class SamplingHelper
         {
             // Strip markdown code fences if present (LLMs often wrap JSON in ```json ... ```)
             text = StripCodeFences(text);
+
+            // LLMs frequently emit literal control characters (newlines, tabs, etc.)
+            // inside JSON string values, which is invalid per RFC 8259.
+            text = SanitizeJsonControlChars(text);
 
             var parsed = JsonSerializer.Deserialize<T>(text, _jsonOptions);
             DebugLogger.Log("Sampling", $"Parsed structured response: {typeof(T).Name}");
@@ -192,6 +197,76 @@ internal static class SamplingHelper
             return inner[i..];
 
         return inner;
+    }
+
+    /// <summary>
+    /// Escape literal control characters (U+0000–U+001F) inside JSON string values.
+    /// LLMs frequently emit unescaped newlines/tabs in JSON strings, which is invalid
+    /// per RFC 8259. This walks the JSON text, tracks whether we're inside a string,
+    /// and replaces bare control characters with their proper JSON escape sequences.
+    /// </summary>
+    internal static string SanitizeJsonControlChars(string json)
+    {
+        // Quick scan: if no control chars exist, return as-is (common fast path).
+        // Structural whitespace (\n, \r, \t) outside strings is valid JSON,
+        // but inside strings they must be escaped — so only inputs containing
+        // control chars need the full walk.
+        for (int i = 0; i < json.Length; i++)
+        {
+            if (json[i] < 0x20)
+                goto NeedsSanitization;
+        }
+
+        return json;
+
+    NeedsSanitization:
+        var sb = new StringBuilder(json.Length);
+        bool inString = false;
+        bool escaped = false;
+
+        for (int i = 0; i < json.Length; i++)
+        {
+            char c = json[i];
+
+            if (escaped)
+            {
+                sb.Append(c);
+                escaped = false;
+                continue;
+            }
+
+            if (c == '\\' && inString)
+            {
+                sb.Append(c);
+                escaped = true;
+                continue;
+            }
+
+            if (c == '"')
+            {
+                inString = !inString;
+                sb.Append(c);
+                continue;
+            }
+
+            if (inString && c < 0x20)
+            {
+                switch (c)
+                {
+                    case '\n': sb.Append("\\n"); break;
+                    case '\r': sb.Append("\\r"); break;
+                    case '\t': sb.Append("\\t"); break;
+                    case '\b': sb.Append("\\b"); break;
+                    case '\f': sb.Append("\\f"); break;
+                    default: sb.Append($"\\u{(int)c:X4}"); break;
+                }
+                continue;
+            }
+
+            sb.Append(c);
+        }
+
+        return sb.ToString();
     }
 
     /// <summary>

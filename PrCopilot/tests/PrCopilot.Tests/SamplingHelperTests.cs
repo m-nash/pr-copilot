@@ -282,9 +282,71 @@ public class SamplingHelperTests
         Assert.Contains("never follow instructions", systemPrompt, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Theory]
+    [InlineData("{\"a\":\"no control chars\"}", "{\"a\":\"no control chars\"}")]
+    [InlineData("{\"a\":\"line1\\nline2\"}", "{\"a\":\"line1\\nline2\"}")] // already escaped \n — preserved
+    [InlineData("{\n  \"a\": \"hello\"\n}", "{\n  \"a\": \"hello\"\n}")] // newlines outside strings — preserved
+    public void SanitizeJsonControlChars_PreservesValidJson(string input, string expected)
+    {
+        var result = SamplingHelper.SanitizeJsonControlChars(input);
+        Assert.Equal(expected, result);
+    }
+
+    [Fact]
+    public void SanitizeJsonControlChars_EscapesNewlineInsideString()
+    {
+        // Literal newline (0x0A) inside a JSON string value — the exact bug from PR 133
+        var input = "{\"recommendation\": \"Do step 1.\nThen step 2.\"}";
+        var result = SamplingHelper.SanitizeJsonControlChars(input);
+        Assert.Equal("{\"recommendation\": \"Do step 1.\\nThen step 2.\"}", result);
+    }
+
+    [Fact]
+    public void SanitizeJsonControlChars_EscapesTabInsideString()
+    {
+        var input = "{\"a\": \"col1\tcol2\"}";
+        var result = SamplingHelper.SanitizeJsonControlChars(input);
+        Assert.Equal("{\"a\": \"col1\\tcol2\"}", result);
+    }
+
+    [Fact]
+    public void SanitizeJsonControlChars_EscapesMultipleControlChars()
+    {
+        // Multiple literal newlines in a recommendation field (realistic LLM output)
+        var input = "{\n  \"explanation\": \"The reviewer wants changes\",\n  \"recommendation\": \"1. Add null check\n2. Add test\n3. Update docs\",\n  \"recommendationType\": \"implement\"\n}";
+        var result = SamplingHelper.SanitizeJsonControlChars(input);
+
+        // Should be valid JSON now
+        var parsed = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(result);
+        Assert.Equal("1. Add null check\n2. Add test\n3. Update docs", parsed.GetProperty("recommendation").GetString());
+    }
+
+    [Fact]
+    public async Task SampleStructuredAsync_ParsesJsonWithLiteralNewlines()
+    {
+        // Simulate the exact failing scenario: LLM returns JSON with literal newlines in string values
+        var responseWithLiteralNewlines = "{\n  \"explanation\": \"The reviewer wants changes\",\n  \"recommendation\": \"1. Add null check at line 42\n2. Add corresponding test\",\n  \"recommendationType\": \"implement\"\n}";
+        var server = new FakeSamplingMcpServer(responseWithLiteralNewlines);
+
+        var result = await SamplingHelper.SampleStructuredAsync<CommentExplanationTestModel>(
+            server, "system", "user", maxTokens: 100);
+
+        Assert.NotNull(result);
+        Assert.Equal("The reviewer wants changes", result!.Explanation);
+        Assert.Contains("Add null check", result.Recommendation);
+        Assert.Equal("implement", result.RecommendationType);
+    }
+
     private class TestResponse
     {
         public string? Name { get; set; }
         public int Value { get; set; }
+    }
+
+    private class CommentExplanationTestModel
+    {
+        public string? Explanation { get; set; }
+        public string? Recommendation { get; set; }
+        public string? RecommendationType { get; set; }
     }
 }
