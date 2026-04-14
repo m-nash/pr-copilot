@@ -207,10 +207,19 @@ internal static class SamplingHelper
     /// </summary>
     internal static string SanitizeJsonControlChars(string json)
     {
-        // Quick scan: if no control chars exist below 0x20, return as-is.
+        // Quick scan: if no control chars exist, return as-is (common fast path).
         // Structural whitespace (\n, \r, \t) outside strings is valid JSON,
-        // but inside strings they must be escaped — so we always do the full walk.
+        // but inside strings they must be escaped — so only inputs containing
+        // control chars need the full walk.
+        for (int i = 0; i < json.Length; i++)
+        {
+            if (json[i] < 0x20)
+                goto NeedsSanitization;
+        }
 
+        return json;
+
+    NeedsSanitization:
         var sb = new StringBuilder(json.Length);
         bool inString = false;
         bool escaped = false;
