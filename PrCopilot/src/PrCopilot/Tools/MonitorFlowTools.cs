@@ -141,32 +141,129 @@ public class MonitorFlowTools
     /// Used when sampling classification returns null for a custom instruction, or when
     /// sampling classification fails (e.g., invalid JSON, exceptions) and the caller falls
     /// back to agent interpretation of the user's freeform text.
+    ///
+    /// The agent's chat history has NO record of the elicitation that produced this reply
+    /// (MCP elicitation flows separately from chat). Without explicit context, the agent
+    /// can mistake a legitimate reply for "stale state" because the text doesn't match
+    /// what it remembers the user typing in chat. The structured <c>Context</c> field
+    /// gives the agent everything it needs: the comment/CI under discussion, the prompt
+    /// shown, the user's reply, and any server-side analysis the user is reacting to.
     /// </summary>
-    private static MonitorAction BuildFreeformInterpretAction(ElicitChoiceResult result, MonitorState state, string? monitorId = null)
+    internal static MonitorAction BuildFreeformInterpretAction(ElicitChoiceResult result, MonitorState state, string? monitorId = null)
     {
-        var choicesContext = result.OriginalChoices != null
-            ? string.Join(", ", result.OriginalChoices.Select(c =>
-            {
-                var mapped = MonitorTransitions.ChoiceValueMap.TryGetValue(c, out var v) ? v : c;
-                return $"'{c}' → {mapped}";
-            }))
-            : "none";
-
+        var context = BuildFreeformInterpretContext(result, state);
         var pathBInstructions = BuildFreeformPathBInstructions(state);
+
+        var instructions =
+            "**MCP elicitation occurred — context boundary notice.** " +
+            "An MCP elicitation prompt was just shown to the user. The user's reply is in " +
+            "`context.userReply.text` and is **authoritative** — it is the user's most recent " +
+            "input. It will NOT appear in your chat history because elicitation flows through " +
+            "MCP, not chat. **Do not dismiss it as stale state**, and if it conflicts with the " +
+            "user's prior chat message, the elicitation reply wins.\n\n" +
+            "Read `context` for full background: the question shown (`context.elicitation`), " +
+            "the comment or CI failure under discussion (`context.comment` / `context.ciFailure`), " +
+            "and any server-side analysis the user is reacting to (`context.serverAnalysis`). " +
+            "Pronouns in the reply (\"this\", \"it\", \"that fix\") refer to items in `context`.\n\n" +
+            "**Path A — clean choice match:** If `context.userReply.text` cleanly maps to ONE of " +
+            "`context.elicitation.choices` with NO extra instructions, tell the user " +
+            "'I'm interpreting this as [choice display text]' and call pr_monitor_next_step " +
+            "with event='user_chose' and choice=<the choice's value>. " +
+            pathBInstructions;
 
         return new MonitorAction
         {
             Action = "execute",
             MonitorId = monitorId,
             Task = "interpret_freeform",
-            Instructions = $"The user typed: \"{result.Value}\". " +
-                $"The original question was: \"{result.OriginalQuestion}\". " +
-                $"The available choices were: [{choicesContext}]. " +
-                "**Path A — clean choice match:** If the text cleanly maps to ONE of the available choices with NO extra instructions, " +
-                "tell the user 'I'm interpreting this as [choice display text]' and call pr_monitor_next_step " +
-                "with event='user_chose' and choice=<mapped_value>. " +
-                pathBInstructions
+            Instructions = instructions,
+            Context = context
         };
+    }
+
+    /// <summary>
+    /// Build the structured context payload attached to an interpret_freeform action.
+    /// Pulls comment/CI/recommendation context from the current MonitorState so the
+    /// agent can resolve pronoun references and understand what the user is reacting to.
+    /// </summary>
+    internal static FreeformInterpretContext BuildFreeformInterpretContext(ElicitChoiceResult result, MonitorState state)
+    {
+        var ctx = new FreeformInterpretContext
+        {
+            Reason = "sampling_classified_as_custom_instruction",
+            Elicitation = new ElicitationContext
+            {
+                Question = result.OriginalQuestion ?? "",
+                Choices = (result.OriginalChoices ?? []).Select(c => new ElicitationChoiceContext
+                {
+                    Display = c,
+                    Value = MonitorTransitions.ChoiceValueMap.TryGetValue(c, out var v) ? v : c
+                }).ToList()
+            },
+            UserReply = new UserReplyContext
+            {
+                Text = result.Value,
+                IsFreeform = true,
+                SamplingClassification = "custom_instruction"
+            }
+        };
+
+        // Comment flow: attach the active comment + last recommendation
+        if (state.CommentFlow != CommentFlowState.None)
+        {
+            ctx.FlowType = "comment";
+            if (state.CurrentCommentIndex >= 0 && state.CurrentCommentIndex < state.UnresolvedComments.Count)
+            {
+                var c = state.UnresolvedComments[state.CurrentCommentIndex];
+                ctx.Comment = new CommentContext
+                {
+                    Author = c.Author,
+                    FilePath = c.FilePath,
+                    Line = c.Line,
+                    Body = c.Body,
+                    Url = c.Url
+                };
+            }
+
+            if (!string.IsNullOrWhiteSpace(state.LastRecommendation))
+            {
+                ctx.ServerAnalysis = new ServerAnalysisContext
+                {
+                    Recommendation = state.LastRecommendation
+                };
+            }
+        }
+        // CI failure flow: attach failed checks + investigation/recommendation
+        else if (state.CiFailureFlow != CiFailureFlowState.None)
+        {
+            ctx.FlowType = "ci_failure";
+            if (state.FailedChecks.Count > 0)
+            {
+                ctx.CiFailure = new CiFailureContext
+                {
+                    FailedChecks = state.FailedChecks.Select(f => new FailedCheckContext
+                    {
+                        Name = f.Name,
+                        Conclusion = f.Conclusion,
+                        Url = f.Url
+                    }).ToList()
+                };
+            }
+
+            if (!string.IsNullOrWhiteSpace(state.LastRecommendation)
+                || !string.IsNullOrWhiteSpace(state.InvestigationFindings)
+                || !string.IsNullOrWhiteSpace(state.SuggestedFix))
+            {
+                ctx.ServerAnalysis = new ServerAnalysisContext
+                {
+                    Recommendation = state.LastRecommendation,
+                    InvestigationFindings = state.InvestigationFindings,
+                    SuggestedFix = state.SuggestedFix
+                };
+            }
+        }
+
+        return ctx;
     }
 
     /// <summary>
@@ -674,7 +771,7 @@ public class MonitorFlowTools
                         // Custom instruction — delegate to agent
                         var freeformState = action.MonitorId != null && _sessions.TryGetValue(action.MonitorId, out var fs)
                             ? fs.State : heartbeatSession.State;
-                        freeformState.CurrentState = MonitorStateId.ExecutingTask;
+                        freeformState.EnterExecutingTask();
                         var freeformAction = BuildFreeformInterpretAction(elicitResult, freeformState, action.MonitorId);
                         return SerializeAction(freeformAction);
                     }
@@ -773,7 +870,7 @@ public class MonitorFlowTools
                             else
                             {
                                 // Custom instruction — delegate to agent
-                                state.CurrentState = MonitorStateId.ExecutingTask;
+                                state.EnterExecutingTask();
                                 return SerializeAction(BuildFreeformInterpretAction(triggerResult, state));
                             }
                         }
@@ -901,7 +998,7 @@ public class MonitorFlowTools
                         }
 
                         // Custom instruction — delegate to agent
-                        state.CurrentState = MonitorStateId.ExecutingTask;
+                        state.EnterExecutingTask();
                         action = BuildFreeformInterpretAction(elicitResult, state);
                         break;
                     }
@@ -1409,6 +1506,70 @@ public class MonitorFlowTools
     {
         switch (action.Task)
         {
+            case "recover_from_ready_in_executing_task":
+                {
+                    // Post-push hook recovery: the agent re-entered ExecutingTask via
+                    // pr_monitor_start + event=ready (typically because a global custom-instruction
+                    // says "after git push, invoke pr-monitor"). The state machine kicks us here
+                    // to determine whether a push actually happened during the task.
+                    //
+                    // Strategy:
+                    //   1. Refresh HEAD from GitHub.
+                    //   2. If HEAD advanced since HeadShaAtTaskStart, treat as the documented
+                    //      completion event for the active flow (comment_addressed / push_completed).
+                    //   3. If HEAD did not advance, fall back to a flow-aware ask_user prompt
+                    //      so the user can mark the task done in-flow without losing CommentFlow
+                    //      state (vs. the legacy destructive recovery that wiped flow state).
+                    var snapshotSha = state.HeadShaAtTaskStart;
+                    string? latestSha = state.HeadSha;
+                    try
+                    {
+                        var freshPr = await PrStatusFetcher.FetchPrInfoAsync(state.Owner, state.Repo, state.PrNumber);
+                        if (!string.IsNullOrWhiteSpace(freshPr.HeadSha))
+                            latestSha = freshPr.HeadSha;
+                    }
+                    catch (Exception ex)
+                    {
+                        DebugLogger.Error("AutoExec", $"recover_from_ready: HEAD refresh failed: {ex.Message}");
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(latestSha) && latestSha != state.HeadSha)
+                    {
+                        DebugLogger.Log("AutoExec", $"recover_from_ready: HEAD advanced {ShortSha(state.HeadSha)} → {ShortSha(latestSha)}");
+                        state.HeadSha = latestSha;
+                    }
+
+                    var headAdvanced = !string.IsNullOrWhiteSpace(snapshotSha)
+                        && !string.IsNullOrWhiteSpace(latestSha)
+                        && !string.Equals(snapshotSha, latestSha, StringComparison.Ordinal);
+
+                    if (headAdvanced && state.CommentFlow != CommentFlowState.None)
+                    {
+                        DebugLogger.Log("AutoExec", "recover_from_ready: HEAD advanced + comment flow → dispatching comment_addressed");
+                        return MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
+                    }
+
+                    if (headAdvanced && state.CiFailureFlow != CiFailureFlowState.None)
+                    {
+                        DebugLogger.Log("AutoExec", "recover_from_ready: HEAD advanced + CI flow → dispatching push_completed");
+                        return MonitorTransitions.ProcessEvent(state, "push_completed", null, null);
+                    }
+
+                    if (headAdvanced)
+                    {
+                        DebugLogger.Log("AutoExec", "recover_from_ready: HEAD advanced + no active flow → resuming polling");
+                        state.CurrentState = MonitorStateId.AwaitingUser;
+                        return MonitorTransitions.ProcessEvent(state, "user_chose", "resume", null);
+                    }
+
+                    // No push detected — fall through to the recovery prompt. We invoke the
+                    // legacy default-recovery handler explicitly by sending an unknown event;
+                    // ProcessEvent's _ branch routes through RecoverFromUnexpectedState, which
+                    // is now flow-aware (preserves CommentFlow / CiFailureFlow when prior state
+                    // was ExecutingTask, so the user's choice can resume in-flow).
+                    DebugLogger.Log("AutoExec", "recover_from_ready: HEAD unchanged — falling back to flow-aware ask_user");
+                    return MonitorTransitions.ProcessEvent(state, "ready_unresolved", null, null);
+                }
             case "resolve_thread":
                 {
                     var comment = state.ActiveWaitingComment;

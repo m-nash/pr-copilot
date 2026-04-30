@@ -96,6 +96,15 @@ public class MonitorState
     /// <summary>Reply text composed by the agent, to be posted by the server via the REST API.</summary>
     public string? PendingReplyText { get; set; }
 
+    /// <summary>
+    /// HEAD SHA snapshotted when the state most recently entered <see cref="MonitorStateId.ExecutingTask"/>.
+    /// Used by the recovery path for <c>(ExecutingTask, "ready")</c> to detect whether the agent
+    /// pushed during the task — if HEAD has advanced, "ready" is reinterpreted as a completion event
+    /// (<c>comment_addressed</c> in comment flows, <c>push_completed</c> in CI flows).
+    /// Set via <see cref="EnterExecutingTask"/>; null/empty means no snapshot was captured.
+    /// </summary>
+    public string? HeadShaAtTaskStart { get; set; }
+
     /// <summary>Transient: completion event set by sampling handler for MonitorFlowTools to feed back to state machine.</summary>
     public string? SamplingCompletionEvent { get; set; }
     /// <summary>Transient: completion event set by EmitComposeReplyAction for the sampling compose_reply handler.</summary>
@@ -130,4 +139,20 @@ public class MonitorState
     /// Set when ReviewerReplied terminal state is detected.
     /// </summary>
     public CommentInfo? RepliedComment { get; set; }
+
+    /// <summary>
+    /// Transition to <see cref="MonitorStateId.ExecutingTask"/> and snapshot the current
+    /// <see cref="HeadSha"/> as <see cref="HeadShaAtTaskStart"/>. The snapshot lets the
+    /// recovery path detect post-push resumes (where the agent pushed during the task and
+    /// then re-entered via the post-push <c>pr_monitor_start</c> hook with event=ready
+    /// instead of calling the documented completion event).
+    ///
+    /// Use this instead of assigning <c>CurrentState = MonitorStateId.ExecutingTask</c>
+    /// directly so the snapshot is never forgotten at a new task-entry site.
+    /// </summary>
+    public void EnterExecutingTask()
+    {
+        CurrentState = MonitorStateId.ExecutingTask;
+        HeadShaAtTaskStart = HeadSha;
+    }
 }

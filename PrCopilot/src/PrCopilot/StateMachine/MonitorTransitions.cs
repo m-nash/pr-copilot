@@ -115,6 +115,7 @@ public static class MonitorTransitions
         ["I'll handle the comments myself"] = "handle_myself",
         ["I'll handle them myself"] = "handle_myself",
         ["Skip this comment"] = "skip",
+        ["Treat as comment addressed"] = "treat_as_addressed",
         ["Done — resume monitoring"] = "done",
         ["Address next comment"] = "continue",
         ["I'll handle the rest myself"] = "done",
@@ -126,6 +127,7 @@ public static class MonitorTransitions
         ["Re-run failed jobs"] = "rerun",
         ["Apply the recommendation"] = "apply_fix",
         ["Run a new build"] = "run_new",
+        ["Treat as push completed"] = "treat_as_pushed",
 
         // Waiting-for-reply comment choices (ProcessWaitingCommentChoice)
         ["Resolve this thread"] = "resolve",
@@ -181,6 +183,14 @@ public static class MonitorTransitions
 
             // LLM finished executing a generic task
             (MonitorStateId.ExecutingTask, "task_complete") => ProcessTaskComplete(state),
+
+            // Recovery: agent skipped the documented completion event and re-entered with
+            // event=ready (commonly because the user's post-push custom-instruction hook
+            // fires pr_monitor_start + ready instead of the Path B comment_addressed/
+            // push_completed events). Returns an auto_execute that fetches HEAD; if HEAD
+            // advanced during the task, the wrapper re-dispatches as the right completion
+            // event, otherwise falls through to flow-aware recovery prompt.
+            (MonitorStateId.ExecutingTask, "ready") => BuildRecoverFromReadyAction(state),
 
             // Recovery: agent sent task_complete from AwaitingUser (skipped a tool call)
             (MonitorStateId.AwaitingUser, "task_complete") => RecoverFromUnexpectedTaskComplete(state),
@@ -331,8 +341,20 @@ public static class MonitorTransitions
     private static MonitorAction RecoverFromUnexpectedState(MonitorState state, string eventType)
     {
         var priorState = state.CurrentState;
+        var priorCommentFlow = state.CommentFlow;
+        var priorCiFailureFlow = state.CiFailureFlow;
         DebugLogger.Log("StateMachine", $"RECOVERY: Unexpected state {priorState}/{eventType}. Transitioning to AwaitingUser so next user_chose can recover.");
         state.CurrentState = MonitorStateId.AwaitingUser;
+
+        // Preserve flow context when recovering from ExecutingTask — the user is mid-flow
+        // and may want to resume by treating the task as completed (e.g., comment addressed).
+        // Wiping the flow state would force them to start the comment loop from scratch and
+        // lose their place. For other prior states, keep the original aggressive cleanup.
+        if (priorState == MonitorStateId.ExecutingTask)
+        {
+            return BuildExecutingTaskRecoveryPrompt(state, eventType, priorCommentFlow, priorCiFailureFlow);
+        }
+
         state.CommentFlow = CommentFlowState.None;
         state.CiFailureFlow = CiFailureFlowState.None;
         state.ActiveWaitingComment = null;
@@ -343,6 +365,83 @@ public static class MonitorTransitions
             Choices = ["Resume monitoring", "Stop monitoring"]
         };
     }
+
+    /// <summary>
+    /// Recovery prompt for unexpected events arriving while in <see cref="MonitorStateId.ExecutingTask"/>.
+    /// Offers flow-aware choices so the user can mark the task done in-flow rather than
+    /// being forced to "Resume monitoring" (which would wipe the flow state and restart polling).
+    /// Flow state (CommentFlow / CiFailureFlow / current comment index) is preserved so the
+    /// follow-up <c>user_chose</c> can dispatch into the correct flow handler.
+    /// </summary>
+    private static MonitorAction BuildExecutingTaskRecoveryPrompt(
+        MonitorState state,
+        string eventType,
+        CommentFlowState priorCommentFlow,
+        CiFailureFlowState priorCiFailureFlow)
+    {
+        if (priorCommentFlow != CommentFlowState.None)
+        {
+            return new MonitorAction
+            {
+                Action = "ask_user",
+                Question = $"Unexpected event '{eventType}' while addressing a comment. " +
+                    "If you finished the work, pick how to mark it; otherwise resume or stop.",
+                Choices =
+                [
+                    "Treat as comment addressed",
+                    "Skip this comment",
+                    "Resume monitoring",
+                    "Stop monitoring"
+                ]
+            };
+        }
+
+        if (priorCiFailureFlow != CiFailureFlowState.None)
+        {
+            return new MonitorAction
+            {
+                Action = "ask_user",
+                Question = $"Unexpected event '{eventType}' while investigating a CI failure. " +
+                    "If you finished the work, pick how to mark it; otherwise resume or stop.",
+                Choices =
+                [
+                    "Treat as push completed",
+                    "Resume monitoring",
+                    "Stop monitoring"
+                ]
+            };
+        }
+
+        // No active flow — same as the generic recovery
+        state.ActiveWaitingComment = null;
+        return new MonitorAction
+        {
+            Action = "ask_user",
+            Question = $"Unexpected state: ExecutingTask/{eventType}. What would you like to do?",
+            Choices = ["Resume monitoring", "Stop monitoring"]
+        };
+    }
+
+    /// <summary>
+    /// Returns an <c>auto_execute</c> action that the MCP wrapper handles by fetching the
+    /// latest HEAD SHA from GitHub. If HEAD advanced since <see cref="MonitorState.HeadShaAtTaskStart"/>,
+    /// the wrapper re-dispatches the event as <c>comment_addressed</c> (comment flow) or
+    /// <c>push_completed</c> (CI flow) — recovering automatically from the post-push hook
+    /// that called <c>ready</c> instead of the documented completion event. If HEAD did
+    /// not advance, the wrapper falls back to <see cref="BuildExecutingTaskRecoveryPrompt"/>.
+    /// </summary>
+    private static MonitorAction BuildRecoverFromReadyAction(MonitorState state)
+    {
+        DebugLogger.Log("StateMachine", $"ExecutingTask/ready: dispatching auto_execute recover_from_ready_in_executing_task (snapshot HEAD={ShortSha(state.HeadShaAtTaskStart)})");
+        return new MonitorAction
+        {
+            Action = "auto_execute",
+            Task = "recover_from_ready_in_executing_task"
+        };
+    }
+
+    private static string ShortSha(string? sha) =>
+        string.IsNullOrEmpty(sha) ? "(none)" : sha.Length <= 7 ? sha : sha[..7];
 
     private static MonitorAction TransitionToPolling(MonitorState state)
     {
@@ -435,6 +534,12 @@ public static class MonitorTransitions
 
     private static MonitorAction ProcessCommentChoice(MonitorState state, string? choice)
     {
+        // Recovery shortcut available from any comment-flow sub-state — the (ExecutingTask, "ready")
+        // recovery path offers this when HEAD did NOT advance during the task. Routes through
+        // ProcessCommentAddressed which gracefully composes a reply if PendingReplyText is empty.
+        if (choice == "treat_as_addressed")
+            return ProcessCommentAddressed(state, null);
+
         return (state.CommentFlow, choice) switch
         {
             (CommentFlowState.MultiCommentPrompt, "address_all") => BeginAddressAll(state),
@@ -514,7 +619,7 @@ public static class MonitorTransitions
     private static MonitorAction EmitExplainForCurrentComment(MonitorState state)
     {
         var c = state.UnresolvedComments[state.CurrentCommentIndex];
-        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.EnterExecutingTask();
         state.PendingExplainResult = true;
         state.LastRecommendation = null;
         return new MonitorAction
@@ -573,7 +678,7 @@ public static class MonitorTransitions
 
     private static MonitorAction BeginAddressCurrentComment(MonitorState state)
     {
-        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.EnterExecutingTask();
         return EmitAddressCommentAction(state);
     }
 
@@ -583,7 +688,7 @@ public static class MonitorTransitions
             return TransitionToPolling(state);
 
         var c = state.UnresolvedComments[state.CurrentCommentIndex];
-        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.EnterExecutingTask();
         return new MonitorAction
         {
             Action = "execute",
@@ -604,7 +709,7 @@ public static class MonitorTransitions
     private static MonitorAction BeginExplainComment(MonitorState state, bool isReplyEvent = false)
     {
         var c = state.UnresolvedComments[state.CurrentCommentIndex];
-        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.EnterExecutingTask();
         state.PendingExplainResult = true;
         state.LastRecommendation = null;
         var replyContext = isReplyEvent && !string.IsNullOrEmpty(c.LastReplyAuthor)
@@ -633,7 +738,7 @@ public static class MonitorTransitions
         }
 
         var c = state.UnresolvedComments[state.CurrentCommentIndex];
-        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.EnterExecutingTask();
         return new MonitorAction
         {
             Action = "execute",
@@ -853,7 +958,7 @@ public static class MonitorTransitions
     /// </summary>
     private static MonitorAction EmitComposeReplyAction(MonitorState state, CommentInfo c, string completionEvent)
     {
-        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.EnterExecutingTask();
         state.PendingCompletionEvent = completionEvent;
         return new MonitorAction
         {
@@ -946,6 +1051,12 @@ public static class MonitorTransitions
 
     private static MonitorAction ProcessCiFailureChoice(MonitorState state, string? choice)
     {
+        // Recovery shortcut from any CI-failure sub-state — the (ExecutingTask, "ready")
+        // recovery path offers this when HEAD did NOT advance during the task. Surfaces the
+        // documented push_completed behavior: clear failure state and resume polling.
+        if (choice == "treat_as_pushed")
+            return TransitionToPolling(state);
+
         return (state.CiFailureFlow, choice) switch
         {
             (CiFailureFlowState.InvestigationResults, "apply_fix") => BeginApplyFix(state),
@@ -1060,7 +1171,7 @@ public static class MonitorTransitions
         // Azure DevOps has no API for rerun-failed-only; only the web UI supports it.
         state.PendingRerunWhenChecksComplete = false;
         var buildUrl = state.FailedChecks.FirstOrDefault()?.Url;
-        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.EnterExecutingTask();
         state.CommentFlow = CommentFlowState.None;
         state.CiFailureFlow = CiFailureFlowState.None;
         return new MonitorAction
