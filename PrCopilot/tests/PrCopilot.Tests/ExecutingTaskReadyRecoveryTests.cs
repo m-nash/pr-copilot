@@ -298,4 +298,87 @@ public class ExecutingTaskReadyRecoveryTests
         // Genuine unknown events still get the event name interpolated for debug visibility:
         Assert.Contains("totally_made_up_event_xyz", action.Question);
     }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Comment-flow recovery must offer both completion paths: the existing
+    // "Treat as comment addressed" (resolves thread) AND a new "Treat as
+    // comment replied" path that advances without posting anything new
+    // (user already handled the reply outside the loop). Reviewer comment
+    // #4 on PR #51 — the original recovery only exposed the addressed path,
+    // so a pushback/clarification flow that finished without push would force
+    // the user to either resolve the thread (wrong) or reset the flow state.
+    // ────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void BuildExecutingTaskRecoveryPrompt_CommentFlow_OffersTreatAsCommentRepliedChoice()
+    {
+        var state = CreateState();
+        state.UnresolvedComments.Add(MakeComment());
+        state.EnterExecutingTask();
+
+        var action = MonitorTransitions.BuildExecutingTaskRecoveryPrompt(
+            state,
+            reasonText: "Looks like the task finished without a new commit",
+            priorCommentFlow: CommentFlowState.SingleCommentPrompt,
+            priorCiFailureFlow: CiFailureFlowState.None);
+
+        Assert.NotNull(action.Choices);
+        Assert.Contains("Treat as comment addressed", action.Choices!);
+        Assert.Contains("Treat as comment replied", action.Choices!);
+    }
+
+    [Fact]
+    public void ChoiceValueMap_HasTreatAsRepliedExternallyEntry()
+    {
+        Assert.Equal(
+            "treat_as_replied_externally",
+            MonitorTransitions.ChoiceValueMap["Treat as comment replied"]);
+    }
+
+    [Fact]
+    public void ProcessEvent_TreatAsRepliedExternally_AdvancesWithoutPostingOrResolving()
+    {
+        // Two unresolved comments. User picks "Treat as comment replied" on the first —
+        // we should NOT post a reply (no compose_reply / post_reply / resolve_thread action),
+        // we should NOT resolve the thread, and we SHOULD advance to the next comment.
+        var state = CreateState();
+        var c1 = MakeComment(id: "c1");
+        var c2 = MakeComment(id: "c2");
+        state.UnresolvedComments.Add(c1);
+        state.UnresolvedComments.Add(c2);
+        state.CommentFlow = CommentFlowState.AddressAllIterating;
+        state.CurrentCommentIndex = 0;
+        state.CurrentState = MonitorStateId.AwaitingUser;
+
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "treat_as_replied_externally", null);
+
+        // Did NOT post anything — task should not be a reply/resolve action.
+        Assert.NotEqual("compose_reply", action.Task);
+        Assert.NotEqual("post_reply", action.Task);
+        Assert.NotEqual("resolve_thread", action.Task);
+
+        // Did NOT mark the comment as addressed (no thread resolution).
+        Assert.False(c1.IsAddressed);
+        Assert.False(state.PendingResolveAfterAddress);
+
+        // Advanced to the next comment (index incremented OR transitioned to polling).
+        Assert.True(state.CurrentCommentIndex >= 1);
+    }
+
+    [Fact]
+    public void ProcessEvent_TreatAsRepliedExternally_LastComment_TransitionsToPolling()
+    {
+        var state = CreateState();
+        state.UnresolvedComments.Add(MakeComment(id: "only"));
+        state.CommentFlow = CommentFlowState.AddressAllIterating;
+        state.CurrentCommentIndex = 0;
+        state.CurrentState = MonitorStateId.AwaitingUser;
+
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "treat_as_replied_externally", null);
+
+        // After the last comment, we should drop back to polling.
+        Assert.Equal(MonitorStateId.Polling, state.CurrentState);
+        Assert.NotEqual("compose_reply", action.Task);
+        Assert.NotEqual("post_reply", action.Task);
+    }
 }

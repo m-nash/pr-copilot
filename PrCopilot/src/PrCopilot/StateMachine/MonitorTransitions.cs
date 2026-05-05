@@ -116,6 +116,7 @@ public static class MonitorTransitions
         ["I'll handle them myself"] = "handle_myself",
         ["Skip this comment"] = "skip",
         ["Treat as comment addressed"] = "treat_as_addressed",
+        ["Treat as comment replied"] = "treat_as_replied_externally",
         ["Done — resume monitoring"] = "done",
         ["Address next comment"] = "continue",
         ["I'll handle the rest myself"] = "done",
@@ -406,6 +407,7 @@ public static class MonitorTransitions
                 Choices =
                 [
                     "Treat as comment addressed",
+                    "Treat as comment replied",
                     "Skip this comment",
                     "Resume monitoring",
                     "Stop monitoring"
@@ -551,11 +553,17 @@ public static class MonitorTransitions
 
     private static MonitorAction ProcessCommentChoice(MonitorState state, string? choice)
     {
-        // Recovery shortcut available from any comment-flow sub-state — the (ExecutingTask, "ready")
-        // recovery path offers this when HEAD did NOT advance during the task. Routes through
-        // ProcessCommentAddressed which gracefully composes a reply if PendingReplyText is empty.
+        // Recovery shortcuts available from any comment-flow sub-state — the (ExecutingTask, "ready")
+        // recovery path offers these when HEAD did NOT advance during the task.
+        // - treat_as_addressed: routes through ProcessCommentAddressed (resolves the thread).
+        // - treat_as_replied_externally: user already handled the reply outside the loop
+        //   (e.g., replied directly on GitHub or chose to leave it). Don't post anything,
+        //   don't resolve — just advance past this comment.
         if (choice == "treat_as_addressed")
             return ProcessCommentAddressed(state, null);
+
+        if (choice == "treat_as_replied_externally")
+            return SkipAndAdvanceComment(state);
 
         return (state.CommentFlow, choice) switch
         {
