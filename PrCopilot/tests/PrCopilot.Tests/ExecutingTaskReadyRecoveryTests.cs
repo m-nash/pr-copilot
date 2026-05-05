@@ -381,4 +381,125 @@ public class ExecutingTaskReadyRecoveryTests
         Assert.NotEqual("compose_reply", action.Task);
         Assert.NotEqual("post_reply", action.Task);
     }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Push-detected recovery must not assume comment_addressed for tasks
+    // whose completion event is ambiguous (apply_recommendation can push
+    // either an implementation OR a proving test → comment_replied).
+    // Reviewer comment #5 on PR #51.
+    // ────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void RecoverFromReadyResolution_PushDetected_AmbiguousTask_AsksUserInsteadOfDispatchingCommentAddressed()
+    {
+        // apply_recommendation (or any task that didn't set an explicit expected
+        // completion event) is ambiguous: the agent might have pushed an implementation
+        // (comment_addressed → resolve thread) OR a proving test (comment_replied →
+        // keep thread open for reviewer). The recovery must NOT guess; it should
+        // surface the ask_user prompt with both choices.
+        var state = CreateState();
+        var c = MakeComment();
+        state.UnresolvedComments.Add(c);
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.EnterExecutingTask();
+        state.ExecutingTaskExpectedCompletion = null;  // ambiguous
+
+        var action = MonitorTransitions.BuildRecoverFromReadyResolution(state, headAdvanced: true);
+
+        // Should NOT have routed through ProcessCommentAddressed (which would resolve
+        // the thread or emit a compose/resolve action).
+        Assert.False(c.IsAddressed);
+        Assert.False(state.PendingResolveAfterAddress);
+        Assert.NotEqual("compose_reply", action.Task);
+        Assert.NotEqual("resolve_thread", action.Task);
+        // SHOULD be an ask_user prompt with both completion choices.
+        Assert.Equal("ask_user", action.Action);
+        Assert.NotNull(action.Choices);
+        Assert.Contains("Treat as comment addressed", action.Choices!);
+        Assert.Contains("Treat as comment replied", action.Choices!);
+    }
+
+    [Fact]
+    public void RecoverFromReadyResolution_PushDetected_KnownAddressedTask_DispatchesCommentAddressed()
+    {
+        // address_comment (set by EmitAddressCommentAction) has only one completion path:
+        // comment_addressed. The recovery should auto-dispatch in this unambiguous case
+        // (this preserves the original auto-recovery convenience for the common path).
+        var state = CreateState();
+        var c = MakeComment();
+        state.UnresolvedComments.Add(c);
+        state.CommentFlow = CommentFlowState.AddressAllIterating;
+        state.EnterExecutingTask();
+        state.ExecutingTaskExpectedCompletion = "comment_addressed";
+
+        var action = MonitorTransitions.BuildRecoverFromReadyResolution(state, headAdvanced: true);
+
+        // Should have routed through ProcessCommentAddressed — either a compose_reply
+        // request (if no pending reply text) or a resolve_thread action. Either way, it
+        // is NOT the recovery ask_user prompt.
+        Assert.NotEqual("ask_user", action.Action);
+        // The processing should have engaged the comment_addressed pipeline (one of
+        // these flags or actions will be set).
+        var engagedAddressedPipeline =
+            action.Task == "compose_reply" ||
+            action.Task == "resolve_thread" ||
+            state.PendingResolveAfterAddress ||
+            c.IsAddressed;
+        Assert.True(engagedAddressedPipeline,
+            $"Expected ProcessCommentAddressed to engage; got Action={action.Action}, Task={action.Task}");
+    }
+
+    [Fact]
+    public void RecoverFromReadyResolution_NoPush_StillBuildsRecoveryPrompt()
+    {
+        // Regression: the no-push branch must still produce the user-friendly recovery prompt
+        // ("without a new commit") regardless of ExecutingTaskExpectedCompletion.
+        var state = CreateState();
+        state.UnresolvedComments.Add(MakeComment());
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.EnterExecutingTask();
+        state.ExecutingTaskExpectedCompletion = "comment_addressed";
+
+        var action = MonitorTransitions.BuildRecoverFromReadyResolution(state, headAdvanced: false);
+
+        Assert.Equal("ask_user", action.Action);
+        Assert.NotNull(action.Question);
+        Assert.Contains("without a new commit", action.Question);
+    }
+
+    [Fact]
+    public void EmitAddressCommentAction_SetsExpectedCompletionToCommentAddressed()
+    {
+        // address_comment task has only one documented completion path: event=comment_addressed.
+        // The state field is what BuildRecoverFromReadyResolution reads to decide whether the
+        // push-detected auto-dispatch is safe.
+        var state = CreateState();
+        state.UnresolvedComments.Add(MakeComment());
+        state.CommentFlow = CommentFlowState.AddressAllIterating;
+        state.CurrentCommentIndex = 0;
+        state.CurrentState = MonitorStateId.AwaitingUser;
+
+        // Trigger BeginAddressCurrentComment → EmitAddressCommentAction via the public surface.
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "address", null);
+
+        Assert.Equal("address_comment", action.Task);
+        Assert.Equal("comment_addressed", state.ExecutingTaskExpectedCompletion);
+    }
+
+    [Fact]
+    public void BeginApplyRecommendation_LeavesExpectedCompletionAmbiguous()
+    {
+        // apply_recommendation has TWO documented completion paths: comment_addressed (implement)
+        // and comment_replied (proving-test pushback). Must NOT pre-commit to one.
+        var state = CreateState();
+        state.UnresolvedComments.Add(MakeComment());
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.CurrentCommentIndex = 0;
+        state.CurrentState = MonitorStateId.AwaitingUser;
+
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "apply_fix", null);
+
+        Assert.Equal("apply_recommendation", action.Task);
+        Assert.Null(state.ExecutingTaskExpectedCompletion);
+    }
 }

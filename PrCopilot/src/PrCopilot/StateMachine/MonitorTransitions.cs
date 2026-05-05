@@ -459,6 +459,76 @@ public static class MonitorTransitions
         };
     }
 
+    /// <summary>
+    /// Pure decision logic for the <c>recover_from_ready_in_executing_task</c> auto_execute
+    /// dispatch. Extracted from <c>MonitorFlowTools.ExecuteAutoAction</c> so it can be
+    /// unit-tested without going through the async HEAD-fetch path.
+    ///
+    /// Inputs: the state (CommentFlow / CiFailureFlow / ExecutingTaskExpectedCompletion)
+    /// and a precomputed <paramref name="headAdvanced"/> flag (true when the latest HEAD
+    /// differs from <see cref="MonitorState.HeadShaAtTaskStart"/>).
+    ///
+    /// Behavior:
+    /// - <c>headAdvanced + comment flow</c>: dispatch <c>comment_addressed</c> ONLY when
+    ///   <see cref="MonitorState.ExecutingTaskExpectedCompletion"/> is exactly
+    ///   <c>"comment_addressed"</c> (the task has a single documented completion path).
+    ///   Otherwise (ambiguous task such as <c>apply_recommendation</c> which can complete as
+    ///   <c>comment_addressed</c> for an implementation push OR <c>comment_replied</c> for a
+    ///   proving-test push), fall back to the flow-aware ask_user prompt so the user
+    ///   disambiguates instead of the engine guessing wrong and incorrectly resolving a
+    ///   thread that should stay open for the reviewer.
+    /// - <c>headAdvanced + CI flow</c>: dispatch <c>push_completed</c> (the CI flow has a
+    ///   single completion path).
+    /// - <c>headAdvanced + no flow</c>: resume polling.
+    /// - <c>!headAdvanced</c>: build the no-push recovery prompt.
+    /// </summary>
+    internal static MonitorAction BuildRecoverFromReadyResolution(MonitorState state, bool headAdvanced)
+    {
+        if (headAdvanced && state.CommentFlow != CommentFlowState.None)
+        {
+            if (state.ExecutingTaskExpectedCompletion == "comment_addressed")
+            {
+                DebugLogger.Log("AutoExec", "recover_from_ready: HEAD advanced + comment flow + unambiguous → dispatching comment_addressed");
+                return ProcessEvent(state, "comment_addressed", null, null);
+            }
+
+            // Ambiguous task (e.g., apply_recommendation) — fall back to ask_user.
+            DebugLogger.Log("AutoExec", "recover_from_ready: HEAD advanced + comment flow + ambiguous task → asking user how to mark it");
+            var priorCommentFlow = state.CommentFlow;
+            var priorCiFailureFlow = state.CiFailureFlow;
+            state.CurrentState = MonitorStateId.AwaitingUser;
+            return BuildExecutingTaskRecoveryPrompt(
+                state,
+                reasonText: "The task pushed a commit but didn't tell me whether to resolve the thread or leave it for the reviewer",
+                priorCommentFlow,
+                priorCiFailureFlow);
+        }
+
+        if (headAdvanced && state.CiFailureFlow != CiFailureFlowState.None)
+        {
+            DebugLogger.Log("AutoExec", "recover_from_ready: HEAD advanced + CI flow → dispatching push_completed");
+            return ProcessEvent(state, "push_completed", null, null);
+        }
+
+        if (headAdvanced)
+        {
+            DebugLogger.Log("AutoExec", "recover_from_ready: HEAD advanced + no active flow → resuming polling");
+            state.CurrentState = MonitorStateId.AwaitingUser;
+            return ProcessEvent(state, "user_chose", "resume", null);
+        }
+
+        // No push detected — flow-aware no-push recovery prompt.
+        DebugLogger.Log("AutoExec", "recover_from_ready: HEAD unchanged — building flow-aware no-push recovery prompt");
+        var noPushPriorCommentFlow = state.CommentFlow;
+        var noPushPriorCiFailureFlow = state.CiFailureFlow;
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        return BuildExecutingTaskRecoveryPrompt(
+            state,
+            reasonText: "Looks like the task finished without a new commit",
+            noPushPriorCommentFlow,
+            noPushPriorCiFailureFlow);
+    }
+
     private static string ShortSha(string? sha) =>
         string.IsNullOrEmpty(sha) ? "(none)" : sha.Length <= 7 ? sha : sha[..7];
 
@@ -764,6 +834,11 @@ public static class MonitorTransitions
 
         var c = state.UnresolvedComments[state.CurrentCommentIndex];
         state.EnterExecutingTask();
+        // address_comment has a single documented completion path: event=comment_addressed.
+        // Set explicitly so the (ExecutingTask, "ready") recovery can auto-dispatch on push
+        // detection rather than falling back to ask_user (apply_recommendation deliberately
+        // leaves this null because it has two completion paths).
+        state.ExecutingTaskExpectedCompletion = "comment_addressed";
         return new MonitorAction
         {
             Action = "execute",

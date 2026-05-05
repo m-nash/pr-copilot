@@ -1569,13 +1569,17 @@ public class MonitorFlowTools
                     // says "after git push, invoke pr-monitor"). The state machine kicks us here
                     // to determine whether a push actually happened during the task.
                     //
-                    // Strategy:
-                    //   1. Refresh HEAD from GitHub.
-                    //   2. If HEAD advanced since HeadShaAtTaskStart, treat as the documented
-                    //      completion event for the active flow (comment_addressed / push_completed).
-                    //   3. If HEAD did not advance, fall back to a flow-aware ask_user prompt
-                    //      so the user can mark the task done in-flow without losing CommentFlow
-                    //      state (vs. the legacy destructive recovery that wiped flow state).
+                    // This handler does the I/O (refresh HEAD from GitHub) then delegates the
+                    // pure decision logic to MonitorTransitions.BuildRecoverFromReadyResolution,
+                    // which is unit-testable. Behavior summary (see helper for full doc):
+                    //   1. HEAD advanced + comment flow + ExpectedCompletion=="comment_addressed"
+                    //      → auto-dispatch comment_addressed.
+                    //   2. HEAD advanced + comment flow + ambiguous task (e.g., apply_recommendation
+                    //      where the agent might have pushed a proving-test for comment_replied)
+                    //      → fall back to ask_user instead of guessing.
+                    //   3. HEAD advanced + CI flow → dispatch push_completed.
+                    //   4. HEAD advanced + no flow → resume polling.
+                    //   5. HEAD did not advance → flow-aware "no new commit" recovery prompt.
                     var snapshotSha = state.HeadShaAtTaskStart;
                     string? latestSha = state.HeadSha;
                     try
@@ -1599,40 +1603,7 @@ public class MonitorFlowTools
                         && !string.IsNullOrWhiteSpace(latestSha)
                         && !string.Equals(snapshotSha, latestSha, StringComparison.Ordinal);
 
-                    if (headAdvanced && state.CommentFlow != CommentFlowState.None)
-                    {
-                        DebugLogger.Log("AutoExec", "recover_from_ready: HEAD advanced + comment flow → dispatching comment_addressed");
-                        return MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
-                    }
-
-                    if (headAdvanced && state.CiFailureFlow != CiFailureFlowState.None)
-                    {
-                        DebugLogger.Log("AutoExec", "recover_from_ready: HEAD advanced + CI flow → dispatching push_completed");
-                        return MonitorTransitions.ProcessEvent(state, "push_completed", null, null);
-                    }
-
-                    if (headAdvanced)
-                    {
-                        DebugLogger.Log("AutoExec", "recover_from_ready: HEAD advanced + no active flow → resuming polling");
-                        state.CurrentState = MonitorStateId.AwaitingUser;
-                        return MonitorTransitions.ProcessEvent(state, "user_chose", "resume", null);
-                    }
-
-                    // No push detected — call the recovery prompt builder directly with a
-                    // user-friendly reason. Previously we dispatched ProcessEvent with a
-                    // synthetic event name "ready_unresolved" which leaked into the prompt
-                    // text as "Unexpected event 'ready_unresolved' ..." (reviewer feedback
-                    // on PR #51). Direct call preserves CommentFlow / CiFailureFlow state
-                    // and produces a meaningful question.
-                    DebugLogger.Log("AutoExec", "recover_from_ready: HEAD unchanged — building flow-aware no-push recovery prompt");
-                    var priorCommentFlow = state.CommentFlow;
-                    var priorCiFailureFlow = state.CiFailureFlow;
-                    state.CurrentState = MonitorStateId.AwaitingUser;
-                    return MonitorTransitions.BuildExecutingTaskRecoveryPrompt(
-                        state,
-                        reasonText: "Looks like the task finished without a new commit",
-                        priorCommentFlow,
-                        priorCiFailureFlow);
+                    return MonitorTransitions.BuildRecoverFromReadyResolution(state, headAdvanced);
                 }
             case "resolve_thread":
                 {

@@ -111,6 +111,20 @@ public class MonitorState
     public string? PendingCompletionEvent { get; set; }
 
     /// <summary>
+    /// Expected completion event for the currently-executing task, when known unambiguously.
+    /// Read by the (ExecutingTask, "ready") recovery path: when HEAD has advanced and this
+    /// value matches a single completion event (e.g., "comment_addressed", "push_completed"),
+    /// the recovery dispatches that event automatically. When null (ambiguous — e.g., the
+    /// apply_recommendation task can complete as either "comment_addressed" for an implementation
+    /// push OR "comment_replied" for a proving-test push), the recovery falls back to the
+    /// flow-aware ask_user prompt so the user disambiguates instead of the engine guessing.
+    ///
+    /// Reset to null on every <see cref="EnterExecutingTask"/> call; emitters that know
+    /// their task's unambiguous completion event must set this explicitly after that call.
+    /// </summary>
+    public string? ExecutingTaskExpectedCompletion { get; set; }
+
+    /// <summary>
     /// When set, ProcessTaskComplete calls AdvanceAfterComment with this summary.
     /// Used after posting a thread reply (auto_execute) when there's no subsequent resolve step.
     /// </summary>
@@ -154,5 +168,8 @@ public class MonitorState
     {
         CurrentState = MonitorStateId.ExecutingTask;
         HeadShaAtTaskStart = HeadSha;
+        // Reset expected completion to "ambiguous" on every entry. Emitters that know their
+        // task's single completion event must set this AFTER calling EnterExecutingTask.
+        ExecutingTaskExpectedCompletion = null;
     }
 }
