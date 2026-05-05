@@ -1618,13 +1618,21 @@ public class MonitorFlowTools
                         return MonitorTransitions.ProcessEvent(state, "user_chose", "resume", null);
                     }
 
-                    // No push detected — fall through to the recovery prompt. We invoke the
-                    // legacy default-recovery handler explicitly by sending an unknown event;
-                    // ProcessEvent's _ branch routes through RecoverFromUnexpectedState, which
-                    // is now flow-aware (preserves CommentFlow / CiFailureFlow when prior state
-                    // was ExecutingTask, so the user's choice can resume in-flow).
-                    DebugLogger.Log("AutoExec", "recover_from_ready: HEAD unchanged — falling back to flow-aware ask_user");
-                    return MonitorTransitions.ProcessEvent(state, "ready_unresolved", null, null);
+                    // No push detected — call the recovery prompt builder directly with a
+                    // user-friendly reason. Previously we dispatched ProcessEvent with a
+                    // synthetic event name "ready_unresolved" which leaked into the prompt
+                    // text as "Unexpected event 'ready_unresolved' ..." (reviewer feedback
+                    // on PR #51). Direct call preserves CommentFlow / CiFailureFlow state
+                    // and produces a meaningful question.
+                    DebugLogger.Log("AutoExec", "recover_from_ready: HEAD unchanged — building flow-aware no-push recovery prompt");
+                    var priorCommentFlow = state.CommentFlow;
+                    var priorCiFailureFlow = state.CiFailureFlow;
+                    state.CurrentState = MonitorStateId.AwaitingUser;
+                    return MonitorTransitions.BuildExecutingTaskRecoveryPrompt(
+                        state,
+                        reasonText: "Looks like the task finished without a new commit",
+                        priorCommentFlow,
+                        priorCiFailureFlow);
                 }
             case "resolve_thread":
                 {

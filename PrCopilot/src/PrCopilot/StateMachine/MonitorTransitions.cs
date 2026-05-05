@@ -352,7 +352,13 @@ public static class MonitorTransitions
         // lose their place. For other prior states, keep the original aggressive cleanup.
         if (priorState == MonitorStateId.ExecutingTask)
         {
-            return BuildExecutingTaskRecoveryPrompt(state, eventType, priorCommentFlow, priorCiFailureFlow);
+            // Genuine unknown event from agent — surface the event name in the prompt for
+            // debug visibility (this is a real bug, not a designed fallback path).
+            return BuildExecutingTaskRecoveryPrompt(
+                state,
+                reasonText: $"The agent sent an unexpected event '{eventType}'",
+                priorCommentFlow,
+                priorCiFailureFlow);
         }
 
         state.CommentFlow = CommentFlowState.None;
@@ -367,15 +373,26 @@ public static class MonitorTransitions
     }
 
     /// <summary>
-    /// Recovery prompt for unexpected events arriving while in <see cref="MonitorStateId.ExecutingTask"/>.
-    /// Offers flow-aware choices so the user can mark the task done in-flow rather than
-    /// being forced to "Resume monitoring" (which would wipe the flow state and restart polling).
-    /// Flow state (CommentFlow / CiFailureFlow / current comment index) is preserved so the
-    /// follow-up <c>user_chose</c> can dispatch into the correct flow handler.
+    /// Recovery prompt for events that arrive while in <see cref="MonitorStateId.ExecutingTask"/>
+    /// without a matching transition. Offers flow-aware choices so the user can mark the task
+    /// done in-flow rather than being forced to "Resume monitoring" (which would wipe the flow
+    /// state and restart polling). Flow state (CommentFlow / CiFailureFlow / current comment
+    /// index) is preserved so the follow-up <c>user_chose</c> can dispatch into the correct
+    /// flow handler.
+    ///
+    /// <paramref name="reasonText"/> is the user-facing explanation for why the prompt appeared
+    /// (e.g., "Looks like the task finished without a new commit" for the no-push fallback,
+    /// or "The agent sent an unexpected event 'foo'" for genuine unknown events). It is
+    /// interpolated verbatim into the question text — DO NOT pass internal synthetic event
+    /// names directly, or they will leak to the user. Reviewer feedback on PR #51 caught
+    /// the original implementation interpolating "ready_unresolved" into the prompt.
+    ///
+    /// Internal so the auto_execute no-push fallback in <c>MonitorFlowTools</c> can call it
+    /// directly instead of routing through <c>ProcessEvent</c> with a synthetic event name.
     /// </summary>
-    private static MonitorAction BuildExecutingTaskRecoveryPrompt(
+    internal static MonitorAction BuildExecutingTaskRecoveryPrompt(
         MonitorState state,
-        string eventType,
+        string reasonText,
         CommentFlowState priorCommentFlow,
         CiFailureFlowState priorCiFailureFlow)
     {
@@ -384,7 +401,7 @@ public static class MonitorTransitions
             return new MonitorAction
             {
                 Action = "ask_user",
-                Question = $"Unexpected event '{eventType}' while addressing a comment. " +
+                Question = $"{reasonText} while addressing a comment. " +
                     "If you finished the work, pick how to mark it; otherwise resume or stop.",
                 Choices =
                 [
@@ -401,7 +418,7 @@ public static class MonitorTransitions
             return new MonitorAction
             {
                 Action = "ask_user",
-                Question = $"Unexpected event '{eventType}' while investigating a CI failure. " +
+                Question = $"{reasonText} while investigating a CI failure. " +
                     "If you finished the work, pick how to mark it; otherwise resume or stop.",
                 Choices =
                 [
@@ -412,12 +429,12 @@ public static class MonitorTransitions
             };
         }
 
-        // No active flow — same as the generic recovery
+        // No active flow — generic recovery
         state.ActiveWaitingComment = null;
         return new MonitorAction
         {
             Action = "ask_user",
-            Question = $"Unexpected state: ExecutingTask/{eventType}. What would you like to do?",
+            Question = $"{reasonText}. What would you like to do?",
             Choices = ["Resume monitoring", "Stop monitoring"]
         };
     }

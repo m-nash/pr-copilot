@@ -212,4 +212,90 @@ public class ExecutingTaskReadyRecoveryTests
         Assert.Equal("treat_as_addressed", MonitorTransitions.ChoiceValueMap["Treat as comment addressed"]);
         Assert.Equal("treat_as_pushed", MonitorTransitions.ChoiceValueMap["Treat as push completed"]);
     }
+
+    // ────────────────────────────────────────────────────────────────────
+    // No-push fallback prompt — must NOT leak the synthetic "ready_unresolved"
+    // event name into the user-facing question text. Reviewer comment #3 on PR #51.
+    // ────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void BuildExecutingTaskRecoveryPrompt_CommentFlow_NoPushReason_DoesNotLeakSyntheticEventName()
+    {
+        // Before the fix, the auto_execute no-push fallback called
+        // ProcessEvent(state, "ready_unresolved", ...) which routed through the generic
+        // recovery and interpolated the literal string "ready_unresolved" into the prompt.
+        // The user saw "Unexpected event 'ready_unresolved' while addressing a comment ..."
+        // which exposes an internal name. The fix takes a user-friendly reasonText instead.
+        var state = CreateState();
+        state.UnresolvedComments.Add(MakeComment());
+        state.EnterExecutingTask();
+
+        var action = MonitorTransitions.BuildExecutingTaskRecoveryPrompt(
+            state,
+            reasonText: "Looks like the task finished without a new commit",
+            priorCommentFlow: CommentFlowState.SingleCommentPrompt,
+            priorCiFailureFlow: CiFailureFlowState.None);
+
+        Assert.Equal("ask_user", action.Action);
+        Assert.NotNull(action.Question);
+        Assert.DoesNotContain("ready_unresolved", action.Question);
+        Assert.DoesNotContain("Unexpected event", action.Question);
+        Assert.Contains("without a new commit", action.Question);
+        Assert.Contains("Treat as comment addressed", action.Choices!);
+    }
+
+    [Fact]
+    public void BuildExecutingTaskRecoveryPrompt_CiFlow_NoPushReason_DoesNotLeakSyntheticEventName()
+    {
+        var state = CreateState();
+        state.EnterExecutingTask();
+
+        var action = MonitorTransitions.BuildExecutingTaskRecoveryPrompt(
+            state,
+            reasonText: "Looks like the task finished without a new commit",
+            priorCommentFlow: CommentFlowState.None,
+            priorCiFailureFlow: CiFailureFlowState.InvestigationResults);
+
+        Assert.NotNull(action.Question);
+        Assert.DoesNotContain("ready_unresolved", action.Question);
+        Assert.DoesNotContain("Unexpected event", action.Question);
+        Assert.Contains("without a new commit", action.Question);
+        Assert.Contains("Treat as push completed", action.Choices!);
+    }
+
+    [Fact]
+    public void BuildExecutingTaskRecoveryPrompt_NoActiveFlow_NoPushReason_DoesNotLeakSyntheticEventName()
+    {
+        var state = CreateState();
+        state.EnterExecutingTask();
+
+        var action = MonitorTransitions.BuildExecutingTaskRecoveryPrompt(
+            state,
+            reasonText: "Looks like the task finished without a new commit",
+            priorCommentFlow: CommentFlowState.None,
+            priorCiFailureFlow: CiFailureFlowState.None);
+
+        Assert.NotNull(action.Question);
+        Assert.DoesNotContain("ready_unresolved", action.Question);
+        Assert.DoesNotContain("ExecutingTask/", action.Question);
+        Assert.Contains("without a new commit", action.Question);
+    }
+
+    [Fact]
+    public void RecoverFromUnexpectedState_FromExecutingTaskWithGenuineUnknownEvent_StillSurfacesEventNameForDebugging()
+    {
+        // The truly-unknown event path (an actual bug — agent sent something we don't know
+        // about) keeps surfacing the event name because it's useful debug info. Only the
+        // designed no-push fallback should hide the synthetic name.
+        var state = CreateState();
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.UnresolvedComments.Add(MakeComment());
+        state.EnterExecutingTask();
+
+        var action = MonitorTransitions.ProcessEvent(state, "totally_made_up_event_xyz", null, null);
+
+        Assert.NotNull(action.Question);
+        // Genuine unknown events still get the event name interpolated for debug visibility:
+        Assert.Contains("totally_made_up_event_xyz", action.Question);
+    }
 }
