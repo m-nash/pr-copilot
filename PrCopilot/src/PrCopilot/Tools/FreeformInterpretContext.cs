@@ -20,9 +20,15 @@ internal sealed class FreeformInterpretContext
     public string FlowType { get; set; } = "generic";
 
     /// <summary>
-    /// Why this fallback was chosen. "sampling_classified_as_custom_instruction"
-    /// when sampling decided the text was a custom instruction;
-    /// "sampling_unavailable" when sampling threw or returned null unexpectedly.
+    /// Why the freeform fallback was chosen. Distinguishes the two non-routing outcomes:
+    ///   "sampling_classified_as_custom_instruction" — sampling ran successfully and decided
+    ///     the user's text doesn't map to any of the available choices (it's a deliberate
+    ///     custom instruction the agent should execute).
+    ///   "sampling_unavailable" — sampling didn't run or failed (host capability missing,
+    ///     invalid JSON, exception). The agent must interpret the text without a
+    ///     classification hint.
+    /// The previous version always set this to "sampling_classified_as_custom_instruction"
+    /// regardless of which path was taken, which made the field useless to the agent.
     /// </summary>
     [JsonPropertyName("reason")]
     public string Reason { get; set; } = "sampling_classified_as_custom_instruction";

@@ -117,30 +117,37 @@ public class MonitorFlowTools
     }
 
     /// <summary>
-    /// Attempt to classify freeform text via sampling. If the text maps to a choice,
-    /// returns the mapped choice value. If it's a custom instruction or sampling fails,
-    /// returns null (caller should fall back to agent interpretation via BuildFreeformInterpretAction).
+    /// <summary>
+    /// Attempt to classify freeform text via sampling. Returns the full classification record
+    /// (including <see cref="SamplingHelper.FreeformClassification.Reasoning"/>) when sampling
+    /// runs successfully; returns null when sampling is unavailable (no host capability,
+    /// invalid JSON, exceptions). Callers extract <see cref="SamplingHelper.FreeformClassification.MapsToChoice"/>
+    /// to decide routing — non-null choice means follow Path A, null choice or null classification
+    /// means fall back to <see cref="BuildFreeformInterpretAction"/>. Pass the full classification
+    /// to <see cref="BuildFreeformInterpretAction"/> so the payload accurately distinguishes
+    /// "sampling decided custom" from "sampling unavailable" rather than collapsing both to
+    /// the same label.
     /// </summary>
-    private static async Task<string?> TryClassifyFreeformViaSamplingAsync(
+    private static async Task<SamplingHelper.FreeformClassification?> TryClassifyFreeformViaSamplingAsync(
         McpServer server,
         ElicitChoiceResult result,
         CancellationToken cancellationToken)
     {
-        var classification = await SamplingHelper.ClassifyFreeformAsync(
+        return await SamplingHelper.ClassifyFreeformAsync(
             server,
             result.Value,
             result.OriginalQuestion ?? "",
             result.OriginalChoices,
             cancellationToken);
-
-        return classification?.MapsToChoice;
     }
 
     /// <summary>
     /// Build an execute action for freeform text interpretation by the agent.
-    /// Used when sampling classification returns null for a custom instruction, or when
-    /// sampling classification fails (e.g., invalid JSON, exceptions) and the caller falls
-    /// back to agent interpretation of the user's freeform text.
+    /// Used when sampling classification returns a custom-instruction classification (mapsToChoice=null),
+    /// or when sampling itself was unavailable (returned null) and the caller falls back to agent
+    /// interpretation. Pass <paramref name="classification"/> when sampling succeeded so the payload
+    /// can record the actual outcome (custom_instruction vs unavailable) and the sampling reasoning;
+    /// pass null when sampling was unavailable or failed.
     ///
     /// The agent's chat history has NO record of the elicitation that produced this reply
     /// (MCP elicitation flows separately from chat). Without explicit context, the agent
@@ -149,9 +156,13 @@ public class MonitorFlowTools
     /// gives the agent everything it needs: the comment/CI under discussion, the prompt
     /// shown, the user's reply, and any server-side analysis the user is reacting to.
     /// </summary>
-    internal static MonitorAction BuildFreeformInterpretAction(ElicitChoiceResult result, MonitorState state, string? monitorId = null)
+    internal static MonitorAction BuildFreeformInterpretAction(
+        ElicitChoiceResult result,
+        MonitorState state,
+        SamplingHelper.FreeformClassification? classification = null,
+        string? monitorId = null)
     {
-        var context = BuildFreeformInterpretContext(result, state);
+        var context = BuildFreeformInterpretContext(result, state, classification);
         var pathBInstructions = BuildFreeformPathBInstructions(state);
 
         var instructions =
@@ -185,12 +196,25 @@ public class MonitorFlowTools
     /// Build the structured context payload attached to an interpret_freeform action.
     /// Pulls comment/CI/recommendation context from the current MonitorState so the
     /// agent can resolve pronoun references and understand what the user is reacting to.
+    ///
+    /// <paramref name="classification"/> records the sampling outcome:
+    ///   - non-null with <c>MapsToChoice == null</c> → sampling decided this is a custom instruction
+    ///   - null → sampling was unavailable / failed (caller fell back to agent interpretation)
+    /// The two cases set distinct <see cref="FreeformInterpretContext.Reason"/> /
+    /// <see cref="UserReplyContext.SamplingClassification"/> values so the agent can
+    /// tell whether sampling actually classified the text or simply wasn't available.
     /// </summary>
-    internal static FreeformInterpretContext BuildFreeformInterpretContext(ElicitChoiceResult result, MonitorState state)
+    internal static FreeformInterpretContext BuildFreeformInterpretContext(
+        ElicitChoiceResult result,
+        MonitorState state,
+        SamplingHelper.FreeformClassification? classification = null)
     {
+        var samplingAvailable = classification != null;
         var ctx = new FreeformInterpretContext
         {
-            Reason = "sampling_classified_as_custom_instruction",
+            Reason = samplingAvailable
+                ? "sampling_classified_as_custom_instruction"
+                : "sampling_unavailable",
             Elicitation = new ElicitationContext
             {
                 Question = result.OriginalQuestion ?? "",
@@ -204,7 +228,8 @@ public class MonitorFlowTools
             {
                 Text = result.Value,
                 IsFreeform = true,
-                SamplingClassification = "custom_instruction"
+                SamplingClassification = samplingAvailable ? "custom_instruction" : "unavailable",
+                SamplingReasoning = classification?.Reasoning
             }
         };
 
@@ -754,7 +779,8 @@ public class MonitorFlowTools
                     // Freeform text — try sampling classification first, fall back to agent
                     if (elicitResult.IsFreeform)
                     {
-                        var mappedChoice = await TryClassifyFreeformViaSamplingAsync(server!, elicitResult, cancellationToken);
+                        var classification = await TryClassifyFreeformViaSamplingAsync(server!, elicitResult, cancellationToken);
+                        var mappedChoice = classification?.MapsToChoice;
                         if (mappedChoice != null)
                         {
                             DebugLogger.Log("NextStep", $"Multi-PR sampling classified freeform as choice: {mappedChoice}");
@@ -768,11 +794,12 @@ public class MonitorFlowTools
                             });
                         }
 
-                        // Custom instruction — delegate to agent
+                        // Custom instruction OR sampling unavailable — delegate to agent.
+                        // Pass `classification` so the payload distinguishes the two outcomes.
                         var freeformState = action.MonitorId != null && _sessions.TryGetValue(action.MonitorId, out var fs)
                             ? fs.State : heartbeatSession.State;
                         freeformState.EnterExecutingTask();
-                        var freeformAction = BuildFreeformInterpretAction(elicitResult, freeformState, action.MonitorId);
+                        var freeformAction = BuildFreeformInterpretAction(elicitResult, freeformState, classification, action.MonitorId);
                         return SerializeAction(freeformAction);
                     }
 
@@ -860,7 +887,8 @@ public class MonitorFlowTools
                         // Freeform text — try sampling classification first, fall back to agent
                         if (triggerResult.IsFreeform)
                         {
-                            var mappedChoice = await TryClassifyFreeformViaSamplingAsync(server, triggerResult, cancellationToken);
+                            var classification = await TryClassifyFreeformViaSamplingAsync(server, triggerResult, cancellationToken);
+                            var mappedChoice = classification?.MapsToChoice;
                             if (mappedChoice != null)
                             {
                                 DebugLogger.Log("NextStep", $"Trigger sampling classified freeform as choice: {mappedChoice}");
@@ -869,9 +897,9 @@ public class MonitorFlowTools
                             }
                             else
                             {
-                                // Custom instruction — delegate to agent
+                                // Custom instruction OR sampling unavailable — delegate to agent.
                                 state.EnterExecutingTask();
-                                return SerializeAction(BuildFreeformInterpretAction(triggerResult, state));
+                                return SerializeAction(BuildFreeformInterpretAction(triggerResult, state, classification));
                             }
                         }
 
@@ -988,7 +1016,8 @@ public class MonitorFlowTools
                     // Freeform text — try sampling classification first, fall back to agent
                     if (elicitResult.IsFreeform)
                     {
-                        var mappedChoice = await TryClassifyFreeformViaSamplingAsync(server, elicitResult, cancellationToken);
+                        var classification = await TryClassifyFreeformViaSamplingAsync(server, elicitResult, cancellationToken);
+                        var mappedChoice = classification?.MapsToChoice;
                         if (mappedChoice != null)
                         {
                             DebugLogger.Log("NextStep", $"Sampling classified freeform as choice: {mappedChoice}");
@@ -997,9 +1026,9 @@ public class MonitorFlowTools
                             continue;
                         }
 
-                        // Custom instruction — delegate to agent
+                        // Custom instruction OR sampling unavailable — delegate to agent.
                         state.EnterExecutingTask();
-                        action = BuildFreeformInterpretAction(elicitResult, state);
+                        action = BuildFreeformInterpretAction(elicitResult, state, classification);
                         break;
                     }
 

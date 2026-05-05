@@ -60,12 +60,58 @@ public class FreeformInterpretContextTests
     {
         var state = new MonitorState();
         var result = MakeFreeformResult("Lets write a test that proves this", "What now?", "Fix it");
+        var classification = new SamplingHelper.FreeformClassification
+        {
+            MapsToChoice = null,
+            Reasoning = "User wants to verify the bug before fixing it — doesn't match any choice."
+        };
 
-        var ctx = MonitorFlowTools.BuildFreeformInterpretContext(result, state);
+        var ctx = MonitorFlowTools.BuildFreeformInterpretContext(result, state, classification);
 
         Assert.Equal("Lets write a test that proves this", ctx.UserReply.Text);
         Assert.True(ctx.UserReply.IsFreeform);
         Assert.Equal("custom_instruction", ctx.UserReply.SamplingClassification);
+        Assert.Equal("sampling_classified_as_custom_instruction", ctx.Reason);
+        Assert.Equal(classification.Reasoning, ctx.UserReply.SamplingReasoning);
+    }
+
+    [Fact]
+    public void BuildFreeformInterpretContext_NullClassification_RecordsSamplingUnavailable()
+    {
+        // When sampling fails (host capability missing, invalid JSON, exception),
+        // TryClassifyFreeformViaSamplingAsync returns null and the caller falls back to
+        // BuildFreeformInterpretAction. The payload must reflect that distinction —
+        // previously both outcomes collapsed to "custom_instruction" / "sampling_classified_..."
+        // which made the field useless to the agent.
+        var state = new MonitorState();
+        var result = MakeFreeformResult("Lets write a test that proves this", "What now?", "Fix it");
+
+        var ctx = MonitorFlowTools.BuildFreeformInterpretContext(result, state, classification: null);
+
+        Assert.Equal("unavailable", ctx.UserReply.SamplingClassification);
+        Assert.Equal("sampling_unavailable", ctx.Reason);
+        Assert.Null(ctx.UserReply.SamplingReasoning);
+    }
+
+    [Fact]
+    public void BuildFreeformInterpretContext_ClassificationWithReasoning_PropagatesReasoningToPayload()
+    {
+        // The sampling reasoning gives the agent insight into WHY sampling decided
+        // the text was a custom instruction (vs a near-miss for one of the choices).
+        // Callers shouldn't need to log it separately — it should live in the payload.
+        var state = new MonitorState();
+        var result = MakeFreeformResult("write a test first then fix", "What now?",
+            "Address this comment", "I'll handle it myself");
+        var classification = new SamplingHelper.FreeformClassification
+        {
+            MapsToChoice = null,
+            Reasoning = "User asks for test-first workflow — not a clean match for either choice."
+        };
+
+        var ctx = MonitorFlowTools.BuildFreeformInterpretContext(result, state, classification);
+
+        Assert.Equal("User asks for test-first workflow — not a clean match for either choice.",
+            ctx.UserReply.SamplingReasoning);
     }
 
     [Fact]
