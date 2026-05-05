@@ -502,4 +502,110 @@ public class ExecutingTaskReadyRecoveryTests
         Assert.Equal("apply_recommendation", action.Task);
         Assert.Null(state.ExecutingTaskExpectedCompletion);
     }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Waiting-comment recovery: when an interpret_freeform / execute task
+    // runs while ActiveWaitingComment is set (CommentFlow==None and
+    // CiFailureFlow==None — the normal post-reply waiting state), the
+    // recovery must preserve the waiting context and offer the original
+    // Resolve / Go-back choices instead of clearing ActiveWaitingComment
+    // and offering only generic Resume/Stop. Reviewer comment #6 on PR #51.
+    // ────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void BuildExecutingTaskRecoveryPrompt_WaitingComment_PreservesContextAndOffersWaitingChoices()
+    {
+        var state = CreateState();
+        var c = MakeComment();
+        state.ActiveWaitingComment = c;
+        // CommentFlow == None, CiFailureFlow == None — the normal waiting-for-reply state
+        state.EnterExecutingTask();
+
+        var action = MonitorTransitions.BuildExecutingTaskRecoveryPrompt(
+            state,
+            reasonText: "Looks like the task finished without a new commit",
+            priorCommentFlow: CommentFlowState.None,
+            priorCiFailureFlow: CiFailureFlowState.None);
+
+        Assert.Equal("ask_user", action.Action);
+        Assert.NotNull(action.Choices);
+        // Original waiting-comment choices must be offered:
+        Assert.Contains("Resolve this thread", action.Choices!);
+        Assert.Contains("Go back to monitoring", action.Choices!);
+        // ActiveWaitingComment must NOT be wiped (otherwise ProcessWaitingCommentChoice
+        // can't dispatch the user's selection).
+        Assert.Equal(c, state.ActiveWaitingComment);
+    }
+
+    [Fact]
+    public void BuildExecutingTaskRecoveryPrompt_WaitingComment_ResolveChoice_DispatchesToProcessWaitingCommentChoice()
+    {
+        // End-to-end: after the recovery prompt offers "Resolve this thread", the user's
+        // selection must round-trip through ChoiceValueMap → ProcessUserChoice →
+        // ProcessWaitingCommentChoice → BuildResolveThreadAction. If ActiveWaitingComment
+        // is wiped or CommentFlow is set, the dispatcher routes wrong.
+        var state = CreateState();
+        var c = MakeComment();
+        state.ActiveWaitingComment = c;
+        state.EnterExecutingTask();
+
+        var prompt = MonitorTransitions.BuildExecutingTaskRecoveryPrompt(
+            state,
+            reasonText: "Looks like the task finished without a new commit",
+            priorCommentFlow: CommentFlowState.None,
+            priorCiFailureFlow: CiFailureFlowState.None);
+
+        Assert.Equal("ask_user", prompt.Action);
+        // The helper only builds the action; the caller (RecoverFromUnexpectedState or
+        // BuildRecoverFromReadyResolution) sets AwaitingUser. Simulate that here so the
+        // follow-up user_chose dispatches correctly.
+        state.CurrentState = MonitorStateId.AwaitingUser;
+
+        // Simulate the user picking "Resolve this thread"
+        var choiceValue = MonitorTransitions.ChoiceValueMap["Resolve this thread"];
+        var followUp = MonitorTransitions.ProcessEvent(state, "user_chose", choiceValue, null);
+
+        // Should have dispatched to BuildResolveThreadAction (auto_execute resolve_thread).
+        Assert.Equal("auto_execute", followUp.Action);
+        Assert.Equal("resolve_thread", followUp.Task);
+    }
+
+    [Fact]
+    public void BuildExecutingTaskRecoveryPrompt_NoFlowAndNoWaitingComment_FallsBackToGenericChoices()
+    {
+        // Regression: the truly-no-context branch (no flow, no waiting comment) still
+        // produces only Resume/Stop and clears ActiveWaitingComment (already null here).
+        var state = CreateState();
+        state.EnterExecutingTask();
+
+        var action = MonitorTransitions.BuildExecutingTaskRecoveryPrompt(
+            state,
+            reasonText: "Looks like the task finished without a new commit",
+            priorCommentFlow: CommentFlowState.None,
+            priorCiFailureFlow: CiFailureFlowState.None);
+
+        Assert.NotNull(action.Choices);
+        Assert.DoesNotContain("Resolve this thread", action.Choices!);
+        Assert.Contains("Resume monitoring", action.Choices!);
+    }
+
+    [Fact]
+    public void RecoverFromReadyResolution_PushDetected_WaitingComment_PreservesContextAndAsksUser()
+    {
+        // If HEAD advanced while we were in a waiting-comment state (the agent pushed
+        // something while elicit-freeform was running), we shouldn't auto-dispatch any
+        // completion — we have no flow, just a waiting thread. Surface the waiting-comment
+        // recovery prompt instead, so the user can resolve or go back.
+        var state = CreateState();
+        var c = MakeComment();
+        state.ActiveWaitingComment = c;
+        state.EnterExecutingTask();
+
+        var action = MonitorTransitions.BuildRecoverFromReadyResolution(state, headAdvanced: true);
+
+        Assert.Equal("ask_user", action.Action);
+        Assert.NotNull(action.Choices);
+        Assert.Contains("Resolve this thread", action.Choices!);
+        Assert.Equal(c, state.ActiveWaitingComment);
+    }
 }

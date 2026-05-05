@@ -431,7 +431,30 @@ public static class MonitorTransitions
             };
         }
 
-        // No active flow — generic recovery
+        // Waiting-for-reply state: ActiveWaitingComment is set without an active flow
+        // (the comment flow ended when the reply was posted; the comment is now waiting
+        // for the reviewer's response). BuildWaitingCommentAction puts us here. The
+        // recovery must preserve ActiveWaitingComment and offer the original Resolve /
+        // Go-back choices, otherwise a stray ready / unknown event clears the waiting
+        // context and the user can no longer recover the original choices.
+        if (state.ActiveWaitingComment != null)
+        {
+            return new MonitorAction
+            {
+                Action = "ask_user",
+                Question = $"{reasonText} while a thread is waiting for the reviewer's reply. " +
+                    "Resolve the thread now, or go back to monitoring.",
+                Choices =
+                [
+                    "Resolve this thread",
+                    "Go back to monitoring",
+                    "Stop monitoring"
+                ],
+                Context = state.ActiveWaitingComment
+            };
+        }
+
+        // No active flow and no waiting comment — generic recovery
         state.ActiveWaitingComment = null;
         return new MonitorAction
         {
@@ -508,6 +531,20 @@ public static class MonitorTransitions
         {
             DebugLogger.Log("AutoExec", "recover_from_ready: HEAD advanced + CI flow → dispatching push_completed");
             return ProcessEvent(state, "push_completed", null, null);
+        }
+
+        // Waiting-comment case (no flow but ActiveWaitingComment set) — must NOT auto-resume,
+        // because that would clear the waiting context and the user loses the original
+        // Resolve / Go-back choices. Surface the waiting-comment recovery prompt instead.
+        if (headAdvanced && state.ActiveWaitingComment != null)
+        {
+            DebugLogger.Log("AutoExec", "recover_from_ready: HEAD advanced + waiting comment → surfacing resolve/go-back prompt");
+            state.CurrentState = MonitorStateId.AwaitingUser;
+            return BuildExecutingTaskRecoveryPrompt(
+                state,
+                reasonText: "The task pushed a commit while a thread was waiting for the reviewer's reply",
+                CommentFlowState.None,
+                CiFailureFlowState.None);
         }
 
         if (headAdvanced)
