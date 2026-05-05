@@ -608,4 +608,100 @@ public class ExecutingTaskReadyRecoveryTests
         Assert.Contains("Resolve this thread", action.Choices!);
         Assert.Equal(c, state.ActiveWaitingComment);
     }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Recovery prompt's "Skip this comment" must advance to the next comment
+    // in every comment-flow sub-state, not just AddressAllIterating. Reviewer
+    // comment #7 on PR #51: SingleCommentPrompt / PickComment / PickRemaining
+    // previously fell through to TransitionToPolling, abandoning the rest of
+    // the flow.
+    // ────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void ProcessEvent_SkipChoice_FromSingleCommentPrompt_AdvancesInsteadOfAbandoningFlow()
+    {
+        var state = CreateState();
+        state.UnresolvedComments.Add(MakeComment(id: "c1"));
+        state.UnresolvedComments.Add(MakeComment(id: "c2"));
+        state.CommentFlow = CommentFlowState.SingleCommentPrompt;
+        state.CurrentCommentIndex = 0;
+        state.CurrentState = MonitorStateId.AwaitingUser;
+
+        var skipValue = MonitorTransitions.ChoiceValueMap["Skip this comment"];
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", skipValue, null);
+
+        // Should have advanced to the next comment, NOT abandoned the whole flow.
+        Assert.True(state.CurrentCommentIndex >= 1);
+        Assert.NotEqual(MonitorStateId.Polling, state.CurrentState);
+    }
+
+    [Fact]
+    public void ProcessEvent_SkipChoice_FromPickComment_AdvancesInsteadOfAbandoningFlow()
+    {
+        var state = CreateState();
+        state.UnresolvedComments.Add(MakeComment(id: "c1"));
+        state.UnresolvedComments.Add(MakeComment(id: "c2"));
+        state.CommentFlow = CommentFlowState.PickComment;
+        state.CurrentCommentIndex = 0;
+        state.CurrentState = MonitorStateId.AwaitingUser;
+
+        var skipValue = MonitorTransitions.ChoiceValueMap["Skip this comment"];
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", skipValue, null);
+
+        Assert.True(state.CurrentCommentIndex >= 1);
+        Assert.NotEqual(MonitorStateId.Polling, state.CurrentState);
+    }
+
+    [Fact]
+    public void ProcessEvent_SkipChoice_FromPickRemaining_AdvancesInsteadOfAbandoningFlow()
+    {
+        var state = CreateState();
+        state.UnresolvedComments.Add(MakeComment(id: "c1"));
+        state.UnresolvedComments.Add(MakeComment(id: "c2"));
+        state.CommentFlow = CommentFlowState.PickRemaining;
+        state.CurrentCommentIndex = 0;
+        state.CurrentState = MonitorStateId.AwaitingUser;
+
+        var skipValue = MonitorTransitions.ChoiceValueMap["Skip this comment"];
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", skipValue, null);
+
+        Assert.True(state.CurrentCommentIndex >= 1);
+        Assert.NotEqual(MonitorStateId.Polling, state.CurrentState);
+    }
+
+    [Fact]
+    public void ProcessEvent_SkipChoice_FromAddressAllIterating_StillRoutesToSkipAndAdvance()
+    {
+        // Regression: AddressAllIterating's existing skip handling must remain unchanged.
+        var state = CreateState();
+        state.UnresolvedComments.Add(MakeComment(id: "c1"));
+        state.UnresolvedComments.Add(MakeComment(id: "c2"));
+        state.CommentFlow = CommentFlowState.AddressAllIterating;
+        state.CurrentCommentIndex = 0;
+        state.CurrentState = MonitorStateId.AwaitingUser;
+
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "skip", null);
+
+        Assert.True(state.CurrentCommentIndex >= 1);
+        Assert.NotEqual(MonitorStateId.Polling, state.CurrentState);
+    }
+
+    [Fact]
+    public void ProcessEvent_SkipChoice_FromExplainAllIterating_StillRoutesToAdvanceExplainAll()
+    {
+        // Regression: ExplainAllIterating intentionally uses AdvanceExplainAll (auto-emits
+        // the next explain_comment task) rather than re-prompting the user. Don't break that.
+        var state = CreateState();
+        state.UnresolvedComments.Add(MakeComment(id: "c1"));
+        state.UnresolvedComments.Add(MakeComment(id: "c2"));
+        state.CommentFlow = CommentFlowState.ExplainAllIterating;
+        state.CurrentCommentIndex = 0;
+        state.CurrentState = MonitorStateId.AwaitingUser;
+
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "skip", null);
+
+        // AdvanceExplainAll auto-emits an execute task for the next comment (NOT ask_user).
+        Assert.Equal("execute", action.Action);
+        Assert.Equal("explain_comment", action.Task);
+    }
 }

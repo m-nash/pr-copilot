@@ -696,6 +696,17 @@ public static class MonitorTransitions
             (CommentFlowState.ExplainAllIterating, "skip") => AdvanceExplainAll(state),
             (CommentFlowState.ExplainAllIterating, "done") => TransitionToPolling(state),
 
+            // "Skip this comment" from the ExecutingTask recovery prompt is offered for
+            // every comment-flow sub-state. AddressAllIterating / ExplainAllIterating
+            // already handle skip explicitly above with their own semantics. The remaining
+            // sub-states (SingleCommentPrompt, PickComment, PickRemaining) previously fell
+            // through to TransitionToPolling, which abandoned the rest of the comment flow.
+            // Route them through SkipAndAdvanceComment so the user can drop the active
+            // thread and continue with whatever comments remain.
+            (CommentFlowState.SingleCommentPrompt, "skip") => SkipAndAdvanceComment(state),
+            (CommentFlowState.PickComment, "skip") => SkipAndAdvanceComment(state),
+            (CommentFlowState.PickRemaining, "skip") => SkipAndAdvanceComment(state),
+
             (CommentFlowState.PickComment, _) => HandlePickedComment(state, choice),
             (CommentFlowState.PickRemaining, "continue") => ContinueToNextComment(state),
             (CommentFlowState.PickRemaining, "done") => TransitionToPolling(state),
