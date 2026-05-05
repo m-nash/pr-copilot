@@ -267,4 +267,73 @@ public class FreeformInterpretContextTests
 
         Assert.Equal("pr-owner-repo-42", action.MonitorId);
     }
+
+    [Fact]
+    public void BuildFreeformInterpretContext_WaitingForReply_ActiveCommentSetButNoCommentFlow_StillAttachesComment()
+    {
+        // Regression: ProcessWaitingCommentChoice operates with state.ActiveWaitingComment set
+        // but state.CommentFlow == None (the comment flow ended when the reply was posted; the
+        // comment is now waiting for the reviewer's response). A freeform reply during THAT
+        // elicitation must still carry the comment context — otherwise the agent loses sight
+        // of which comment thread is being discussed, reintroducing the original context-loss bug.
+        var state = new MonitorState
+        {
+            CommentFlow = CommentFlowState.None,
+            ActiveWaitingComment = new CommentInfo
+            {
+                Id = "thread-1",
+                Author = "human-reviewer",
+                FilePath = "src/Service.cs",
+                Line = 42,
+                Body = "Are you sure this handles the null case?",
+                Url = "https://github.com/o/r/pull/1#discussion_r999"
+            }
+        };
+        var result = MakeFreeformResult("yes, it does — see the test I added", "What do you want to do?",
+            "Resolve this thread", "Go back to monitoring");
+
+        var ctx = MonitorFlowTools.BuildFreeformInterpretContext(result, state);
+
+        Assert.Equal("comment", ctx.FlowType);
+        Assert.NotNull(ctx.Comment);
+        Assert.Equal("human-reviewer", ctx.Comment!.Author);
+        Assert.Equal("src/Service.cs", ctx.Comment.FilePath);
+        Assert.Equal(42, ctx.Comment.Line);
+        Assert.Equal("Are you sure this handles the null case?", ctx.Comment.Body);
+    }
+
+    [Fact]
+    public void BuildFreeformInterpretContext_CommentFlow_PrefersUnresolvedCommentsOverActiveWaiting()
+    {
+        // When a comment flow is active AND ActiveWaitingComment happens to be set
+        // (carried over from a previous waiting-for-reply cycle), the active comment
+        // flow takes priority — that's what the user is currently being prompted about.
+        var state = new MonitorState
+        {
+            CommentFlow = CommentFlowState.SingleCommentPrompt,
+            CurrentCommentIndex = 0,
+            ActiveWaitingComment = new CommentInfo
+            {
+                Id = "stale-waiting",
+                Author = "old-reviewer",
+                FilePath = "src/Old.cs",
+                Body = "old discussion"
+            }
+        };
+        state.UnresolvedComments.Add(new CommentInfo
+        {
+            Id = "current",
+            Author = "current-reviewer",
+            FilePath = "src/New.cs",
+            Body = "current discussion"
+        });
+        var result = MakeFreeformResult("address it", "How?", "Address this comment");
+
+        var ctx = MonitorFlowTools.BuildFreeformInterpretContext(result, state);
+
+        Assert.Equal("comment", ctx.FlowType);
+        Assert.NotNull(ctx.Comment);
+        Assert.Equal("current-reviewer", ctx.Comment!.Author);
+        Assert.Equal("src/New.cs", ctx.Comment.FilePath);
+    }
 }

@@ -258,6 +258,33 @@ public class MonitorFlowTools
                 };
             }
         }
+        // Waiting-for-reply branch: ProcessWaitingCommentChoice operates with
+        // ActiveWaitingComment set but CommentFlow == None (the comment flow ended
+        // when the reply was posted; the comment is now waiting for the reviewer's
+        // response). A freeform reply during that elicitation must still carry the
+        // comment context — otherwise the agent loses sight of which thread is
+        // being discussed, reintroducing the original context-loss bug for that flow.
+        else if (state.ActiveWaitingComment != null)
+        {
+            ctx.FlowType = "comment";
+            var c = state.ActiveWaitingComment;
+            ctx.Comment = new CommentContext
+            {
+                Author = c.Author,
+                FilePath = c.FilePath,
+                Line = c.Line,
+                Body = c.Body,
+                Url = c.Url
+            };
+
+            if (!string.IsNullOrWhiteSpace(state.LastRecommendation))
+            {
+                ctx.ServerAnalysis = new ServerAnalysisContext
+                {
+                    Recommendation = state.LastRecommendation
+                };
+            }
+        }
         // CI failure flow: attach failed checks + investigation/recommendation
         else if (state.CiFailureFlow != CiFailureFlowState.None)
         {
