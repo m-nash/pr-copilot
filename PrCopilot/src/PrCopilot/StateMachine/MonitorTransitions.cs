@@ -193,6 +193,13 @@ public static class MonitorTransitions
             // event, otherwise falls through to flow-aware recovery prompt.
             (MonitorStateId.ExecutingTask, "ready") => BuildRecoverFromReadyAction(state),
 
+            // Same recovery for the CI apply_fix task, which runs in ApplyingFix and tells
+            // the agent to push before reporting push_completed. A post-push hook firing
+            // event=ready must be recognized as a successful push (HEAD advanced + CI flow
+            // → dispatch push_completed) instead of falling through to RecoverFromUnexpectedState
+            // which wipes CiFailureFlow.
+            (MonitorStateId.ApplyingFix, "ready") => BuildRecoverFromReadyAction(state),
+
             // Recovery: agent sent task_complete from AwaitingUser (skipped a tool call)
             (MonitorStateId.AwaitingUser, "task_complete") => RecoverFromUnexpectedTaskComplete(state),
 
@@ -1335,7 +1342,7 @@ public static class MonitorTransitions
 
     private static MonitorAction BeginApplyFix(MonitorState state)
     {
-        state.CurrentState = MonitorStateId.ApplyingFix;
+        state.EnterApplyingFix();
         return new MonitorAction
         {
             Action = "execute",

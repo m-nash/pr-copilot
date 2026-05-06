@@ -167,6 +167,24 @@ public class MonitorState
     public void EnterExecutingTask()
     {
         CurrentState = MonitorStateId.ExecutingTask;
+        SnapshotForRecovery();
+    }
+
+    /// <summary>
+    /// Transition to <see cref="MonitorStateId.ApplyingFix"/> and snapshot HEAD for
+    /// post-push recovery. The CI fix flow's apply_fix task tells the agent to push
+    /// before reporting push_completed; if a post-push hook fires event=ready instead,
+    /// the (ApplyingFix, "ready") recovery uses this snapshot to detect that the push
+    /// happened and re-dispatch as push_completed (rather than wiping CiFailureFlow).
+    /// </summary>
+    public void EnterApplyingFix()
+    {
+        CurrentState = MonitorStateId.ApplyingFix;
+        SnapshotForRecovery();
+    }
+
+    private void SnapshotForRecovery()
+    {
         HeadShaAtTaskStart = HeadSha;
         // Reset expected completion to "ambiguous" on every entry. Emitters that know their
         // task's single completion event must set this AFTER calling EnterExecutingTask.
