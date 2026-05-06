@@ -529,7 +529,10 @@ public static class MonitorTransitions
     /// - <c>headAdvanced + no flow</c>: resume polling.
     /// - <c>!headAdvanced</c>: build the no-push recovery prompt.
     /// </summary>
-    internal static MonitorAction BuildRecoverFromReadyResolution(MonitorState state, bool headAdvanced)
+    internal static MonitorAction BuildRecoverFromReadyResolution(
+        MonitorState state,
+        bool headAdvanced,
+        bool headRefreshFailed = false)
     {
         if (headAdvanced && state.CommentFlow != CommentFlowState.None)
         {
@@ -578,14 +581,23 @@ public static class MonitorTransitions
             return ProcessEvent(state, "user_chose", "resume", null);
         }
 
-        // No push detected — flow-aware no-push recovery prompt.
-        DebugLogger.Log("AutoExec", "recover_from_ready: HEAD unchanged — building flow-aware no-push recovery prompt");
+        // No push detected — flow-aware no-push recovery prompt. If we couldn't
+        // refresh HEAD from GitHub (or never captured a snapshot), we can't actually
+        // know whether a push happened — surface an uncertainty prompt so the user
+        // can pick the correct completion path explicitly instead of being told
+        // "finished without a new commit" (which may be wrong).
+        var cannotDetermineHeadAdvance = headRefreshFailed
+            || string.IsNullOrWhiteSpace(state.HeadShaAtTaskStart);
+        var noPushReason = cannotDetermineHeadAdvance
+            ? "I couldn't verify whether you pushed (HEAD refresh from GitHub failed or no baseline was captured)"
+            : "Looks like the task finished without a new commit";
+        DebugLogger.Log("AutoExec", $"recover_from_ready: HEAD unchanged — building flow-aware recovery prompt (cannotDetermine={cannotDetermineHeadAdvance})");
         var noPushPriorCommentFlow = state.CommentFlow;
         var noPushPriorCiFailureFlow = state.CiFailureFlow;
         state.CurrentState = MonitorStateId.AwaitingUser;
         return BuildExecutingTaskRecoveryPrompt(
             state,
-            reasonText: "Looks like the task finished without a new commit",
+            reasonText: noPushReason,
             noPushPriorCommentFlow,
             noPushPriorCiFailureFlow);
     }

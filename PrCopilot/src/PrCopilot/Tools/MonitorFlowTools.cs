@@ -1611,15 +1611,19 @@ public class MonitorFlowTools
                     //   5. HEAD did not advance → flow-aware "no new commit" recovery prompt.
                     var snapshotSha = state.HeadShaAtTaskStart;
                     string? latestSha = state.HeadSha;
+                    bool headRefreshFailed = false;
                     try
                     {
                         var freshPr = await PrStatusFetcher.FetchPrInfoAsync(state.Owner, state.Repo, state.PrNumber);
                         if (!string.IsNullOrWhiteSpace(freshPr.HeadSha))
                             latestSha = freshPr.HeadSha;
+                        else
+                            headRefreshFailed = true;
                     }
                     catch (Exception ex)
                     {
                         DebugLogger.Error("AutoExec", $"recover_from_ready: HEAD refresh failed: {ex.Message}");
+                        headRefreshFailed = true;
                     }
 
                     if (!string.IsNullOrWhiteSpace(latestSha) && latestSha != state.HeadSha)
@@ -1632,7 +1636,7 @@ public class MonitorFlowTools
                         && !string.IsNullOrWhiteSpace(latestSha)
                         && !string.Equals(snapshotSha, latestSha, StringComparison.Ordinal);
 
-                    return MonitorTransitions.BuildRecoverFromReadyResolution(state, headAdvanced);
+                    return MonitorTransitions.BuildRecoverFromReadyResolution(state, headAdvanced, headRefreshFailed);
                 }
             case "resolve_thread":
                 {
