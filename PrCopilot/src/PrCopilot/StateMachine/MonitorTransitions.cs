@@ -686,7 +686,7 @@ public static class MonitorTransitions
             return ProcessCommentAddressed(state, null);
 
         if (choice == "treat_as_replied_externally")
-            return SkipAndAdvanceComment(state);
+            return AdvanceAfterComment(state, "Comment replied externally");
 
         return (state.CommentFlow, choice) switch
         {
