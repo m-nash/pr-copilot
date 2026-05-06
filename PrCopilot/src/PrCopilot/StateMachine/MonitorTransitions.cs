@@ -223,6 +223,16 @@ public static class MonitorTransitions
         // If we just auto-resolved a thread after addressing/replying to a comment, advance
         if (state.PendingResolveAfterAddress)
         {
+            // Waiting-thread resolution: ProcessCommentAddressed/ProcessCommentReplied
+            // entered their waiting branch (CommentFlow == None && ActiveWaitingComment != null)
+            // and set PendingResolveAfterAddress. There's no in-flow comment to advance past
+            // — UnresolvedComments[CurrentCommentIndex] points to a stale entry from a prior
+            // flow, so the indexing logic below would re-request review on an unrelated
+            // reviewer or surface PickRemaining for unrelated comments. Just clean state and
+            // return to polling. See PR #51 reviewer comment on MonitorTransitions.cs:921.
+            if (state.CommentFlow == CommentFlowState.None)
+                return TransitionToPolling(state);
+
             var summary = state.PendingResolveSummary ?? "Comment addressed";
             state.PendingResolveAfterAddress = false;
             state.ActiveWaitingComment = null;
@@ -246,6 +256,13 @@ public static class MonitorTransitions
         // If we just posted a reply (no resolve) — advance to next comment or re-request
         if (state.PendingAdvanceAfterReply != null)
         {
+            // Same waiting-thread guard as PendingResolveAfterAddress above. The waiting
+            // branch of ProcessCommentReplied (human reviewer) sets PendingAdvanceAfterReply
+            // without entering a comment flow; the indexed lookup below would target a
+            // stale comment from a prior flow.
+            if (state.CommentFlow == CommentFlowState.None)
+                return TransitionToPolling(state);
+
             var summary = state.PendingAdvanceAfterReply;
             state.PendingAdvanceAfterReply = null;
 
