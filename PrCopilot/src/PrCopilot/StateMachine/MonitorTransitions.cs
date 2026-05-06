@@ -1155,10 +1155,20 @@ public static class MonitorTransitions
     /// emit a compose_reply task. The server's sampling handler intercepts this and composes
     /// the reply via sampling (stored in PendingReplyText). Sampling support is required for
     /// this flow; if sampling is unavailable, the task will fail with no agent fallback.
+    ///
+    /// IMPORTANT: This is a re-entry — the caller (ProcessCommentAddressed/ProcessCommentReplied)
+    /// runs while CurrentState is already ExecutingTask. We must NOT call EnterExecutingTask
+    /// here because that would overwrite HeadShaAtTaskStart (with the still-stale state.HeadSha,
+    /// since the server hasn't refreshed since the agent pushed) and reset
+    /// ExecutingTaskExpectedCompletion to null. compose_reply itself never touches git, so the
+    /// prior task's recovery snapshot must be preserved — otherwise an event=ready arriving
+    /// during compose_reply (from a post-push hook) misattributes the original push to
+    /// compose_reply and surfaces a bogus recovery prompt or auto-dispatches the wrong
+    /// completion event. See PR #51 reviewer comment on MonitorTransitions.cs:1109.
     /// </summary>
     private static MonitorAction EmitComposeReplyAction(MonitorState state, CommentInfo c, string completionEvent)
     {
-        state.EnterExecutingTask();
+        state.CurrentState = MonitorStateId.ExecutingTask;
         state.PendingCompletionEvent = completionEvent;
         return new MonitorAction
         {
