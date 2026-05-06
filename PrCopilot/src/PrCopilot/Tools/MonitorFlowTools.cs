@@ -369,6 +369,36 @@ public class MonitorFlowTools
                 "If the instruction is some other non-reply task (analysis, questions, etc.), execute it and call pr_monitor_next_step with event='task_complete'.";
         }
 
+        // Waiting-for-reply context — ActiveWaitingComment is set but CommentFlow has ended.
+        // Mirror the comment-flow branch so freeform replies that produce code changes or
+        // additional reply text still route through comment_addressed/comment_replied (which
+        // act on ActiveWaitingComment in this state) instead of falling into the generic
+        // task_complete branch — the latter clears ActiveWaitingComment in ProcessTaskComplete
+        // and drops the thread context entirely. See PR #51 reviewer comment on
+        // MonitorFlowTools.cs:183.
+        if (state.ActiveWaitingComment != null)
+        {
+            var c = state.ActiveWaitingComment;
+            var commentContext = $" Active waiting comment from {c.Author} on {c.FilePath}:{c.Line}: \"{c.Body}\". URL: {c.Url}.";
+
+            return "**Path B — custom instruction:** If the text is a custom instruction that doesn't map to a single choice " +
+                "(or has extra instructions beyond the choice), execute the user's request directly. " +
+                "If the instruction involves code changes: STOP and present your changes to the user for review before committing — " +
+                "honor the user's custom instructions for git workflow. Only commit/push after the user approves. " +
+                "After pushing, draft the reply text describing what was changed and link the commit " +
+                $"(use `git rev-parse HEAD` to get the SHA, then format as {state.Owner}/{state.Repo}@SHA). " +
+                "Do NOT post the reply yourself — pass it via data='{\"reply_text\": \"your reply\"}' in pr_monitor_next_step. " +
+                "The server will post it to the correct review thread. " +
+                "Then call pr_monitor_next_step with event='comment_addressed' and data containing reply_text." +
+                commentContext +
+                MonitorTransitions.CopilotFooter(state) +
+                " If the instruction does NOT involve code changes: " +
+                "If the instruction is to reply to the waiting comment without changing code (e.g., clarification or pushback), " +
+                "draft the reply text and pass it via data='{\"reply_text\": \"your reply\"}' in pr_monitor_next_step — " +
+                "the server will post it. Then call pr_monitor_next_step with event='comment_replied' and data containing reply_text. " +
+                "If the instruction is some other non-reply task (analysis, questions, etc.), execute it and call pr_monitor_next_step with event='task_complete'.";
+        }
+
         // No active flow — generic fallback
         return "**Path B — custom instruction:** If the text is a custom instruction that doesn't map to a single choice " +
             "(or has extra instructions beyond the choice), execute the user's request directly. " +

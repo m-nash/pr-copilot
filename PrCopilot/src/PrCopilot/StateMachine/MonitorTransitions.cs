@@ -898,6 +898,23 @@ public static class MonitorTransitions
 
     private static MonitorAction ProcessCommentAddressed(MonitorState state, object? data)
     {
+        // Waiting-comment context: ActiveWaitingComment is set but no comment flow is
+        // active (the original flow ended; the thread is awaiting reviewer reply). The
+        // index-based lookup below would either miss or operate on a different comment,
+        // so route the resolve through ActiveWaitingComment directly.
+        // See PR #51 reviewer comment on MonitorFlowTools.cs:183.
+        if (state.CommentFlow == CommentFlowState.None && state.ActiveWaitingComment != null)
+        {
+            var waiting = state.ActiveWaitingComment;
+            if (string.IsNullOrWhiteSpace(state.PendingReplyText))
+                return EmitComposeReplyAction(state, waiting, "comment_addressed");
+
+            waiting.IsAddressed = true;
+            state.PendingResolveAfterAddress = true;
+            state.PendingResolveSummary = "Comment addressed";
+            return BuildResolveThreadAction(state, waiting);
+        }
+
         var addressedComment = state.UnresolvedComments.Count > state.CurrentCommentIndex
             ? state.UnresolvedComments[state.CurrentCommentIndex]
             : null;
@@ -921,6 +938,34 @@ public static class MonitorTransitions
 
     private static MonitorAction ProcessCommentReplied(MonitorState state)
     {
+        // Waiting-comment context: see ProcessCommentAddressed. Route through the
+        // ActiveWaitingComment so freeform replies on a waiting thread post on the
+        // correct thread instead of falling through to AdvanceAfterComment.
+        if (state.CommentFlow == CommentFlowState.None && state.ActiveWaitingComment != null)
+        {
+            var waiting = state.ActiveWaitingComment;
+            if (string.IsNullOrWhiteSpace(state.PendingReplyText))
+                return EmitComposeReplyAction(state, waiting, "comment_replied");
+
+            if (PrStatusFetcher.IsBotReviewer(waiting.Author))
+            {
+                waiting.IsAddressed = true;
+                state.PendingResolveAfterAddress = true;
+                state.PendingResolveSummary = "Replied to comment";
+                return BuildResolveThreadAction(state, waiting);
+            }
+
+            // Human reviewer — post the reply on the existing waiting thread without
+            // resolving. The thread stays in WaitingForReplyComments.
+            if (!state.WaitingForReplyComments.Any(c => c.Id == waiting.Id))
+            {
+                waiting.IsWaitingForReply = true;
+                state.WaitingForReplyComments.Add(waiting);
+            }
+            state.PendingAdvanceAfterReply = "Replied to comment";
+            return BuildPostReplyAction(state, waiting);
+        }
+
         // Agent replied to a comment (pushback/clarification) without code changes.
         // Auto-resolve if the reviewer is a bot (they won't reply back).
         // Track as waiting-for-reply if the reviewer is human.
