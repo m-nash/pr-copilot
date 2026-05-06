@@ -590,6 +590,15 @@ public static class MonitorTransitions
     private static MonitorAction ProcessUserChoice(MonitorState state, string? choice, object? data)
     {
         DebugLogger.Log("StateMachine", $"ProcessUserChoice: choice={choice ?? "null"}, commentFlow={state.CommentFlow}, activeWaiting={state.ActiveWaitingComment != null}");
+
+        // "Stop monitoring" is offered in every flow-preserving recovery prompt
+        // (BuildExecutingTaskRecoveryPrompt). It must take precedence over per-flow
+        // routing — otherwise ProcessCommentChoice/ProcessCiFailureChoice/
+        // ProcessWaitingCommentChoice swallow "stop" via their fall-through branches
+        // and silently resume polling instead of stopping the monitor.
+        if (choice == "stop")
+            return StopMonitoring(state);
+
         // Route based on the active flow
         if (state.CommentFlow != CommentFlowState.None)
             return ProcessCommentChoice(state, choice);
