@@ -117,7 +117,6 @@ public class MonitorFlowTools
     }
 
     /// <summary>
-    /// <summary>
     /// Attempt to classify freeform text via sampling. Returns the full classification record
     /// (including <see cref="SamplingHelper.FreeformClassification.Reasoning"/>) when sampling
     /// runs successfully; returns null when sampling is unavailable (no host capability,
