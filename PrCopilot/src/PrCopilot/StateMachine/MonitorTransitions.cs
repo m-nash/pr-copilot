@@ -116,7 +116,7 @@ public static class MonitorTransitions
         ["I'll handle them myself"] = "handle_myself",
         ["Skip this comment"] = "skip",
         ["Treat as comment addressed"] = "treat_as_addressed",
-        ["Treat as comment replied"] = "treat_as_replied_externally",
+        ["Treat as replied externally"] = "treat_as_replied_externally",
         ["Done — resume monitoring"] = "done",
         ["Address next comment"] = "continue",
         ["I'll handle the rest myself"] = "done",
@@ -431,7 +431,7 @@ public static class MonitorTransitions
                 Choices =
                 [
                     "Treat as comment addressed",
-                    "Treat as comment replied",
+                    "Treat as replied externally",
                     "Skip this comment",
                     "Resume monitoring",
                     "Stop monitoring"

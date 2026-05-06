@@ -324,7 +324,7 @@ public class ExecutingTaskReadyRecoveryTests
 
         Assert.NotNull(action.Choices);
         Assert.Contains("Treat as comment addressed", action.Choices!);
-        Assert.Contains("Treat as comment replied", action.Choices!);
+        Assert.Contains("Treat as replied externally", action.Choices!);
     }
 
     [Fact]
@@ -332,13 +332,13 @@ public class ExecutingTaskReadyRecoveryTests
     {
         Assert.Equal(
             "treat_as_replied_externally",
-            MonitorTransitions.ChoiceValueMap["Treat as comment replied"]);
+            MonitorTransitions.ChoiceValueMap["Treat as replied externally"]);
     }
 
     [Fact]
     public void ProcessEvent_TreatAsRepliedExternally_AdvancesWithoutPostingOrResolving()
     {
-        // Two unresolved comments. User picks "Treat as comment replied" on the first —
+        // Two unresolved comments. User picks "Treat as replied externally" on the first —
         // we should NOT post a reply (no compose_reply / post_reply / resolve_thread action),
         // we should NOT resolve the thread, and we SHOULD advance to the next comment.
         var state = CreateState();
@@ -416,7 +416,7 @@ public class ExecutingTaskReadyRecoveryTests
         Assert.Equal("ask_user", action.Action);
         Assert.NotNull(action.Choices);
         Assert.Contains("Treat as comment addressed", action.Choices!);
-        Assert.Contains("Treat as comment replied", action.Choices!);
+        Assert.Contains("Treat as replied externally", action.Choices!);
     }
 
     [Fact]
