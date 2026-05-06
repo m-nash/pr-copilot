@@ -163,6 +163,23 @@ public class SamplingHelperTests
     }
 
     [Fact]
+    public async Task ClassifyFreeformAsync_ReturnsNull_WhenSamplingUnavailable()
+    {
+        // Client doesn't support MCP sampling — SampleStructuredAsync throws InvalidOperationException.
+        // ClassifyFreeformAsync's contract is "Returns null if sampling fails" — it must not let
+        // the exception bubble up to callers (which would crash the freeform fallback path).
+        var server = new FakeMcpServer();
+        var result = await SamplingHelper.ClassifyFreeformAsync(
+            server,
+            "fix it",
+            "What would you like to do?",
+            ["Address all comments", "I'll handle them myself"],
+            CancellationToken.None);
+
+        Assert.Null(result);
+    }
+
+    [Fact]
     public async Task ClassifyFreeformAsync_ReturnsNull_WhenNoChoices()
     {
         var server = new FakeSamplingMcpServer("{}");
