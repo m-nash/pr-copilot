@@ -498,7 +498,7 @@ public static class MonitorTransitions
     /// </summary>
     private static MonitorAction BuildRecoverFromReadyAction(MonitorState state)
     {
-        DebugLogger.Log("StateMachine", $"ExecutingTask/ready: dispatching auto_execute recover_from_ready_in_executing_task (snapshot HEAD={ShortSha(state.HeadShaAtTaskStart)})");
+        DebugLogger.Log("StateMachine", $"{state.CurrentState}/ready: dispatching auto_execute recover_from_ready_in_executing_task (snapshot HEAD={ShortSha(state.HeadShaAtTaskStart)})");
         return new MonitorAction
         {
             Action = "auto_execute",
