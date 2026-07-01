@@ -63,9 +63,15 @@ public class MonitorFlowTools
                     var comment = action.Context as CommentInfo
                         ?? throw new InvalidOperationException("explain_comment action missing CommentInfo context");
 
+                    // Retry once on parse failure (matches compose_reply behavior)
                     var explanation = await SamplingHelper.ExplainCommentAsync(server, comment, state, cancellationToken);
                     if (explanation == null)
-                        throw new InvalidOperationException("Sampling failed to explain comment — LLM returned response that could not be parsed");
+                    {
+                        DebugLogger.Log("Sampling", "First explain attempt returned null — retrying");
+                        explanation = await SamplingHelper.ExplainCommentAsync(server, comment, state, cancellationToken);
+                    }
+                    if (explanation == null)
+                        throw new InvalidOperationException("Sampling failed to explain comment after 2 attempts — LLM returned response that could not be parsed");
 
                     // Prefer the structured recommendation; fall back to the full explanation text if needed
                     if (!string.IsNullOrWhiteSpace(explanation.Recommendation))
