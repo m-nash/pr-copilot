@@ -207,20 +207,12 @@ internal static class SamplingHelper
     /// </summary>
     internal static string SanitizeJsonControlChars(string json)
     {
-        // Quick scan: if no control chars exist, return as-is (common fast path).
-        // Structural whitespace (\n, \r, \t) outside strings is valid JSON,
-        // but inside strings they must be escaped — so only inputs containing
-        // control chars need the full walk.
-        for (int i = 0; i < json.Length; i++)
-        {
-            if (json[i] < 0x20)
-                goto NeedsSanitization;
-        }
-
-        return json;
-
-    NeedsSanitization:
-        var sb = new StringBuilder(json.Length);
+        // Single pass with deferred allocation: the StringBuilder is only created
+        // once we hit a control character *inside* a string value. Structural
+        // whitespace outside strings (common in pretty-printed JSON) is valid and
+        // needs no escaping, so those inputs return the original string with no
+        // allocation.
+        StringBuilder? sb = null;
         bool inString = false;
         bool escaped = false;
 
@@ -230,14 +222,14 @@ internal static class SamplingHelper
 
             if (escaped)
             {
-                sb.Append(c);
+                sb?.Append(c);
                 escaped = false;
                 continue;
             }
 
             if (c == '\\' && inString)
             {
-                sb.Append(c);
+                sb?.Append(c);
                 escaped = true;
                 continue;
             }
@@ -245,12 +237,14 @@ internal static class SamplingHelper
             if (c == '"')
             {
                 inString = !inString;
-                sb.Append(c);
+                sb?.Append(c);
                 continue;
             }
 
             if (inString && c < 0x20)
             {
+                sb ??= new StringBuilder(json.Length + 8).Append(json, 0, i);
+
                 switch (c)
                 {
                     case '\n': sb.Append("\\n"); break;
@@ -263,10 +257,10 @@ internal static class SamplingHelper
                 continue;
             }
 
-            sb.Append(c);
+            sb?.Append(c);
         }
 
-        return sb.ToString();
+        return sb?.ToString() ?? json;
     }
 
     /// <summary>

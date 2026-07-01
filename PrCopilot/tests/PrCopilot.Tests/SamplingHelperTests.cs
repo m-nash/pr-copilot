@@ -292,6 +292,17 @@ public class SamplingHelperTests
         Assert.Equal(expected, result);
     }
 
+    [Theory]
+    [InlineData("{\"a\":\"no control chars\"}")]
+    [InlineData("{\n  \"a\": \"hello\",\n  \"b\": \"world\"\n}")] // pretty-printed: structural newlines outside strings
+    public void SanitizeJsonControlChars_NoInStringControlChars_ReturnsSameInstance(string input)
+    {
+        var result = SamplingHelper.SanitizeJsonControlChars(input);
+
+        // No control chars inside string values — the original instance is returned unchanged (no allocation).
+        Assert.Same(input, result);
+    }
+
     [Fact]
     public void SanitizeJsonControlChars_EscapesNewlineInsideString()
     {
