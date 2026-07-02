@@ -167,13 +167,22 @@ internal static class SamplingHelper
                 {
                     bestConsumed = reader.BytesConsumed;
                     parsed = candidate;
+
+                    // If this object consumed the whole remaining suffix, no later start
+                    // (which has fewer bytes to work with) can beat it — stop early.
+                    if (reader.BytesConsumed == bytes.Length)
+                        break;
                 }
             }
             catch (JsonException)
             {
+                // Not a valid object start (e.g. a '{' inside a string, or a truncated
+                // false-start) — expected while scanning; try the next candidate.
             }
             catch (FileNotFoundException)
             {
+                // Single-file publishing can surface JSON parse errors as this instead;
+                // treat the same as an invalid candidate.
             }
         }
 
