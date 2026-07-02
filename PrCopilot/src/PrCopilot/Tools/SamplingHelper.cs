@@ -38,22 +38,7 @@ internal static class SamplingHelper
     {
         DebugLogger.Log("Sampling", $"Requesting text sample (maxTokens={maxTokens}, temp={temperature?.ToString() ?? "default"})");
 
-        var request = new CreateMessageRequestParams
-        {
-            MaxTokens = maxTokens,
-            SystemPrompt = systemPrompt,
-            Temperature = temperature,
-            Messages =
-            [
-                new SamplingMessage
-                {
-                    Role = Role.User,
-                    Content = [new TextContentBlock { Text = userMessage }]
-                }
-            ]
-        };
-
-        var result = await server.SampleAsync(request, cancellationToken);
+        var result = await SampleRawAsync(server, systemPrompt, userMessage, maxTokens, temperature, cancellationToken);
 
         var text = ExtractText(result);
         DebugLogger.Log("Sampling", $"Received response: model={result.Model}, stopReason={result.StopReason ?? "null"}, length={text?.Length ?? 0}");
@@ -75,40 +60,111 @@ internal static class SamplingHelper
         float? temperature = null,
         CancellationToken cancellationToken = default) where T : class
     {
-        var text = await SampleTextAsync(
-            server, systemPrompt, userMessage,
-            maxTokens, temperature, cancellationToken);
+        DebugLogger.Log("Sampling", $"Requesting structured sample (maxTokens={maxTokens}, temp={temperature?.ToString() ?? "default"})");
 
-        if (string.IsNullOrWhiteSpace(text))
+        var result = await SampleRawAsync(server, systemPrompt, userMessage, maxTokens, temperature, cancellationToken);
+        var blocks = ExtractTextBlocks(result);
+        DebugLogger.Log("Sampling", $"Received response: model={result.Model}, stopReason={result.StopReason ?? "null"}, blocks={blocks.Count}");
+
+        if (blocks.Count == 0)
             return null;
 
+        // The client may split the answer across multiple content blocks — sometimes an
+        // earlier block is a truncated false-start and the final block is the complete
+        // answer. Joining them blindly produces invalid JSON, so try each block on its
+        // own (last first, since the final block is usually the complete response), then
+        // fall back to the joined text for providers that split one object across blocks.
+        var candidates = new List<string>(blocks.Count + 1);
+        for (int i = blocks.Count - 1; i >= 0; i--)
+            candidates.Add(blocks[i]);
+        if (blocks.Count > 1)
+            candidates.Add(string.Join("\n", blocks));
+
+        string? lastError = null;
+        foreach (var candidate in candidates)
+        {
+            if (TryDeserialize<T>(candidate, out var parsed, out lastError))
+            {
+                DebugLogger.Log("Sampling", $"Parsed structured response: {typeof(T).Name}");
+                return parsed;
+            }
+        }
+
+        DebugLogger.Log("Sampling", $"Failed to parse JSON response as {typeof(T).Name} from {blocks.Count} block(s): {lastError}");
+        DebugLogger.Log("Sampling", $"Raw blocks: {string.Join(" || ", blocks).Truncate(500)}");
+        return null;
+    }
+
+    /// <summary>
+    /// Attempt to deserialize a single candidate response into <typeparamref name="T"/>,
+    /// stripping code fences and escaping stray control characters first.
+    /// Returns false (with a diagnostic message) instead of throwing on invalid JSON.
+    /// </summary>
+    private static bool TryDeserialize<T>(string text, out T? parsed, out string? error) where T : class
+    {
+        parsed = null;
+        error = null;
         try
         {
             // Strip markdown code fences if present (LLMs often wrap JSON in ```json ... ```)
-            text = StripCodeFences(text);
-
-            // LLMs frequently emit literal control characters (newlines, tabs, etc.)
-            // inside JSON string values, which is invalid per RFC 8259.
-            text = SanitizeJsonControlChars(text);
-
-            var parsed = JsonSerializer.Deserialize<T>(text, _jsonOptions);
-            DebugLogger.Log("Sampling", $"Parsed structured response: {typeof(T).Name}");
-            return parsed;
+            // and escape literal control chars inside strings (invalid per RFC 8259).
+            var cleaned = SanitizeJsonControlChars(StripCodeFences(text));
+            parsed = JsonSerializer.Deserialize<T>(cleaned, _jsonOptions);
+            return parsed != null;
         }
         catch (JsonException ex)
         {
-            DebugLogger.Log("Sampling", $"Failed to parse JSON response as {typeof(T).Name}: {ex.Message}");
-            DebugLogger.Log("Sampling", $"Raw response ({text?.Length ?? 0} chars): {text.Truncate(500)}");
-            return null;
+            error = ex.Message;
+            return false;
         }
         catch (FileNotFoundException ex)
         {
             // .NET single-file publishing can throw FileNotFoundException instead of JsonException
             // when satellite assemblies for JSON error messages are missing.
-            DebugLogger.Log("Sampling", $"Failed to parse JSON response as {typeof(T).Name}: [{ex.GetType().Name}] {ex.Message}");
-            DebugLogger.Log("Sampling", $"Raw response ({text?.Length ?? 0} chars): {text.Truncate(500)}");
-            return null;
+            error = $"[{ex.GetType().Name}] {ex.Message}";
+            return false;
         }
+    }
+
+    /// <summary>
+    /// Issue a sampling request and return the raw result.
+    /// </summary>
+    private static async Task<CreateMessageResult> SampleRawAsync(
+        McpServer server,
+        string systemPrompt,
+        string userMessage,
+        int maxTokens,
+        float? temperature,
+        CancellationToken cancellationToken)
+    {
+        var request = new CreateMessageRequestParams
+        {
+            MaxTokens = maxTokens,
+            SystemPrompt = systemPrompt,
+            Temperature = temperature,
+            Messages =
+            [
+                new SamplingMessage
+                {
+                    Role = Role.User,
+                    Content = [new TextContentBlock { Text = userMessage }]
+                }
+            ]
+        };
+
+        return await server.SampleAsync(request, cancellationToken);
+    }
+
+    /// <summary>
+    /// Extract the non-empty text content blocks from a sampling result, preserving order.
+    /// </summary>
+    private static List<string> ExtractTextBlocks(CreateMessageResult result)
+    {
+        return result.Content
+            .OfType<TextContentBlock>()
+            .Select(b => b.Text)
+            .Where(t => !string.IsNullOrWhiteSpace(t))
+            .ToList();
     }
 
     /// <summary>
@@ -117,10 +173,7 @@ internal static class SamplingHelper
     /// </summary>
     private static string? ExtractText(CreateMessageResult result)
     {
-        var texts = result.Content
-            .OfType<TextContentBlock>()
-            .Select(b => b.Text)
-            .ToList();
+        var texts = ExtractTextBlocks(result);
         return texts.Count > 0 ? string.Join("\n", texts) : null;
     }
 
