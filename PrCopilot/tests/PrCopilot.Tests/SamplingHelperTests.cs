@@ -404,7 +404,7 @@ public class SamplingHelperTests
     {
         // The exact PR 16255 failure: a truncated false-start object and the complete
         // object arrive concatenated in ONE content block (blocks=1).
-        var truncated = "{\"explanation\": \"The reviewer notes that deleting the analyzer means AZC0005 is no longer enfor";
+        var truncated = "{\"explanation\": \"The reviewer notes that deleting the analyzer means AZC0005 is no longer enforced";
         var complete = "{\"explanation\": \"The reviewer flags missing test coverage.\", \"recommendation\": \"Push back; the removal is intentional and in scope.\", \"recommendationType\": \"pushback\"}";
         var server = new FakeSamplingMcpServer(truncated + "\n" + complete);
 
