@@ -139,10 +139,11 @@ internal static class SamplingHelper
     }
 
     /// <summary>
-    /// Scan the text for top-level JSON objects and return the one that parses into
+    /// Scan the text for candidate object starts (every '{', which may include nested or
+    /// non-top-level positions) and return the value that deserializes into
     /// <typeparamref name="T"/> while consuming the most bytes. This recovers the complete
     /// object when the response also contains a truncated false-start object that a direct
-    /// parse chokes on.
+    /// parse chokes on; candidate starts that aren't a valid object simply fail to parse.
     /// </summary>
     private static bool TryExtractBestObject<T>(string text, out T? parsed) where T : class
     {
