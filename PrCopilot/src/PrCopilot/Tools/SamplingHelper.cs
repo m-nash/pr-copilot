@@ -128,7 +128,7 @@ internal static class SamplingHelper
 
         // Fallback: the text may contain a truncated false-start object followed by the
         // complete object, both in one block (e.g. {"a": "part\n{"a": "whole"}).
-        // A direct parse fails, so extract the largest parseable top-level object instead.
+        // A direct parse fails, so extract the largest parseable object instead.
         if (TryExtractBestObject<T>(cleaned, out parsed))
         {
             error = null;
