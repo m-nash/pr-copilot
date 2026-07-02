@@ -399,6 +399,39 @@ public class SamplingHelperTests
         Assert.Equal("clarify", result.RecommendationType);
     }
 
+    [Fact]
+    public async Task SampleStructuredAsync_SingleBlockTwoObjects_UsesCompleteObject()
+    {
+        // The exact PR 16255 failure: a truncated false-start object and the complete
+        // object arrive concatenated in ONE content block (blocks=1).
+        var truncated = "{\"explanation\": \"The reviewer notes that deleting the analyzer means AZC0005 is no longer enfor";
+        var complete = "{\"explanation\": \"The reviewer flags missing test coverage.\", \"recommendation\": \"Push back; the removal is intentional and in scope.\", \"recommendationType\": \"pushback\"}";
+        var server = new FakeSamplingMcpServer(truncated + "\n" + complete);
+
+        var result = await SamplingHelper.SampleStructuredAsync<CommentExplanationTestModel>(
+            server, "system", "user", maxTokens: 100);
+
+        Assert.NotNull(result);
+        Assert.Equal("The reviewer flags missing test coverage.", result!.Explanation);
+        Assert.Contains("intentional", result.Recommendation);
+        Assert.Equal("pushback", result.RecommendationType);
+    }
+
+    [Fact]
+    public async Task SampleStructuredAsync_TrailingProseAfterObject_StillParses()
+    {
+        // Complete object followed by trailing prose the model tacked on.
+        var response = "{\"explanation\": \"done\", \"recommendation\": \"fix\", \"recommendationType\": \"implement\"}\n\nLet me know if you'd like more detail.";
+        var server = new FakeSamplingMcpServer(response);
+
+        var result = await SamplingHelper.SampleStructuredAsync<CommentExplanationTestModel>(
+            server, "system", "user", maxTokens: 100);
+
+        Assert.NotNull(result);
+        Assert.Equal("done", result!.Explanation);
+        Assert.Equal("implement", result.RecommendationType);
+    }
+
     private class TestResponse
     {
         public string? Name { get; set; }

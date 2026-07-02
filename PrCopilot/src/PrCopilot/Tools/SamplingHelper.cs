@@ -91,7 +91,7 @@ internal static class SamplingHelper
         }
 
         DebugLogger.Log("Sampling", $"Failed to parse JSON response as {typeof(T).Name} from {blocks.Count} block(s): {lastError}");
-        DebugLogger.Log("Sampling", $"Raw blocks: {string.Join(" || ", blocks).Truncate(500)}");
+        DebugLogger.Log("Sampling", $"Raw blocks: {string.Join(" || ", blocks).Truncate(2000)}");
         return null;
     }
 
@@ -104,26 +104,79 @@ internal static class SamplingHelper
     {
         parsed = null;
         error = null;
+
+        // Strip markdown code fences if present (LLMs often wrap JSON in ```json ... ```)
+        // and escape literal control chars inside strings (invalid per RFC 8259).
+        var cleaned = SanitizeJsonControlChars(StripCodeFences(text));
+
         try
         {
-            // Strip markdown code fences if present (LLMs often wrap JSON in ```json ... ```)
-            // and escape literal control chars inside strings (invalid per RFC 8259).
-            var cleaned = SanitizeJsonControlChars(StripCodeFences(text));
             parsed = JsonSerializer.Deserialize<T>(cleaned, _jsonOptions);
-            return parsed != null;
+            if (parsed != null)
+                return true;
         }
         catch (JsonException ex)
         {
             error = ex.Message;
-            return false;
         }
         catch (FileNotFoundException ex)
         {
             // .NET single-file publishing can throw FileNotFoundException instead of JsonException
             // when satellite assemblies for JSON error messages are missing.
             error = $"[{ex.GetType().Name}] {ex.Message}";
-            return false;
         }
+
+        // Fallback: the text may contain a truncated false-start object followed by the
+        // complete object, both in one block (e.g. {"a": "trunc\n{"a": "complete"}).
+        // A direct parse fails, so extract the largest parseable top-level object instead.
+        if (TryExtractBestObject<T>(cleaned, out parsed))
+        {
+            error = null;
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Scan the text for top-level JSON objects and return the one that parses into
+    /// <typeparamref name="T"/> while consuming the most bytes. This recovers the complete
+    /// object when the response also contains a truncated false-start object that a direct
+    /// parse chokes on.
+    /// </summary>
+    private static bool TryExtractBestObject<T>(string text, out T? parsed) where T : class
+    {
+        parsed = null;
+        long bestConsumed = -1;
+
+        for (int i = 0; i < text.Length; i++)
+        {
+            if (text[i] != '{')
+                continue;
+
+            try
+            {
+                var bytes = Encoding.UTF8.GetBytes(text[i..]);
+                var reader = new Utf8JsonReader(bytes);
+                var candidate = JsonSerializer.Deserialize<T>(ref reader, _jsonOptions);
+
+                // Deserialize(ref reader) reads exactly one value and ignores anything
+                // after it, so trailing content (a second object, prose, etc.) is fine.
+                if (candidate != null && reader.BytesConsumed > bestConsumed)
+                {
+                    bestConsumed = reader.BytesConsumed;
+                    parsed = candidate;
+                }
+            }
+            catch (JsonException)
+            {
+            }
+            catch (FileNotFoundException)
+            {
+            }
+        }
+
+        return parsed != null;
     }
 
     /// <summary>
