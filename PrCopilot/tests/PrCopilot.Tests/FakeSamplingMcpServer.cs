@@ -13,13 +13,22 @@ namespace PrCopilot.Tests;
 internal class FakeSamplingMcpServer : FakeMcpServer
 #pragma warning restore MCPEXP002
 {
-    private readonly string _responseText;
+    private readonly string[] _responseBlocks;
 
     public CreateMessageRequestParams? LastRequest { get; private set; }
 
     public FakeSamplingMcpServer(string responseText = "sampling response")
     {
-        _responseText = responseText;
+        _responseBlocks = [responseText];
+    }
+
+    /// <summary>
+    /// Simulate a client that returns the answer across multiple content blocks
+    /// (e.g. a truncated false-start block followed by the complete answer).
+    /// </summary>
+    public FakeSamplingMcpServer(params string[] responseBlocks)
+    {
+        _responseBlocks = responseBlocks.Length > 0 ? responseBlocks : ["sampling response"];
     }
 
     public override ClientCapabilities? ClientCapabilities => new()
@@ -43,7 +52,7 @@ internal class FakeSamplingMcpServer : FakeMcpServer
             {
                 Model = "test-model",
                 Role = Role.Assistant,
-                Content = [new TextContentBlock { Text = _responseText }],
+                Content = [.. _responseBlocks.Select(b => new TextContentBlock { Text = b })],
                 StopReason = "endTurn"
             };
 

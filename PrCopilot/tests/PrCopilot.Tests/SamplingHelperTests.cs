@@ -348,6 +348,57 @@ public class SamplingHelperTests
         Assert.Equal("implement", result.RecommendationType);
     }
 
+    [Fact]
+    public async Task SampleStructuredAsync_MultipleBlocks_UsesCompleteBlock()
+    {
+        // The exact new failure: the client returns a truncated false-start block
+        // followed by the complete answer block. Joining them yields invalid JSON.
+        var truncated = "{\"explanation\": \"The reviewer notes that a descriptor message uses the wrong ind";
+        var complete = "{\"explanation\": \"The reviewer flags a grammar issue.\", \"recommendation\": \"Change 'a Azure' to 'an Azure'.\", \"recommendationType\": \"implement\"}";
+        var server = new FakeSamplingMcpServer(truncated, complete);
+
+        var result = await SamplingHelper.SampleStructuredAsync<CommentExplanationTestModel>(
+            server, "system", "user", maxTokens: 100);
+
+        Assert.NotNull(result);
+        Assert.Equal("The reviewer flags a grammar issue.", result!.Explanation);
+        Assert.Contains("an Azure", result.Recommendation);
+        Assert.Equal("implement", result.RecommendationType);
+    }
+
+    [Fact]
+    public async Task SampleStructuredAsync_MultipleBlocks_CompleteBlockFirst()
+    {
+        // Same protection regardless of ordering: complete block first, truncated after.
+        var complete = "{\"explanation\": \"done\", \"recommendation\": \"fix it\", \"recommendationType\": \"implement\"}";
+        var truncated = "{\"explanation\": \"partial follow-up that never fin";
+        var server = new FakeSamplingMcpServer(complete, truncated);
+
+        var result = await SamplingHelper.SampleStructuredAsync<CommentExplanationTestModel>(
+            server, "system", "user", maxTokens: 100);
+
+        Assert.NotNull(result);
+        Assert.Equal("done", result!.Explanation);
+        Assert.Equal("fix it", result.Recommendation);
+    }
+
+    [Fact]
+    public async Task SampleStructuredAsync_MultipleBlocks_OneObjectSplitAcrossBlocks_FallsBackToJoin()
+    {
+        // Back-compat: a single JSON object split across blocks still parses via the join fallback.
+        var part1 = "{\"explanation\": \"split\", \"recommendation\": ";
+        var part2 = "\"joined value\", \"recommendationType\": \"clarify\"}";
+        var server = new FakeSamplingMcpServer(part1, part2);
+
+        var result = await SamplingHelper.SampleStructuredAsync<CommentExplanationTestModel>(
+            server, "system", "user", maxTokens: 100);
+
+        Assert.NotNull(result);
+        Assert.Equal("split", result!.Explanation);
+        Assert.Equal("joined value", result.Recommendation);
+        Assert.Equal("clarify", result.RecommendationType);
+    }
+
     private class TestResponse
     {
         public string? Name { get; set; }
