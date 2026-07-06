@@ -102,12 +102,19 @@ internal static class SamplingHelper
     /// </summary>
     internal static string JoinCapped(IReadOnlyList<string> parts, string separator, int maxLength)
     {
+        if (maxLength <= 0)
+            return string.Empty;
+
         var sb = new StringBuilder(Math.Min(maxLength + 3, 1024));
         foreach (var part in parts)
         {
-            if (sb.Length >= maxLength)
+            // Only append the separator if the following part has room — otherwise the
+            // separator alone could push past maxLength and make remaining negative.
+            var separatorLength = sb.Length > 0 ? separator.Length : 0;
+            if (sb.Length + separatorLength >= maxLength)
                 break;
-            if (sb.Length > 0)
+
+            if (separatorLength > 0)
                 sb.Append(separator);
 
             var remaining = maxLength - sb.Length;

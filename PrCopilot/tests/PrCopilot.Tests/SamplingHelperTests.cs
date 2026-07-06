@@ -452,6 +452,21 @@ public class SamplingHelperTests
         Assert.StartsWith("aaa", result);
     }
 
+    [Fact]
+    public void JoinCapped_FirstPartLeavesLessThanSeparator_DoesNotThrow()
+    {
+        // Regression: the first part leaves fewer than separator-length chars before the cap
+        // (1999 chars, 2000 cap, 4-char separator). Previously the separator was appended
+        // unconditionally, making remaining negative and throwing ArgumentOutOfRangeException
+        // in the failure-logging path.
+        var parts = new List<string> { new string('a', 1999), new string('b', 100) };
+        var result = SamplingHelper.JoinCapped(parts, " || ", 2000);
+
+        Assert.True(result.Length <= 2003, $"length was {result.Length}");
+        Assert.StartsWith("aaa", result);
+        Assert.DoesNotContain("b", result);
+    }
+
     private class TestResponse
     {
         public string? Name { get; set; }
