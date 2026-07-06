@@ -114,7 +114,11 @@ internal static class SamplingHelper
             // separator alone could push past maxLength and make remaining negative.
             var separatorLength = sb.Length > 0 ? separator.Length : 0;
             if (sb.Length + separatorLength >= maxLength)
+            {
+                // No room for this part — content is being dropped, so mark the truncation.
+                sb.Append("...");
                 break;
+            }
 
             if (separatorLength > 0)
                 sb.Append(separator);

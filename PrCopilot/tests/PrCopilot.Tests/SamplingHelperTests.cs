@@ -465,6 +465,20 @@ public class SamplingHelperTests
         Assert.True(result.Length <= 2003, $"length was {result.Length}");
         Assert.StartsWith("aaa", result);
         Assert.DoesNotContain("b", result);
+        // Content was dropped between parts — the truncation marker must be present.
+        Assert.EndsWith("...", result);
+    }
+
+    [Fact]
+    public void JoinCapped_TruncatesBetweenParts_AppendsMarker()
+    {
+        // The second part doesn't fit even the separator, so it's dropped between parts.
+        var parts = new List<string> { new string('a', 8), new string('b', 8) };
+        var result = SamplingHelper.JoinCapped(parts, " || ", 10);
+
+        Assert.StartsWith("aaa", result);
+        Assert.DoesNotContain("b", result);
+        Assert.EndsWith("...", result);
     }
 
     private class TestResponse
