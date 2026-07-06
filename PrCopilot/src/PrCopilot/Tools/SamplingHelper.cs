@@ -97,8 +97,10 @@ internal static class SamplingHelper
 
     /// <summary>
     /// Join <paramref name="parts"/> with <paramref name="separator"/>, appending at most
-    /// <paramref name="maxLength"/> characters so the result allocation stays bounded even
-    /// when individual parts are very large (used for diagnostic logging).
+    /// <paramref name="maxLength"/> characters of content (plus a trailing "..." marker when
+    /// truncated, so the result is at most <paramref name="maxLength"/> + 3 characters). This
+    /// keeps the allocation bounded even when individual parts are very large (used for
+    /// diagnostic logging).
     /// </summary>
     internal static string JoinCapped(IReadOnlyList<string> parts, string separator, int maxLength)
     {
