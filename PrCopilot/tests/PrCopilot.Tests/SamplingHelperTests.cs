@@ -399,6 +399,88 @@ public class SamplingHelperTests
         Assert.Equal("clarify", result.RecommendationType);
     }
 
+    [Fact]
+    public async Task SampleStructuredAsync_SingleBlockTwoObjects_UsesCompleteObject()
+    {
+        // The exact PR 16255 failure: a truncated false-start object and the complete
+        // object arrive concatenated in ONE content block (blocks=1).
+        var truncated = "{\"explanation\": \"The reviewer notes that deleting the analyzer means AZC0005 is no longer enforced";
+        var complete = "{\"explanation\": \"The reviewer flags missing test coverage.\", \"recommendation\": \"Push back; the removal is intentional and in scope.\", \"recommendationType\": \"pushback\"}";
+        var server = new FakeSamplingMcpServer(truncated + "\n" + complete);
+
+        var result = await SamplingHelper.SampleStructuredAsync<CommentExplanationTestModel>(
+            server, "system", "user", maxTokens: 100);
+
+        Assert.NotNull(result);
+        Assert.Equal("The reviewer flags missing test coverage.", result!.Explanation);
+        Assert.Contains("intentional", result.Recommendation);
+        Assert.Equal("pushback", result.RecommendationType);
+    }
+
+    [Fact]
+    public async Task SampleStructuredAsync_TrailingProseAfterObject_StillParses()
+    {
+        // Complete object followed by trailing prose the model tacked on.
+        var response = "{\"explanation\": \"done\", \"recommendation\": \"fix\", \"recommendationType\": \"implement\"}\n\nLet me know if you'd like more detail.";
+        var server = new FakeSamplingMcpServer(response);
+
+        var result = await SamplingHelper.SampleStructuredAsync<CommentExplanationTestModel>(
+            server, "system", "user", maxTokens: 100);
+
+        Assert.NotNull(result);
+        Assert.Equal("done", result!.Explanation);
+        Assert.Equal("implement", result.RecommendationType);
+    }
+
+    [Fact]
+    public void JoinCapped_ShortInput_JoinsFully()
+    {
+        var parts = new List<string> { "one", "two", "three" };
+        var result = SamplingHelper.JoinCapped(parts, " || ", 2000);
+        Assert.Equal("one || two || three", result);
+    }
+
+    [Fact]
+    public void JoinCapped_HugeInput_BoundsAllocation()
+    {
+        var parts = new List<string> { new string('a', 5000), new string('b', 5000) };
+        var result = SamplingHelper.JoinCapped(parts, " || ", 2000);
+
+        // Never materializes the full 10k+ join — bounded to the cap plus the "..." marker.
+        Assert.True(result.Length <= 2003, $"length was {result.Length}");
+        Assert.EndsWith("...", result);
+        Assert.StartsWith("aaa", result);
+    }
+
+    [Fact]
+    public void JoinCapped_FirstPartLeavesLessThanSeparator_DoesNotThrow()
+    {
+        // Regression: the first part leaves fewer than separator-length chars before the cap
+        // (1999 chars, 2000 cap, 4-char separator). Previously the separator was appended
+        // unconditionally, making remaining negative and throwing ArgumentOutOfRangeException
+        // in the failure-logging path.
+        var parts = new List<string> { new string('a', 1999), new string('b', 100) };
+        var result = SamplingHelper.JoinCapped(parts, " || ", 2000);
+
+        Assert.True(result.Length <= 2003, $"length was {result.Length}");
+        Assert.StartsWith("aaa", result);
+        Assert.DoesNotContain("b", result);
+        // Content was dropped between parts — the truncation marker must be present.
+        Assert.EndsWith("...", result);
+    }
+
+    [Fact]
+    public void JoinCapped_TruncatesBetweenParts_AppendsMarker()
+    {
+        // The second part doesn't fit even the separator, so it's dropped between parts.
+        var parts = new List<string> { new string('a', 8), new string('b', 8) };
+        var result = SamplingHelper.JoinCapped(parts, " || ", 10);
+
+        Assert.StartsWith("aaa", result);
+        Assert.DoesNotContain("b", result);
+        Assert.EndsWith("...", result);
+    }
+
     private class TestResponse
     {
         public string? Name { get; set; }

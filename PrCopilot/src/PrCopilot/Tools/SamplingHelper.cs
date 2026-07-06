@@ -91,8 +91,51 @@ internal static class SamplingHelper
         }
 
         DebugLogger.Log("Sampling", $"Failed to parse JSON response as {typeof(T).Name} from {blocks.Count} block(s): {lastError}");
-        DebugLogger.Log("Sampling", $"Raw blocks: {string.Join(" || ", blocks).Truncate(500)}");
+        DebugLogger.Log("Sampling", $"Raw blocks: {JoinCapped(blocks, " || ", 2000)}");
         return null;
+    }
+
+    /// <summary>
+    /// Join <paramref name="parts"/> with <paramref name="separator"/>, appending at most
+    /// <paramref name="maxLength"/> characters of content (plus a trailing "..." marker when
+    /// truncated, so the result is at most <paramref name="maxLength"/> + 3 characters). This
+    /// keeps the allocation bounded even when individual parts are very large (used for
+    /// diagnostic logging).
+    /// </summary>
+    internal static string JoinCapped(IReadOnlyList<string> parts, string separator, int maxLength)
+    {
+        if (maxLength <= 0)
+            return string.Empty;
+
+        var sb = new StringBuilder(Math.Min(maxLength + 3, 1024));
+        foreach (var part in parts)
+        {
+            // Only append the separator if the following part has room — otherwise the
+            // separator alone could push past maxLength and make remaining negative.
+            var separatorLength = sb.Length > 0 ? separator.Length : 0;
+            if (sb.Length + separatorLength >= maxLength)
+            {
+                // No room for this part — content is being dropped, so mark the truncation.
+                sb.Append("...");
+                break;
+            }
+
+            if (separatorLength > 0)
+                sb.Append(separator);
+
+            var remaining = maxLength - sb.Length;
+            if (part.Length <= remaining)
+            {
+                sb.Append(part);
+            }
+            else
+            {
+                sb.Append(part, 0, remaining).Append("...");
+                break;
+            }
+        }
+
+        return sb.ToString();
     }
 
     /// <summary>
@@ -104,26 +147,89 @@ internal static class SamplingHelper
     {
         parsed = null;
         error = null;
+
+        // Strip markdown code fences if present (LLMs often wrap JSON in ```json ... ```)
+        // and escape literal control chars inside strings (invalid per RFC 8259).
+        var cleaned = SanitizeJsonControlChars(StripCodeFences(text));
+
         try
         {
-            // Strip markdown code fences if present (LLMs often wrap JSON in ```json ... ```)
-            // and escape literal control chars inside strings (invalid per RFC 8259).
-            var cleaned = SanitizeJsonControlChars(StripCodeFences(text));
             parsed = JsonSerializer.Deserialize<T>(cleaned, _jsonOptions);
-            return parsed != null;
+            if (parsed != null)
+                return true;
         }
         catch (JsonException ex)
         {
             error = ex.Message;
-            return false;
         }
         catch (FileNotFoundException ex)
         {
             // .NET single-file publishing can throw FileNotFoundException instead of JsonException
             // when satellite assemblies for JSON error messages are missing.
             error = $"[{ex.GetType().Name}] {ex.Message}";
-            return false;
         }
+
+        // Fallback: the text may contain a truncated false-start object followed by the
+        // complete object, both in one block (e.g. {"a": "part\n{"a": "whole"}).
+        // A direct parse fails, so extract the largest parseable object instead.
+        if (TryExtractBestObject<T>(cleaned, out parsed))
+        {
+            error = null;
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Scan the text for candidate object starts (every '{', which may include nested or
+    /// non-top-level positions) and return the value that deserializes into
+    /// <typeparamref name="T"/> while consuming the most bytes. This recovers the complete
+    /// object when the response also contains a truncated false-start object that a direct
+    /// parse chokes on; candidate starts that aren't a valid object simply fail to parse.
+    /// </summary>
+    private static bool TryExtractBestObject<T>(string text, out T? parsed) where T : class
+    {
+        parsed = null;
+        long bestConsumed = -1;
+
+        for (int i = 0; i < text.Length; i++)
+        {
+            if (text[i] != '{')
+                continue;
+
+            try
+            {
+                var bytes = Encoding.UTF8.GetBytes(text[i..]);
+                var reader = new Utf8JsonReader(bytes);
+                var candidate = JsonSerializer.Deserialize<T>(ref reader, _jsonOptions);
+
+                // Deserialize(ref reader) reads exactly one value and ignores anything
+                // after it, so trailing content (a second object, prose, etc.) is fine.
+                if (candidate != null && reader.BytesConsumed > bestConsumed)
+                {
+                    bestConsumed = reader.BytesConsumed;
+                    parsed = candidate;
+
+                    // If this object consumed the whole remaining suffix, no later start
+                    // (which has fewer bytes to work with) can beat it — stop early.
+                    if (reader.BytesConsumed == bytes.Length)
+                        break;
+                }
+            }
+            catch (JsonException)
+            {
+                // Not a valid object start (e.g. a '{' inside a string, or a truncated
+                // false-start) — expected while scanning; try the next candidate.
+            }
+            catch (FileNotFoundException)
+            {
+                // Single-file publishing can surface JSON parse errors as this instead;
+                // treat the same as an invalid candidate.
+            }
+        }
+
+        return parsed != null;
     }
 
     /// <summary>
