@@ -91,8 +91,38 @@ internal static class SamplingHelper
         }
 
         DebugLogger.Log("Sampling", $"Failed to parse JSON response as {typeof(T).Name} from {blocks.Count} block(s): {lastError}");
-        DebugLogger.Log("Sampling", $"Raw blocks: {string.Join(" || ", blocks).Truncate(2000)}");
+        DebugLogger.Log("Sampling", $"Raw blocks: {JoinCapped(blocks, " || ", 2000)}");
         return null;
+    }
+
+    /// <summary>
+    /// Join <paramref name="parts"/> with <paramref name="separator"/>, appending at most
+    /// <paramref name="maxLength"/> characters so the result allocation stays bounded even
+    /// when individual parts are very large (used for diagnostic logging).
+    /// </summary>
+    internal static string JoinCapped(IReadOnlyList<string> parts, string separator, int maxLength)
+    {
+        var sb = new StringBuilder(Math.Min(maxLength + 3, 1024));
+        foreach (var part in parts)
+        {
+            if (sb.Length >= maxLength)
+                break;
+            if (sb.Length > 0)
+                sb.Append(separator);
+
+            var remaining = maxLength - sb.Length;
+            if (part.Length <= remaining)
+            {
+                sb.Append(part);
+            }
+            else
+            {
+                sb.Append(part, 0, remaining).Append("...");
+                break;
+            }
+        }
+
+        return sb.ToString();
     }
 
     /// <summary>

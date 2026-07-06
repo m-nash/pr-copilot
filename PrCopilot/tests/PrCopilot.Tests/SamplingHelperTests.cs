@@ -432,6 +432,26 @@ public class SamplingHelperTests
         Assert.Equal("implement", result.RecommendationType);
     }
 
+    [Fact]
+    public void JoinCapped_ShortInput_JoinsFully()
+    {
+        var parts = new List<string> { "one", "two", "three" };
+        var result = SamplingHelper.JoinCapped(parts, " || ", 2000);
+        Assert.Equal("one || two || three", result);
+    }
+
+    [Fact]
+    public void JoinCapped_HugeInput_BoundsAllocation()
+    {
+        var parts = new List<string> { new string('a', 5000), new string('b', 5000) };
+        var result = SamplingHelper.JoinCapped(parts, " || ", 2000);
+
+        // Never materializes the full 10k+ join — bounded to the cap plus the "..." marker.
+        Assert.True(result.Length <= 2003, $"length was {result.Length}");
+        Assert.EndsWith("...", result);
+        Assert.StartsWith("aaa", result);
+    }
+
     private class TestResponse
     {
         public string? Name { get; set; }
