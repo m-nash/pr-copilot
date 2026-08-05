@@ -103,6 +103,8 @@ After `task_complete`, the state machine re-presents the same choices so the use
 
 **How to handle `resume_after_error`**: An error occurred but the user chose to resume monitoring. Simply call `pr_monitor_next_step` with `event='ready'` (and `monitorId='all'` for multi-PR mode) to re-enter the monitoring loop. Do not take any other action.
 
+**How to handle `send_message`**: Send the provided message to each recipient using any messaging capability or skill available in the current environment. Do not assume Teams, Slack, email, or any other provider. If no messaging capability is available, show the prepared message to the user for manual delivery. In either case, call `pr_monitor_next_step` with `event='task_complete'`; lack of a messaging integration must not stop monitoring.
+
 **How to handle `relay_choice`** (multi-PR only): The server classified freeform text as matching a choice for a specific PR monitor. Follow the instructions exactly — call `pr_monitor_next_step` with the specified `monitorId`, `event='user_chose'`, and `choice`, then call `pr_monitor_next_step` with `monitorId='all'` and `event='ready'` to resume monitoring all PRs.
 
 ## Monitor All My PRs

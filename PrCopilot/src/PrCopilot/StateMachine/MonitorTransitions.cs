@@ -16,7 +16,7 @@ public static class MonitorTransitions
     /// <summary>
     /// Evaluate terminal states from current PR status.
     /// Returns the highest-priority terminal state, or null if none detected.
-    /// Priority order: comment → merge conflict → CI failure → CI cancelled → approved+green → CI passed+ignored
+    /// Priority order: comment → merge conflict → CI failure → CI cancelled → approved+green → stale approval+green
     /// </summary>
     public static TerminalStateType? DetectTerminalState(
         MonitorState state,
@@ -63,6 +63,12 @@ public static class MonitorTransitions
             return TerminalStateType.ApprovedCiGreen;
         }
 
+        // 7. CI green, but previous approvals became stale after new commits.
+        if (state.Checks.Total > 0 &&
+            state.Checks.Passed == state.Checks.Total &&
+            GetStaleApproversNeedingNotification(state).Count > 0)
+            return TerminalStateType.StaleApprovalCiGreen;
+
         return null;
     }
 
@@ -84,6 +90,7 @@ public static class MonitorTransitions
             TerminalStateType.CiFailure => BuildCiFailureAction(state),
             TerminalStateType.CiCancelled => BuildCiCancelledAction(state, timestamp),
             TerminalStateType.ApprovedCiGreen => BuildApprovedAction(state, timestamp),
+            TerminalStateType.StaleApprovalCiGreen => BuildStaleApprovalAction(state, timestamp),
             _ => new MonitorAction { Action = "stop", Message = "Unknown terminal state" }
         };
     }
@@ -99,6 +106,8 @@ public static class MonitorTransitions
         ["Merge the PR"] = "merge",
         ["Force merge (--admin)"] = "merge_admin",
         ["Wait for another approver"] = "wait_for_approver",
+        ["Send approval reminder"] = "send_approval_reminder",
+        ["Skip reminder"] = "skip_approval_reminder",
         ["Resume monitoring"] = "resume",
         ["Stop monitoring"] = "stop",
         ["I'll handle it myself"] = "handle_myself",
@@ -193,6 +202,13 @@ public static class MonitorTransitions
 
     private static MonitorAction ProcessTaskComplete(MonitorState state)
     {
+        if (state.PendingStaleApprovalNotifications.Count > 0)
+        {
+            MarkStaleApprovalNotificationsHandled(state, state.PendingStaleApprovalNotifications);
+            state.PendingStaleApprovalNotifications.Clear();
+            return TransitionToPolling(state);
+        }
+
         // If we just completed a re-request review, advance to next comment
         if (state.PendingReRequestReviewer != null)
         {
@@ -380,6 +396,8 @@ public static class MonitorTransitions
             "merge" => BuildMergeAction(state),
             "merge_admin" => BuildMergeAdminAction(state),
             "wait_for_approver" => WaitForAdditionalApprover(state),
+            "send_approval_reminder" => BuildSendApprovalReminderAction(state),
+            "skip_approval_reminder" => SkipApprovalReminder(state),
             _ => new MonitorAction
             {
                 Action = "ask_user",
@@ -1136,6 +1154,63 @@ public static class MonitorTransitions
             Choices = ["Merge the PR", "Wait for another approver", "Resume monitoring", "I'll handle it myself"]
         };
     }
+
+    private static MonitorAction BuildStaleApprovalAction(MonitorState state, string timestamp)
+    {
+        var approvers = GetStaleApproversNeedingNotification(state);
+        var names = string.Join(", ", approvers);
+        return new MonitorAction
+        {
+            Action = "ask_user",
+            Question = $"[{timestamp}] 🔄 PR #{state.PrNumber} has fully passing CI ({state.Checks.Passed}/{state.Checks.Total} passed), but the approval from {names} is stale after new commits.",
+            Choices = ["Send approval reminder", "Skip reminder", "I'll handle it myself"],
+            Context = new { approvers, state.PrUrl }
+        };
+    }
+
+    private static MonitorAction BuildSendApprovalReminderAction(MonitorState state)
+    {
+        var approvers = GetStaleApproversNeedingNotification(state);
+        if (approvers.Count == 0)
+            return TransitionToPolling(state);
+
+        state.PendingStaleApprovalNotifications = approvers;
+        state.CurrentState = MonitorStateId.ExecutingTask;
+
+        var message = $"CI is fully passing on PR #{state.PrNumber} ({state.PrTitle}), but your previous approval became stale after new commits. Could you take another look and re-approve? {state.PrUrl}";
+        return new MonitorAction
+        {
+            Action = "execute",
+            Task = "send_message",
+            Instructions =
+                $"Send the provided reminder to each recipient using any available messaging capability or skill. " +
+                $"Do not assume a specific provider such as Teams, Slack, or email. If no messaging capability is available, tell the user that the reminder could not be sent and include the prepared message so they can send it manually. " +
+                $"The absence or failure of a messaging capability must not stop monitoring. In either case, call pr_monitor_next_step with event='task_complete'.",
+            Context = new { recipients = approvers, message, state.PrUrl }
+        };
+    }
+
+    private static MonitorAction SkipApprovalReminder(MonitorState state)
+    {
+        MarkStaleApprovalNotificationsHandled(state, GetStaleApproversNeedingNotification(state));
+        return TransitionToPolling(state);
+    }
+
+    private static void MarkStaleApprovalNotificationsHandled(MonitorState state, IEnumerable<string> reviewers)
+    {
+        foreach (var reviewer in reviewers)
+            state.StaleApprovalNotifications.Add(GetStaleApprovalNotificationKey(state.HeadSha, reviewer));
+    }
+
+    private static List<string> GetStaleApproversNeedingNotification(MonitorState state)
+        => state.StaleApprovals
+            .Select(a => a.Author)
+            .Where(author => !state.StaleApprovalNotifications.Contains(GetStaleApprovalNotificationKey(state.HeadSha, author)))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+    private static string GetStaleApprovalNotificationKey(string headSha, string reviewer)
+        => $"{headSha}:{reviewer}";
 
     private static MonitorAction BuildMergeAction(MonitorState state)
     {

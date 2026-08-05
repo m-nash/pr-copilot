@@ -42,6 +42,8 @@ public class MonitorState
     // Reviews
     public List<ReviewInfo> Approvals { get; set; } = [];
     public List<ReviewInfo> StaleApprovals { get; set; } = [];
+    public HashSet<string> StaleApprovalNotifications { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public List<string> PendingStaleApprovalNotifications { get; set; } = [];
     public bool HasMergeConflict { get; set; }
 
     // Comments

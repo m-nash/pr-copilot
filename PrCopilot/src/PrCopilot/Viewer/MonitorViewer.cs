@@ -623,24 +623,12 @@ public static class MonitorViewer
             // Terminal state reached — freeze the UI
             if (isTerminal)
             {
-                var emoji = terminalState switch
+                var emoji = TerminalStatePresentation.GetEmoji(terminalState);
+                var stateColor = TerminalStatePresentation.GetColor(terminalState) switch
                 {
-                    "approved" or "approved_and_ci_green" => "✅",
-                    "ci_passed_comments_pending" => "✅",
-                    "ci_failure" => "❌",
-                    "ci_cancelled" => "🚫",
-                    "unresolved_comments" or "new_comment" => "💬",
-                    "merge_conflict" => "⚠️",
-                    "stopped" => "⏹️",
-                    _ => "⚡"
-                };
-                var stateColor = terminalState switch
-                {
-                    "approved" or "approved_and_ci_green" => new ColorScheme { Normal = new Attribute(Color.BrightGreen, Color.Black) },
-                    "ci_passed_comments_pending" => new ColorScheme { Normal = new Attribute(Color.BrightGreen, Color.Black) },
-                    "ci_failure" => new ColorScheme { Normal = new Attribute(Color.BrightRed, Color.Black) },
-                    "merge_conflict" => new ColorScheme { Normal = new Attribute(Color.BrightRed, Color.Black) },
-                    "stopped" => dimScheme,
+                    TerminalStateColor.Success => new ColorScheme { Normal = new Attribute(Color.BrightGreen, Color.Black) },
+                    TerminalStateColor.Error => new ColorScheme { Normal = new Attribute(Color.BrightRed, Color.Black) },
+                    TerminalStateColor.Stopped => dimScheme,
                     _ => new ColorScheme { Normal = new Attribute(Color.BrightYellow, Color.Black) }
                 };
                 if (terminalState == "stopped")

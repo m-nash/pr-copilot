@@ -107,6 +107,68 @@ public class StateMachineTests
     }
 
     [Fact]
+    public void DetectTerminalState_StaleApprovalCiGreen_ReturnsStaleApprovalCiGreen()
+    {
+        var state = CreateState();
+        SetChecksAllGreen(state);
+        state.StaleApprovals = [new ReviewInfo { Author = "approver", State = "APPROVED", IsStale = true }];
+
+        var result = MonitorTransitions.DetectTerminalState(state, [], false);
+
+        Assert.Equal(TerminalStateType.StaleApprovalCiGreen, result);
+    }
+
+    [Fact]
+    public void DetectTerminalState_StaleApprovalAlreadyNotified_ReturnsNull()
+    {
+        var state = CreateState();
+        const string approver = "approver";
+        SetChecksAllGreen(state);
+        state.StaleApprovals = [new ReviewInfo { Author = approver, State = "APPROVED", IsStale = true }];
+        state.StaleApprovalNotifications.Add($"{state.HeadSha}:{approver}");
+
+        var result = MonitorTransitions.DetectTerminalState(state, [], false);
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public void DetectTerminalState_StaleApprovalWithoutCiChecks_ReturnsNull()
+    {
+        var state = CreateState();
+        state.StaleApprovals = [new ReviewInfo { Author = "approver", State = "APPROVED", IsStale = true }];
+
+        var result = MonitorTransitions.DetectTerminalState(state, [], false);
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public void DetectTerminalState_StaleApprovalWithSuppressedCiFailure_ReturnsNull()
+    {
+        var state = CreateState();
+        SetChecksFailed(state);
+        state.PendingRerunWhenChecksComplete = true;
+        state.StaleApprovals = [new ReviewInfo { Author = "approver", State = "APPROVED", IsStale = true }];
+
+        var result = MonitorTransitions.DetectTerminalState(state, [], false);
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public void DetectTerminalState_StaleApprovalWithNonPassingCheck_ReturnsNull()
+    {
+        var state = CreateState();
+        state.Checks = new CheckRunCounts { Passed = 4, Pending = 1, Total = 5 };
+        state.StaleApprovals = [new ReviewInfo { Author = "approver", State = "APPROVED", IsStale = true }];
+
+        var result = MonitorTransitions.DetectTerminalState(state, [], false);
+
+        Assert.Null(result);
+    }
+
+    [Fact]
     public void DetectTerminalState_ChecksInProgress_ReturnsNull()
     {
         var state = CreateState();
@@ -438,8 +500,76 @@ public class StateMachineTests
         Assert.Equal("handle_myself", MonitorTransitions.ChoiceValueMap["I'll handle it myself"]);
     }
 
+    [Fact]
+    public void BuildTerminalAction_StaleApprovalCiGreen_OffersGenericReminder()
+    {
+        var state = CreateState();
+        SetChecksAllGreen(state);
+        state.StaleApprovals = [new ReviewInfo { Author = "alice", State = "APPROVED", IsStale = true }];
+
+        var action = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.StaleApprovalCiGreen);
+
+        Assert.Equal("ask_user", action.Action);
+        Assert.Contains("alice", action.Question);
+        Assert.Contains("stale", action.Question, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Send approval reminder", action.Choices!);
+        Assert.Equal("send_approval_reminder", MonitorTransitions.ChoiceValueMap["Send approval reminder"]);
+    }
+
+    [Fact]
+    public void ProcessEvent_SendApprovalReminder_ReturnsCapabilityBasedMessageTask()
+    {
+        var state = CreateState();
+        SetChecksAllGreen(state);
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.LastTerminalState = TerminalStateType.StaleApprovalCiGreen;
+        state.StaleApprovals = [new ReviewInfo { Author = "alice", State = "APPROVED", IsStale = true }];
+
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "send_approval_reminder", null);
+
+        Assert.Equal("execute", action.Action);
+        Assert.Equal("send_message", action.Task);
+        Assert.Contains("available messaging capability", action.Instructions);
+        Assert.Contains("must not stop monitoring", action.Instructions);
+        Assert.NotNull(action.Context);
+    }
+
+    [Fact]
+    public void ProcessEvent_SendApprovalReminderTaskComplete_DoesNotPromptAgainForSameCommit()
+    {
+        var state = CreateState();
+        SetChecksAllGreen(state);
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.LastTerminalState = TerminalStateType.StaleApprovalCiGreen;
+        state.StaleApprovals = [new ReviewInfo { Author = "alice", State = "APPROVED", IsStale = true }];
+
+        MonitorTransitions.ProcessEvent(state, "user_chose", "send_approval_reminder", null);
+        var action = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        var terminal = MonitorTransitions.DetectTerminalState(state, [], false);
+
+        Assert.Equal("polling", action.Action);
+        Assert.Null(terminal);
+    }
+
+    [Fact]
+    public void ProcessEvent_SkipApprovalReminder_DoesNotPromptAgainForSameCommit()
+    {
+        var state = CreateState();
+        SetChecksAllGreen(state);
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.LastTerminalState = TerminalStateType.StaleApprovalCiGreen;
+        state.StaleApprovals = [new ReviewInfo { Author = "alice", State = "APPROVED", IsStale = true }];
+
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "skip_approval_reminder", null);
+        var terminal = MonitorTransitions.DetectTerminalState(state, [], false);
+
+        Assert.Equal("polling", action.Action);
+        Assert.Null(terminal);
+    }
+
     [Theory]
     [InlineData(TerminalStateType.ApprovedCiGreen)]
+    [InlineData(TerminalStateType.StaleApprovalCiGreen)]
     [InlineData(TerminalStateType.CiCancelled)]
     [InlineData(TerminalStateType.MergeConflict)]
     public void BuildTerminalAction_AllStates_AllChoicesExistInValueMap(TerminalStateType terminal)
