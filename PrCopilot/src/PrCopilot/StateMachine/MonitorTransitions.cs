@@ -64,7 +64,7 @@ public static class MonitorTransitions
         }
 
         // 7. CI green, but previous approvals became stale after new commits.
-        if (state.Checks.Passed > 0 && state.Checks.Failed == 0 && GetUnnotifiedStaleApprovers(state).Count > 0)
+        if (state.Checks.Passed > 0 && state.Checks.Failed == 0 && GetStaleApproversNeedingNotification(state).Count > 0)
             return TerminalStateType.StaleApprovalCiGreen;
 
         return null;
@@ -1155,7 +1155,7 @@ public static class MonitorTransitions
 
     private static MonitorAction BuildStaleApprovalAction(MonitorState state, string timestamp)
     {
-        var approvers = GetUnnotifiedStaleApprovers(state);
+        var approvers = GetStaleApproversNeedingNotification(state);
         var names = string.Join(", ", approvers);
         return new MonitorAction
         {
@@ -1168,7 +1168,7 @@ public static class MonitorTransitions
 
     private static MonitorAction BuildSendApprovalReminderAction(MonitorState state)
     {
-        var approvers = GetUnnotifiedStaleApprovers(state);
+        var approvers = GetStaleApproversNeedingNotification(state);
         if (approvers.Count == 0)
             return TransitionToPolling(state);
 
@@ -1190,7 +1190,7 @@ public static class MonitorTransitions
 
     private static MonitorAction SkipApprovalReminder(MonitorState state)
     {
-        MarkStaleApprovalNotificationsHandled(state, GetUnnotifiedStaleApprovers(state));
+        MarkStaleApprovalNotificationsHandled(state, GetStaleApproversNeedingNotification(state));
         return TransitionToPolling(state);
     }
 
@@ -1200,7 +1200,7 @@ public static class MonitorTransitions
             state.StaleApprovalNotifications.Add(GetStaleApprovalNotificationKey(state.HeadSha, reviewer));
     }
 
-    private static List<string> GetUnnotifiedStaleApprovers(MonitorState state)
+    private static List<string> GetStaleApproversNeedingNotification(MonitorState state)
         => state.StaleApprovals
             .Select(a => a.Author)
             .Where(author => !state.StaleApprovalNotifications.Contains(GetStaleApprovalNotificationKey(state.HeadSha, author)))
