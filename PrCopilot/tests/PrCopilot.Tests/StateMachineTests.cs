@@ -122,9 +122,10 @@ public class StateMachineTests
     public void DetectTerminalState_StaleApprovalAlreadyNotified_ReturnsNull()
     {
         var state = CreateState();
+        const string approver = "approver";
         SetChecksAllGreen(state);
-        state.StaleApprovals = [new ReviewInfo { Author = "approver", State = "APPROVED", IsStale = true }];
-        state.StaleApprovalNotifications.Add("abc123:approver");
+        state.StaleApprovals = [new ReviewInfo { Author = approver, State = "APPROVED", IsStale = true }];
+        state.StaleApprovalNotifications.Add($"{state.HeadSha}:{approver}");
 
         var result = MonitorTransitions.DetectTerminalState(state, [], false);
 
