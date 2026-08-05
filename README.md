@@ -10,6 +10,7 @@ An MCP server that monitors GitHub pull requests through GitHub Copilot CLI. It 
 - **Comment handling** — address, explain, or ignore review comments one-by-one or in batch
 - **CI failure investigation** — analyze failed check logs, suggest fixes, rerun failed jobs via Azure DevOps
 - **Auto-merge** — squash merge when approved + CI green (with admin override option)
+- **Stale approval reminders** — optionally message prior approvers when CI is green after new commits, using any messaging capability available to the agent
 - **After-hours awareness** — pauses polling during off-hours, resumes automatically
 
 ## Requirements

@@ -24,5 +24,8 @@ public enum TerminalStateType
     CiCancelled,
 
     /// <summary>PR is approved and CI is green (only if no failures/cancellations).</summary>
-    ApprovedCiGreen
+    ApprovedCiGreen,
+
+    /// <summary>CI is green but one or more approvals became stale after new commits.</summary>
+    StaleApprovalCiGreen
 }
