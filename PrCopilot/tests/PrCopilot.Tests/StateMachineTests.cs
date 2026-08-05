@@ -156,6 +156,18 @@ public class StateMachineTests
     }
 
     [Fact]
+    public void DetectTerminalState_StaleApprovalWithNonPassingCheck_ReturnsNull()
+    {
+        var state = CreateState();
+        state.Checks = new CheckRunCounts { Passed = 4, Pending = 1, Total = 5 };
+        state.StaleApprovals = [new ReviewInfo { Author = "approver", State = "APPROVED", IsStale = true }];
+
+        var result = MonitorTransitions.DetectTerminalState(state, [], false);
+
+        Assert.Null(result);
+    }
+
+    [Fact]
     public void DetectTerminalState_ChecksInProgress_ReturnsNull()
     {
         var state = CreateState();

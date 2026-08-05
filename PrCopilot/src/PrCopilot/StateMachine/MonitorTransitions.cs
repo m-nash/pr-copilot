@@ -64,7 +64,9 @@ public static class MonitorTransitions
         }
 
         // 7. CI green, but previous approvals became stale after new commits.
-        if (state.Checks.Passed > 0 && state.Checks.Failed == 0 && GetStaleApproversNeedingNotification(state).Count > 0)
+        if (state.Checks.Total > 0 &&
+            state.Checks.Passed == state.Checks.Total &&
+            GetStaleApproversNeedingNotification(state).Count > 0)
             return TerminalStateType.StaleApprovalCiGreen;
 
         return null;
