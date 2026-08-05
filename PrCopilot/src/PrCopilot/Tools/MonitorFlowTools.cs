@@ -11,6 +11,7 @@ using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 using PrCopilot.Services;
 using PrCopilot.StateMachine;
+using PrCopilot.Viewer;
 
 namespace PrCopilot.Tools;
 
@@ -1887,15 +1888,7 @@ public class MonitorFlowTools
     /// </summary>
     private static string BuildTerminalLogLine(MonitorState state, MonitorAction action)
     {
-        var viewerState = state.LastTerminalState switch
-        {
-            TerminalStateType.NewComment => "new_comment",
-            TerminalStateType.MergeConflict => "merge_conflict",
-            TerminalStateType.CiFailure => "ci_failure",
-            TerminalStateType.CiCancelled => "ci_cancelled",
-            TerminalStateType.ApprovedCiGreen => "approved_and_ci_green",
-            _ => "unknown"
-        };
+        var viewerState = TerminalStatePresentation.GetViewerState(state.LastTerminalState);
         var terminalObj = new { state = viewerState, description = action.Question ?? "" };
         return $"TERMINAL|{JsonSerializer.Serialize(terminalObj, _jsonOptions)}";
     }

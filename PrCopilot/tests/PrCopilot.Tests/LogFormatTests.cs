@@ -2,6 +2,7 @@
 
 using System.Text.Json;
 using PrCopilot.StateMachine;
+using PrCopilot.Viewer;
 
 namespace PrCopilot.Tests;
 
@@ -174,6 +175,14 @@ public class LogFormatTests
     #endregion
 
     #region TERMINAL line parsing
+
+    [Fact]
+    public void StaleApprovalTerminalState_HasViewerPresentation()
+    {
+        Assert.Equal("stale_approval_ci_green", TerminalStatePresentation.GetViewerState(TerminalStateType.StaleApprovalCiGreen));
+        Assert.Equal("🔄", TerminalStatePresentation.GetEmoji("stale_approval_ci_green"));
+        Assert.Equal(TerminalStateColor.Warning, TerminalStatePresentation.GetColor("stale_approval_ci_green"));
+    }
 
     [Theory]
     [InlineData("new_comment")]
