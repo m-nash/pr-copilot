@@ -502,8 +502,12 @@ internal static class SamplingHelper
 
             return result;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException and not InvalidOperationException)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            // Includes InvalidOperationException from SampleStructuredAsync when the client
+            // doesn't support MCP sampling. Per ClassifyFreeformAsync's contract ("Returns null
+            // if sampling fails"), the caller falls back to BuildFreeformInterpretAction with
+            // a `sampling_unavailable` payload reason instead of crashing.
             DebugLogger.Log("Sampling", $"Freeform classification failed: {ex.Message}");
             return null;
         }

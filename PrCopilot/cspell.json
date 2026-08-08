@@ -11,11 +11,13 @@
     "keepalive",
     "LASTEXITCODE",
     "MCPEXP",
+    "misattributes",
     "nologo",
     "nums",
     "osascript",
     "parseable",
     "pushback",
+    "rerequest",
     "slnx",
     "unreplied",
     "xunit"

@@ -124,6 +124,8 @@ public static class MonitorTransitions
         ["I'll handle the comments myself"] = "handle_myself",
         ["I'll handle them myself"] = "handle_myself",
         ["Skip this comment"] = "skip",
+        ["Treat as comment addressed"] = "treat_as_addressed",
+        ["Treat as replied externally"] = "treat_as_replied_externally",
         ["Done — resume monitoring"] = "done",
         ["Address next comment"] = "continue",
         ["I'll handle the rest myself"] = "done",
@@ -135,6 +137,7 @@ public static class MonitorTransitions
         ["Re-run failed jobs"] = "rerun",
         ["Apply the recommendation"] = "apply_fix",
         ["Run a new build"] = "run_new",
+        ["Treat as push completed"] = "treat_as_pushed",
 
         // Waiting-for-reply comment choices (ProcessWaitingCommentChoice)
         ["Resolve this thread"] = "resolve",
@@ -191,6 +194,21 @@ public static class MonitorTransitions
             // LLM finished executing a generic task
             (MonitorStateId.ExecutingTask, "task_complete") => ProcessTaskComplete(state),
 
+            // Recovery: agent skipped the documented completion event and re-entered with
+            // event=ready (commonly because the user's post-push custom-instruction hook
+            // fires pr_monitor_start + ready instead of the Path B comment_addressed/
+            // push_completed events). Returns an auto_execute that fetches HEAD; if HEAD
+            // advanced during the task, the wrapper re-dispatches as the right completion
+            // event, otherwise falls through to flow-aware recovery prompt.
+            (MonitorStateId.ExecutingTask, "ready") => BuildRecoverFromReadyAction(state),
+
+            // Same recovery for the CI apply_fix task, which runs in ApplyingFix and tells
+            // the agent to push before reporting push_completed. A post-push hook firing
+            // event=ready must be recognized as a successful push (HEAD advanced + CI flow
+            // → dispatch push_completed) instead of falling through to RecoverFromUnexpectedState
+            // which wipes CiFailureFlow.
+            (MonitorStateId.ApplyingFix, "ready") => BuildRecoverFromReadyAction(state),
+
             // Recovery: agent sent task_complete from AwaitingUser (skipped a tool call)
             (MonitorStateId.AwaitingUser, "task_complete") => RecoverFromUnexpectedTaskComplete(state),
 
@@ -221,6 +239,16 @@ public static class MonitorTransitions
         // If we just auto-resolved a thread after addressing/replying to a comment, advance
         if (state.PendingResolveAfterAddress)
         {
+            // Waiting-thread resolution: ProcessCommentAddressed/ProcessCommentReplied
+            // entered their waiting branch (CommentFlow == None && ActiveWaitingComment != null)
+            // and set PendingResolveAfterAddress. There's no in-flow comment to advance past
+            // — UnresolvedComments[CurrentCommentIndex] points to a stale entry from a prior
+            // flow, so the indexing logic below would re-request review on an unrelated
+            // reviewer or surface PickRemaining for unrelated comments. Just clean state and
+            // return to polling. See PR #51 reviewer comment on MonitorTransitions.cs:921.
+            if (state.CommentFlow == CommentFlowState.None)
+                return TransitionToPolling(state);
+
             var summary = state.PendingResolveSummary ?? "Comment addressed";
             state.PendingResolveAfterAddress = false;
             state.ActiveWaitingComment = null;
@@ -244,6 +272,13 @@ public static class MonitorTransitions
         // If we just posted a reply (no resolve) — advance to next comment or re-request
         if (state.PendingAdvanceAfterReply != null)
         {
+            // Same waiting-thread guard as PendingResolveAfterAddress above. The waiting
+            // branch of ProcessCommentReplied (human reviewer) sets PendingAdvanceAfterReply
+            // without entering a comment flow; the indexed lookup below would target a
+            // stale comment from a prior flow.
+            if (state.CommentFlow == CommentFlowState.None)
+                return TransitionToPolling(state);
+
             var summary = state.PendingAdvanceAfterReply;
             state.PendingAdvanceAfterReply = null;
 
@@ -347,8 +382,26 @@ public static class MonitorTransitions
     private static MonitorAction RecoverFromUnexpectedState(MonitorState state, string eventType)
     {
         var priorState = state.CurrentState;
+        var priorCommentFlow = state.CommentFlow;
+        var priorCiFailureFlow = state.CiFailureFlow;
         DebugLogger.Log("StateMachine", $"RECOVERY: Unexpected state {priorState}/{eventType}. Transitioning to AwaitingUser so next user_chose can recover.");
         state.CurrentState = MonitorStateId.AwaitingUser;
+
+        // Preserve flow context when recovering from ExecutingTask — the user is mid-flow
+        // and may want to resume by treating the task as completed (e.g., comment addressed).
+        // Wiping the flow state would force them to start the comment loop from scratch and
+        // lose their place. For other prior states, keep the original aggressive cleanup.
+        if (priorState == MonitorStateId.ExecutingTask)
+        {
+            // Genuine unknown event from agent — surface the event name in the prompt for
+            // debug visibility (this is a real bug, not a designed fallback path).
+            return BuildExecutingTaskRecoveryPrompt(
+                state,
+                reasonText: $"The agent sent an unexpected event '{eventType}'",
+                priorCommentFlow,
+                priorCiFailureFlow);
+        }
+
         state.CommentFlow = CommentFlowState.None;
         state.CiFailureFlow = CiFailureFlowState.None;
         state.ActiveWaitingComment = null;
@@ -359,6 +412,214 @@ public static class MonitorTransitions
             Choices = ["Resume monitoring", "Stop monitoring"]
         };
     }
+
+    /// <summary>
+    /// Recovery prompt for events that arrive while in <see cref="MonitorStateId.ExecutingTask"/>
+    /// without a matching transition. Offers flow-aware choices so the user can mark the task
+    /// done in-flow rather than being forced to "Resume monitoring" (which would wipe the flow
+    /// state and restart polling). Flow state (CommentFlow / CiFailureFlow / current comment
+    /// index) is preserved so the follow-up <c>user_chose</c> can dispatch into the correct
+    /// flow handler.
+    ///
+    /// <paramref name="reasonText"/> is the user-facing explanation for why the prompt appeared
+    /// (e.g., "Looks like the task finished without a new commit" for the no-push fallback,
+    /// or "The agent sent an unexpected event 'foo'" for genuine unknown events). It is
+    /// interpolated verbatim into the question text — DO NOT pass internal synthetic event
+    /// names directly, or they will leak to the user. Reviewer feedback on PR #51 caught
+    /// the original implementation interpolating "ready_unresolved" into the prompt.
+    ///
+    /// Internal so the auto_execute no-push fallback in <c>MonitorFlowTools</c> can call it
+    /// directly instead of routing through <c>ProcessEvent</c> with a synthetic event name.
+    /// </summary>
+    internal static MonitorAction BuildExecutingTaskRecoveryPrompt(
+        MonitorState state,
+        string reasonText,
+        CommentFlowState priorCommentFlow,
+        CiFailureFlowState priorCiFailureFlow)
+    {
+        if (priorCommentFlow != CommentFlowState.None)
+        {
+            return new MonitorAction
+            {
+                Action = "ask_user",
+                Question = $"{reasonText} while addressing a comment. " +
+                    "If you finished the work, pick how to mark it; otherwise resume or stop.",
+                Choices =
+                [
+                    "Treat as comment addressed",
+                    "Treat as replied externally",
+                    "Skip this comment",
+                    "Resume monitoring",
+                    "Stop monitoring"
+                ]
+            };
+        }
+
+        if (priorCiFailureFlow != CiFailureFlowState.None)
+        {
+            return new MonitorAction
+            {
+                Action = "ask_user",
+                Question = $"{reasonText} while investigating a CI failure. " +
+                    "If you finished the work, pick how to mark it; otherwise resume or stop.",
+                Choices =
+                [
+                    "Treat as push completed",
+                    "Resume monitoring",
+                    "Stop monitoring"
+                ]
+            };
+        }
+
+        // Waiting-for-reply state: ActiveWaitingComment is set without an active flow
+        // (the comment flow ended when the reply was posted; the comment is now waiting
+        // for the reviewer's response). BuildWaitingCommentAction puts us here. The
+        // recovery must preserve ActiveWaitingComment and offer the original Resolve /
+        // Go-back choices, otherwise a stray ready / unknown event clears the waiting
+        // context and the user can no longer recover the original choices.
+        if (state.ActiveWaitingComment != null)
+        {
+            return new MonitorAction
+            {
+                Action = "ask_user",
+                Question = $"{reasonText} while a thread is waiting for the reviewer's reply. " +
+                    "Resolve the thread now, or go back to monitoring.",
+                Choices =
+                [
+                    "Resolve this thread",
+                    "Go back to monitoring",
+                    "Stop monitoring"
+                ],
+                Context = state.ActiveWaitingComment
+            };
+        }
+
+        // No active flow and no waiting comment — generic recovery
+        state.ActiveWaitingComment = null;
+        return new MonitorAction
+        {
+            Action = "ask_user",
+            Question = $"{reasonText}. What would you like to do?",
+            Choices = ["Resume monitoring", "Stop monitoring"]
+        };
+    }
+
+    /// <summary>
+    /// Returns an <c>auto_execute</c> action that the MCP wrapper handles by fetching the
+    /// latest HEAD SHA from GitHub. If HEAD advanced since <see cref="MonitorState.HeadShaAtTaskStart"/>,
+    /// the wrapper re-dispatches the event as <c>comment_addressed</c> (comment flow) or
+    /// <c>push_completed</c> (CI flow) — recovering automatically from the post-push hook
+    /// that called <c>ready</c> instead of the documented completion event. If HEAD did
+    /// not advance, the wrapper falls back to <see cref="BuildExecutingTaskRecoveryPrompt"/>.
+    /// </summary>
+    private static MonitorAction BuildRecoverFromReadyAction(MonitorState state)
+    {
+        DebugLogger.Log("StateMachine", $"{state.CurrentState}/ready: dispatching auto_execute recover_from_ready_in_executing_task (snapshot HEAD={ShortSha(state.HeadShaAtTaskStart)})");
+        return new MonitorAction
+        {
+            Action = "auto_execute",
+            Task = "recover_from_ready_in_executing_task"
+        };
+    }
+
+    /// <summary>
+    /// Pure decision logic for the <c>recover_from_ready_in_executing_task</c> auto_execute
+    /// dispatch. Extracted from <c>MonitorFlowTools.ExecuteAutoAction</c> so it can be
+    /// unit-tested without going through the async HEAD-fetch path.
+    ///
+    /// Inputs: the state (CommentFlow / CiFailureFlow / ExecutingTaskExpectedCompletion)
+    /// and a precomputed <paramref name="headAdvanced"/> flag (true when the latest HEAD
+    /// differs from <see cref="MonitorState.HeadShaAtTaskStart"/>).
+    ///
+    /// Behavior:
+    /// - <c>headAdvanced + comment flow</c>: dispatch <c>comment_addressed</c> ONLY when
+    ///   <see cref="MonitorState.ExecutingTaskExpectedCompletion"/> is exactly
+    ///   <c>"comment_addressed"</c> (the task has a single documented completion path).
+    ///   Otherwise (ambiguous task such as <c>apply_recommendation</c> which can complete as
+    ///   <c>comment_addressed</c> for an implementation push OR <c>comment_replied</c> for a
+    ///   proving-test push), fall back to the flow-aware ask_user prompt so the user
+    ///   disambiguates instead of the engine guessing wrong and incorrectly resolving a
+    ///   thread that should stay open for the reviewer.
+    /// - <c>headAdvanced + CI flow</c>: dispatch <c>push_completed</c> (the CI flow has a
+    ///   single completion path).
+    /// - <c>headAdvanced + no flow</c>: resume polling.
+    /// - <c>!headAdvanced</c>: build the no-push recovery prompt.
+    /// </summary>
+    internal static MonitorAction BuildRecoverFromReadyResolution(
+        MonitorState state,
+        bool headAdvanced,
+        bool headRefreshFailed = false)
+    {
+        if (headAdvanced && state.CommentFlow != CommentFlowState.None)
+        {
+            if (state.ExecutingTaskExpectedCompletion == "comment_addressed")
+            {
+                DebugLogger.Log("AutoExec", "recover_from_ready: HEAD advanced + comment flow + unambiguous → dispatching comment_addressed");
+                return ProcessEvent(state, "comment_addressed", null, null);
+            }
+
+            // Ambiguous task (e.g., apply_recommendation) — fall back to ask_user.
+            DebugLogger.Log("AutoExec", "recover_from_ready: HEAD advanced + comment flow + ambiguous task → asking user how to mark it");
+            var priorCommentFlow = state.CommentFlow;
+            var priorCiFailureFlow = state.CiFailureFlow;
+            state.CurrentState = MonitorStateId.AwaitingUser;
+            return BuildExecutingTaskRecoveryPrompt(
+                state,
+                reasonText: "The task pushed a commit but didn't tell me whether to resolve the thread or leave it for the reviewer",
+                priorCommentFlow,
+                priorCiFailureFlow);
+        }
+
+        if (headAdvanced && state.CiFailureFlow != CiFailureFlowState.None)
+        {
+            DebugLogger.Log("AutoExec", "recover_from_ready: HEAD advanced + CI flow → dispatching push_completed");
+            return ProcessEvent(state, "push_completed", null, null);
+        }
+
+        // Waiting-comment case (no flow but ActiveWaitingComment set) — must NOT auto-resume,
+        // because that would clear the waiting context and the user loses the original
+        // Resolve / Go-back choices. Surface the waiting-comment recovery prompt instead.
+        if (headAdvanced && state.ActiveWaitingComment != null)
+        {
+            DebugLogger.Log("AutoExec", "recover_from_ready: HEAD advanced + waiting comment → surfacing resolve/go-back prompt");
+            state.CurrentState = MonitorStateId.AwaitingUser;
+            return BuildExecutingTaskRecoveryPrompt(
+                state,
+                reasonText: "The task pushed a commit while a thread was waiting for the reviewer's reply",
+                CommentFlowState.None,
+                CiFailureFlowState.None);
+        }
+
+        if (headAdvanced)
+        {
+            DebugLogger.Log("AutoExec", "recover_from_ready: HEAD advanced + no active flow → resuming polling");
+            state.CurrentState = MonitorStateId.AwaitingUser;
+            return ProcessEvent(state, "user_chose", "resume", null);
+        }
+
+        // No push detected — flow-aware no-push recovery prompt. If we couldn't
+        // refresh HEAD from GitHub (or never captured a snapshot), we can't actually
+        // know whether a push happened — surface an uncertainty prompt so the user
+        // can pick the correct completion path explicitly instead of being told
+        // "finished without a new commit" (which may be wrong).
+        var cannotDetermineHeadAdvance = headRefreshFailed
+            || string.IsNullOrWhiteSpace(state.HeadShaAtTaskStart);
+        var noPushReason = cannotDetermineHeadAdvance
+            ? "I couldn't verify whether you pushed (HEAD refresh from GitHub failed or no baseline was captured)"
+            : "Looks like the task finished without a new commit";
+        DebugLogger.Log("AutoExec", $"recover_from_ready: HEAD unchanged — building flow-aware recovery prompt (cannotDetermine={cannotDetermineHeadAdvance})");
+        var noPushPriorCommentFlow = state.CommentFlow;
+        var noPushPriorCiFailureFlow = state.CiFailureFlow;
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        return BuildExecutingTaskRecoveryPrompt(
+            state,
+            reasonText: noPushReason,
+            noPushPriorCommentFlow,
+            noPushPriorCiFailureFlow);
+    }
+
+    private static string ShortSha(string? sha) =>
+        string.IsNullOrEmpty(sha) ? "(none)" : sha.Length <= 7 ? sha : sha[..7];
 
     private static MonitorAction TransitionToPolling(MonitorState state)
     {
@@ -374,6 +635,15 @@ public static class MonitorTransitions
     private static MonitorAction ProcessUserChoice(MonitorState state, string? choice, object? data)
     {
         DebugLogger.Log("StateMachine", $"ProcessUserChoice: choice={choice ?? "null"}, commentFlow={state.CommentFlow}, activeWaiting={state.ActiveWaitingComment != null}");
+
+        // "Stop monitoring" is offered in every flow-preserving recovery prompt
+        // (BuildExecutingTaskRecoveryPrompt). It must take precedence over per-flow
+        // routing — otherwise ProcessCommentChoice/ProcessCiFailureChoice/
+        // ProcessWaitingCommentChoice swallow "stop" via their fall-through branches
+        // and silently resume polling instead of stopping the monitor.
+        if (choice == "stop")
+            return StopMonitoring(state);
+
         // Route based on the active flow
         if (state.CommentFlow != CommentFlowState.None)
             return ProcessCommentChoice(state, choice);
@@ -453,6 +723,18 @@ public static class MonitorTransitions
 
     private static MonitorAction ProcessCommentChoice(MonitorState state, string? choice)
     {
+        // Recovery shortcuts available from any comment-flow sub-state — the (ExecutingTask, "ready")
+        // recovery path offers these when HEAD did NOT advance during the task.
+        // - treat_as_addressed: routes through ProcessCommentAddressed (resolves the thread).
+        // - treat_as_replied_externally: user already handled the reply outside the loop
+        //   (e.g., replied directly on GitHub or chose to leave it). Don't post anything,
+        //   don't resolve — just advance past this comment.
+        if (choice == "treat_as_addressed")
+            return ProcessCommentAddressed(state, null);
+
+        if (choice == "treat_as_replied_externally")
+            return AdvanceAfterComment(state, "Comment replied externally");
+
         return (state.CommentFlow, choice) switch
         {
             (CommentFlowState.MultiCommentPrompt, "address_all") => BeginAddressAll(state),
@@ -476,6 +758,17 @@ public static class MonitorTransitions
             (CommentFlowState.ExplainAllIterating, "apply_fix") => BeginApplyRecommendation(state),
             (CommentFlowState.ExplainAllIterating, "skip") => AdvanceExplainAll(state),
             (CommentFlowState.ExplainAllIterating, "done") => TransitionToPolling(state),
+
+            // "Skip this comment" from the ExecutingTask recovery prompt is offered for
+            // every comment-flow sub-state. AddressAllIterating / ExplainAllIterating
+            // already handle skip explicitly above with their own semantics. The remaining
+            // sub-states (SingleCommentPrompt, PickComment, PickRemaining) previously fell
+            // through to TransitionToPolling, which abandoned the rest of the comment flow.
+            // Route them through SkipAndAdvanceComment so the user can drop the active
+            // thread and continue with whatever comments remain.
+            (CommentFlowState.SingleCommentPrompt, "skip") => SkipAndAdvanceComment(state),
+            (CommentFlowState.PickComment, "skip") => SkipAndAdvanceComment(state),
+            (CommentFlowState.PickRemaining, "skip") => SkipAndAdvanceComment(state),
 
             (CommentFlowState.PickComment, _) => HandlePickedComment(state, choice),
             (CommentFlowState.PickRemaining, "continue") => ContinueToNextComment(state),
@@ -532,7 +825,7 @@ public static class MonitorTransitions
     private static MonitorAction EmitExplainForCurrentComment(MonitorState state)
     {
         var c = state.UnresolvedComments[state.CurrentCommentIndex];
-        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.EnterExecutingTask();
         state.PendingExplainResult = true;
         state.LastRecommendation = null;
         return new MonitorAction
@@ -591,7 +884,7 @@ public static class MonitorTransitions
 
     private static MonitorAction BeginAddressCurrentComment(MonitorState state)
     {
-        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.EnterExecutingTask();
         return EmitAddressCommentAction(state);
     }
 
@@ -601,7 +894,7 @@ public static class MonitorTransitions
             return TransitionToPolling(state);
 
         var c = state.UnresolvedComments[state.CurrentCommentIndex];
-        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.EnterExecutingTask();
         return new MonitorAction
         {
             Action = "execute",
@@ -622,7 +915,7 @@ public static class MonitorTransitions
     private static MonitorAction BeginExplainComment(MonitorState state, bool isReplyEvent = false)
     {
         var c = state.UnresolvedComments[state.CurrentCommentIndex];
-        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.EnterExecutingTask();
         state.PendingExplainResult = true;
         state.LastRecommendation = null;
         var replyContext = isReplyEvent && !string.IsNullOrEmpty(c.LastReplyAuthor)
@@ -651,7 +944,12 @@ public static class MonitorTransitions
         }
 
         var c = state.UnresolvedComments[state.CurrentCommentIndex];
-        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.EnterExecutingTask();
+        // address_comment has a single documented completion path: event=comment_addressed.
+        // Set explicitly so the (ExecutingTask, "ready") recovery can auto-dispatch on push
+        // detection rather than falling back to ask_user (apply_recommendation deliberately
+        // leaves this null because it has two completion paths).
+        state.ExecutingTaskExpectedCompletion = "comment_addressed";
         return new MonitorAction
         {
             Action = "execute",
@@ -663,6 +961,23 @@ public static class MonitorTransitions
 
     private static MonitorAction ProcessCommentAddressed(MonitorState state, object? data)
     {
+        // Waiting-comment context: ActiveWaitingComment is set but no comment flow is
+        // active (the original flow ended; the thread is awaiting reviewer reply). The
+        // index-based lookup below would either miss or operate on a different comment,
+        // so route the resolve through ActiveWaitingComment directly.
+        // See PR #51 reviewer comment on MonitorFlowTools.cs:183.
+        if (state.CommentFlow == CommentFlowState.None && state.ActiveWaitingComment != null)
+        {
+            var waiting = state.ActiveWaitingComment;
+            if (string.IsNullOrWhiteSpace(state.PendingReplyText))
+                return EmitComposeReplyAction(state, waiting, "comment_addressed");
+
+            waiting.IsAddressed = true;
+            state.PendingResolveAfterAddress = true;
+            state.PendingResolveSummary = "Comment addressed";
+            return BuildResolveThreadAction(state, waiting);
+        }
+
         var addressedComment = state.UnresolvedComments.Count > state.CurrentCommentIndex
             ? state.UnresolvedComments[state.CurrentCommentIndex]
             : null;
@@ -686,6 +1001,34 @@ public static class MonitorTransitions
 
     private static MonitorAction ProcessCommentReplied(MonitorState state)
     {
+        // Waiting-comment context: see ProcessCommentAddressed. Route through the
+        // ActiveWaitingComment so freeform replies on a waiting thread post on the
+        // correct thread instead of falling through to AdvanceAfterComment.
+        if (state.CommentFlow == CommentFlowState.None && state.ActiveWaitingComment != null)
+        {
+            var waiting = state.ActiveWaitingComment;
+            if (string.IsNullOrWhiteSpace(state.PendingReplyText))
+                return EmitComposeReplyAction(state, waiting, "comment_replied");
+
+            if (PrStatusFetcher.IsBotReviewer(waiting.Author))
+            {
+                waiting.IsAddressed = true;
+                state.PendingResolveAfterAddress = true;
+                state.PendingResolveSummary = "Replied to comment";
+                return BuildResolveThreadAction(state, waiting);
+            }
+
+            // Human reviewer — post the reply on the existing waiting thread without
+            // resolving. The thread stays in WaitingForReplyComments.
+            if (!state.WaitingForReplyComments.Any(c => c.Id == waiting.Id))
+            {
+                waiting.IsWaitingForReply = true;
+                state.WaitingForReplyComments.Add(waiting);
+            }
+            state.PendingAdvanceAfterReply = "Replied to comment";
+            return BuildPostReplyAction(state, waiting);
+        }
+
         // Agent replied to a comment (pushback/clarification) without code changes.
         // Auto-resolve if the reviewer is a bot (they won't reply back).
         // Track as waiting-for-reply if the reviewer is human.
@@ -868,6 +1211,16 @@ public static class MonitorTransitions
     /// emit a compose_reply task. The server's sampling handler intercepts this and composes
     /// the reply via sampling (stored in PendingReplyText). Sampling support is required for
     /// this flow; if sampling is unavailable, the task will fail with no agent fallback.
+    ///
+    /// IMPORTANT: This is a re-entry — the caller (ProcessCommentAddressed/ProcessCommentReplied)
+    /// runs while CurrentState is already ExecutingTask. We must NOT call EnterExecutingTask
+    /// here because that would overwrite HeadShaAtTaskStart (with the still-stale state.HeadSha,
+    /// since the server hasn't refreshed since the agent pushed) and reset
+    /// ExecutingTaskExpectedCompletion to null. compose_reply itself never touches git, so the
+    /// prior task's recovery snapshot must be preserved — otherwise an event=ready arriving
+    /// during compose_reply (from a post-push hook) misattributes the original push to
+    /// compose_reply and surfaces a bogus recovery prompt or auto-dispatches the wrong
+    /// completion event. See PR #51 reviewer comment on MonitorTransitions.cs:1109.
     /// </summary>
     private static MonitorAction EmitComposeReplyAction(MonitorState state, CommentInfo c, string completionEvent)
     {
@@ -964,6 +1317,12 @@ public static class MonitorTransitions
 
     private static MonitorAction ProcessCiFailureChoice(MonitorState state, string? choice)
     {
+        // Recovery shortcut from any CI-failure sub-state — the (ExecutingTask, "ready")
+        // recovery path offers this when HEAD did NOT advance during the task. Surfaces the
+        // documented push_completed behavior: clear failure state and resume polling.
+        if (choice == "treat_as_pushed")
+            return TransitionToPolling(state);
+
         return (state.CiFailureFlow, choice) switch
         {
             (CiFailureFlowState.InvestigationResults, "apply_fix") => BeginApplyFix(state),
@@ -1049,7 +1408,7 @@ public static class MonitorTransitions
 
     private static MonitorAction BeginApplyFix(MonitorState state)
     {
-        state.CurrentState = MonitorStateId.ApplyingFix;
+        state.EnterApplyingFix();
         return new MonitorAction
         {
             Action = "execute",
@@ -1078,7 +1437,7 @@ public static class MonitorTransitions
         // Azure DevOps has no API for rerun-failed-only; only the web UI supports it.
         state.PendingRerunWhenChecksComplete = false;
         var buildUrl = state.FailedChecks.FirstOrDefault()?.Url;
-        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.EnterExecutingTask();
         state.CommentFlow = CommentFlowState.None;
         state.CiFailureFlow = CiFailureFlowState.None;
         return new MonitorAction

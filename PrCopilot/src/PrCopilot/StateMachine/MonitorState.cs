@@ -98,10 +98,33 @@ public class MonitorState
     /// <summary>Reply text composed by the agent, to be posted by the server via the REST API.</summary>
     public string? PendingReplyText { get; set; }
 
+    /// <summary>
+    /// HEAD SHA snapshotted when the state most recently entered <see cref="MonitorStateId.ExecutingTask"/>.
+    /// Used by the recovery path for <c>(ExecutingTask, "ready")</c> to detect whether the agent
+    /// pushed during the task — if HEAD has advanced, "ready" is reinterpreted as a completion event
+    /// (<c>comment_addressed</c> in comment flows, <c>push_completed</c> in CI flows).
+    /// Set via <see cref="EnterExecutingTask"/>; null/empty means no snapshot was captured.
+    /// </summary>
+    public string? HeadShaAtTaskStart { get; set; }
+
     /// <summary>Transient: completion event set by sampling handler for MonitorFlowTools to feed back to state machine.</summary>
     public string? SamplingCompletionEvent { get; set; }
     /// <summary>Transient: completion event set by EmitComposeReplyAction for the sampling compose_reply handler.</summary>
     public string? PendingCompletionEvent { get; set; }
+
+    /// <summary>
+    /// Expected completion event for the currently-executing task, when known unambiguously.
+    /// Read by the (ExecutingTask, "ready") recovery path: when HEAD has advanced and this
+    /// value matches a single completion event (e.g., "comment_addressed", "push_completed"),
+    /// the recovery dispatches that event automatically. When null (ambiguous — e.g., the
+    /// apply_recommendation task can complete as either "comment_addressed" for an implementation
+    /// push OR "comment_replied" for a proving-test push), the recovery falls back to the
+    /// flow-aware ask_user prompt so the user disambiguates instead of the engine guessing.
+    ///
+    /// Reset to null on every <see cref="EnterExecutingTask"/> call; emitters that know
+    /// their task's unambiguous completion event must set this explicitly after that call.
+    /// </summary>
+    public string? ExecutingTaskExpectedCompletion { get; set; }
 
     /// <summary>
     /// When set, ProcessTaskComplete calls AdvanceAfterComment with this summary.
@@ -132,4 +155,41 @@ public class MonitorState
     /// Set when ReviewerReplied terminal state is detected.
     /// </summary>
     public CommentInfo? RepliedComment { get; set; }
+
+    /// <summary>
+    /// Transition to <see cref="MonitorStateId.ExecutingTask"/> and snapshot the current
+    /// <see cref="HeadSha"/> as <see cref="HeadShaAtTaskStart"/>. The snapshot lets the
+    /// recovery path detect post-push resumes (where the agent pushed during the task and
+    /// then re-entered via the post-push <c>pr_monitor_start</c> hook with event=ready
+    /// instead of calling the documented completion event).
+    ///
+    /// Use this instead of assigning <c>CurrentState = MonitorStateId.ExecutingTask</c>
+    /// directly so the snapshot is never forgotten at a new task-entry site.
+    /// </summary>
+    public void EnterExecutingTask()
+    {
+        CurrentState = MonitorStateId.ExecutingTask;
+        SnapshotForRecovery();
+    }
+
+    /// <summary>
+    /// Transition to <see cref="MonitorStateId.ApplyingFix"/> and snapshot HEAD for
+    /// post-push recovery. The CI fix flow's apply_fix task tells the agent to push
+    /// before reporting push_completed; if a post-push hook fires event=ready instead,
+    /// the (ApplyingFix, "ready") recovery uses this snapshot to detect that the push
+    /// happened and re-dispatch as push_completed (rather than wiping CiFailureFlow).
+    /// </summary>
+    public void EnterApplyingFix()
+    {
+        CurrentState = MonitorStateId.ApplyingFix;
+        SnapshotForRecovery();
+    }
+
+    private void SnapshotForRecovery()
+    {
+        HeadShaAtTaskStart = HeadSha;
+        // Reset expected completion to "ambiguous" on every entry. Emitters that know their
+        // task's single completion event must set this AFTER calling EnterExecutingTask.
+        ExecutingTaskExpectedCompletion = null;
+    }
 }
