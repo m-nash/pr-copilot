@@ -30,7 +30,7 @@ The MCP server and all PR monitoring features work on both platforms. The TUI da
 
 ### For building from source
 
-- [.NET 10 SDK](https://dotnet.microsoft.com/download)
+- [Stable .NET 10 SDK](https://dotnet.microsoft.com/download)
 
 ### Optional
 
