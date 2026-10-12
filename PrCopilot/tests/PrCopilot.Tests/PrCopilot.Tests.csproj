@@ -20,6 +20,20 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\PrCopilot\PrCopilot.csproj" />
+    <ProjectReference Include="..\FakeGitHubCli\FakeGitHubCli.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
+
+  <Target Name="CopyFakeGitHubCli" AfterTargets="Build" Condition="'$(DesignTimeBuild)' != 'true'">
+    <MSBuild Projects="..\FakeGitHubCli\FakeGitHubCli.csproj" Targets="GetTargetPath" Properties="Configuration=$(Configuration)">
+      <Output TaskParameter="TargetOutputs" ItemName="FakeGitHubCliTargetPath" />
+    </MSBuild>
+    <PropertyGroup>
+      <FakeGitHubCliDirectory>@(FakeGitHubCliTargetPath->'%(RootDir)%(Directory)')</FakeGitHubCliDirectory>
+    </PropertyGroup>
+    <ItemGroup>
+      <FakeGitHubCliFiles Include="$(FakeGitHubCliDirectory)gh*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(FakeGitHubCliFiles)" DestinationFolder="$(OutDir)" />
+  </Target>
 
 </Project>

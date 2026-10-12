@@ -68,8 +68,9 @@ public class MonitorFlowTools
                     var explanation = await SamplingHelper.ExplainCommentAsync(server, comment, state, cancellationToken);
                     if (explanation == null)
                     {
-                        DebugLogger.Log("Sampling", "First explain attempt returned null — retrying");
-                        explanation = await SamplingHelper.ExplainCommentAsync(server, comment, state, cancellationToken);
+                        var retryMaxTokens = SamplingHelper.CommentExplanationMaxTokens * 2;
+                        DebugLogger.Log("Sampling", $"First explain attempt returned null — retrying with {retryMaxTokens} tokens");
+                        explanation = await SamplingHelper.ExplainCommentAsync(server, comment, state, retryMaxTokens, cancellationToken);
                     }
                     if (explanation == null)
                         throw new InvalidOperationException("Sampling failed to explain comment after 2 attempts — LLM returned response that could not be parsed");
@@ -341,8 +342,19 @@ public class MonitorFlowTools
         // If there's already an active session for this PR, reuse it.
         // This handles the Esc → resume case: the old poll loop is still alive,
         // so we just return the existing state without disrupting the viewer or log.
-        if (_sessions.TryGetValue(monitorId, out var existing))
+        while (_sessions.TryGetValue(monitorId, out var existing))
         {
+            if (existing.IsStopped || existing.State.CurrentState == MonitorStateId.Stopped)
+            {
+                if (_sessions.TryRemove(new KeyValuePair<string, MonitorSession>(monitorId, existing)))
+                {
+                    DebugLogger.Log("PrMonitorStart", $"Discarding stopped session for {monitorId}");
+                    existing.StopPermanently();
+                    existing.Dispose();
+                }
+                continue;
+            }
+
             DebugLogger.Log("PrMonitorStart", $"Reusing existing session for {monitorId}");
             var s = existing.State;
             return JsonSerializer.Serialize(new
@@ -360,6 +372,8 @@ public class MonitorFlowTools
                 message = $"Resuming existing monitor for PR #{prNumber}. Call pr_monitor_next_step with event='ready' to continue."
             }, _jsonOptions);
         }
+
+        cancellationToken.ThrowIfCancellationRequested();
 
         // Fetch all PR data
         var prInfo = await PrStatusFetcher.FetchPrInfoAsync(owner, repo, prNumber);

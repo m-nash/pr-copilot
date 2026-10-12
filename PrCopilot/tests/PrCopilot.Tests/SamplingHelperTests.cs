@@ -194,6 +194,22 @@ public class SamplingHelperTests
     }
 
     [Fact]
+    public async Task ExplainCommentAsync_ReservesBudgetForReasoning()
+    {
+        var complete = "{\"explanation\":\"Review the change\",\"recommendation\":\"Add a test\",\"recommendationType\":\"implement\"}";
+        var server = new FakeSamplingMcpServer(request =>
+            [request.MaxTokens >= 4096 ? complete : "{\"explanation\":\"Review the"]);
+        var comment = new CommentInfo { Author = "reviewer", FilePath = "", Body = "Add a test" };
+
+        var result = await SamplingHelper.ExplainCommentAsync(server, comment, new MonitorState());
+
+        Assert.NotNull(result);
+        Assert.Equal("Add a test", result.Recommendation);
+        Assert.Equal(4096, server.LastRequest!.MaxTokens);
+        Assert.Single(server.Requests);
+    }
+
+    [Fact]
     public async Task ComposeReplyAsync_ReturnsReply()
     {
         var json = "{\"replyText\": \"Added the null check — owner/repo@abc1234\"}";

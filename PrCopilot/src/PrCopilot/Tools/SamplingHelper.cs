@@ -18,6 +18,9 @@ namespace PrCopilot.Tools;
 /// </summary>
 internal static class SamplingHelper
 {
+    // Sampling limits include model reasoning as well as the JSON response.
+    internal const int CommentExplanationMaxTokens = 4096;
+
     private static readonly JsonSerializerOptions _jsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
@@ -526,10 +529,18 @@ internal static class SamplingHelper
     /// Gathers code context server-side before calling the LLM.
     /// Returns null if context fetching or sampling fails.
     /// </summary>
+    internal static Task<CommentExplanation?> ExplainCommentAsync(
+        McpServer server,
+        CommentInfo comment,
+        MonitorState state,
+        CancellationToken cancellationToken = default) =>
+        ExplainCommentAsync(server, comment, state, CommentExplanationMaxTokens, cancellationToken);
+
     internal static async Task<CommentExplanation?> ExplainCommentAsync(
         McpServer server,
         CommentInfo comment,
         MonitorState state,
+        int maxTokens,
         CancellationToken cancellationToken = default)
     {
         DebugLogger.Log("Sampling", $"Explaining comment from {comment.Author} on {comment.FilePath}:{comment.Line}");
@@ -588,7 +599,7 @@ internal static class SamplingHelper
 
         return await SampleStructuredAsync<CommentExplanation>(
             server, systemPrompt, userMessage,
-            maxTokens: 800, temperature: 0.2f,
+            maxTokens: maxTokens, temperature: 0.2f,
             cancellationToken);
     }
 

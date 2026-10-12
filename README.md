@@ -119,6 +119,8 @@ The `pr-monitor` skill activates automatically on:
    - ⚠️ Merge conflict → Handle myself
 4. **After your action** — monitoring resumes automatically
 
+Starting monitoring again reuses active sessions but initializes a fresh session after a monitor has stopped. Reviewer-comment explanations fetch the matching file patch across all PR file pages and use a 4,096-token sampling budget, with one 8,192-token retry if the response JSON is incomplete or invalid.
+
 ### CLI flags
 
 | Flag | Description |

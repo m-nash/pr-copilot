@@ -14,8 +14,10 @@ internal class FakeSamplingMcpServer : FakeMcpServer
 #pragma warning restore MCPEXP002
 {
     private readonly string[] _responseBlocks;
+    private readonly Func<CreateMessageRequestParams, string[]>? _responseFactory;
 
     public CreateMessageRequestParams? LastRequest { get; private set; }
+    public List<CreateMessageRequestParams> Requests { get; } = [];
 
     public FakeSamplingMcpServer(string responseText = "sampling response")
     {
@@ -29,6 +31,12 @@ internal class FakeSamplingMcpServer : FakeMcpServer
     public FakeSamplingMcpServer(params string[] responseBlocks)
     {
         _responseBlocks = responseBlocks.Length > 0 ? responseBlocks : ["sampling response"];
+    }
+
+    public FakeSamplingMcpServer(Func<CreateMessageRequestParams, string[]> responseFactory)
+    {
+        _responseBlocks = [];
+        _responseFactory = responseFactory;
     }
 
     public override ClientCapabilities? ClientCapabilities => new()
@@ -46,13 +54,18 @@ internal class FakeSamplingMcpServer : FakeMcpServer
             {
                 LastRequest = paramsNode.Deserialize<CreateMessageRequestParams>(
                     new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                if (LastRequest != null)
+                    Requests.Add(LastRequest);
             }
 
+            var responseBlocks = _responseFactory != null && LastRequest != null
+                ? _responseFactory(LastRequest)
+                : _responseBlocks;
             var result = new CreateMessageResult
             {
                 Model = "test-model",
                 Role = Role.Assistant,
-                Content = [.. _responseBlocks.Select(b => new TextContentBlock { Text = b })],
+                Content = [.. responseBlocks.Select(b => new TextContentBlock { Text = b })],
                 StopReason = "endTurn"
             };
 
