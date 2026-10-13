@@ -25,6 +25,7 @@ namespace PrCopilot.Tools;
 public class MonitorFlowTools
 {
     private static readonly ConcurrentDictionary<string, MonitorSession> _sessions = new();
+    private static readonly ConcurrentDictionary<string, Lazy<Task<string>>> _initializations = new(StringComparer.Ordinal);
     private static readonly HashSet<string> _multiMonitorIds = new();
     private static readonly object _multiMonitorLock = new();
 
@@ -329,12 +330,44 @@ public class MonitorFlowTools
     }
 
     [McpServerTool(Name = "pr_monitor_start"), Description("Initialize PR monitoring. Fetches PR data, sets up log file, returns monitor_id. Call pr_monitor_next_step next.")]
-    public async Task<string> PrMonitorStart(
+    public Task<string> PrMonitorStart(
         [Description("GitHub repository owner")] string owner,
         [Description("GitHub repository name")] string repo,
         [Description("Pull request number")] int prNumber,
         [Description("Session folder path for log/trigger/debug files")] string sessionFolder,
         CancellationToken cancellationToken = default)
+    {
+        var monitorId = $"pr-{owner}-{repo}-{prNumber}";
+        var initialization = _initializations.GetOrAdd(monitorId, key => new Lazy<Task<string>>(() =>
+        {
+            var task = InitializeAsync();
+            // Canceled callers must not leave a shared initialization fault unobserved.
+            _ = task.ContinueWith(completed => _ = completed.Exception, CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            return task;
+        }));
+        return initialization.Value.WaitAsync(cancellationToken);
+
+        async Task<string> InitializeAsync()
+        {
+            try
+            {
+                return await InitializeMonitorAsync(owner, repo, prNumber, sessionFolder, cancellationToken);
+            }
+            finally
+            {
+                // Waiters must leave the claim in place until its owner finishes.
+                _initializations.TryRemove(monitorId, out _);
+            }
+        }
+    }
+
+    private async Task<string> InitializeMonitorAsync(
+        string owner,
+        string repo,
+        int prNumber,
+        string sessionFolder,
+        CancellationToken cancellationToken)
     {
         var monitorId = $"pr-{owner}-{repo}-{prNumber}";
         DebugLogger.Log("PrMonitorStart", $"Called: owner={owner}, repo={repo}, pr={prNumber}");

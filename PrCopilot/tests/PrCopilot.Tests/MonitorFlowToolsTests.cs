@@ -128,6 +128,110 @@ public class MonitorFlowToolsTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task PrMonitorStart_SharesConcurrentStoppedInitialization()
+    {
+        _gh.PauseStartupRequests();
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        var monitorId = $"pr-{owner}-repo-42";
+        var sessions = GetSessions();
+        using var stopped = new MonitorSession
+        {
+            State = new MonitorState { CurrentState = MonitorStateId.Stopped }
+        };
+        Assert.True(sessions.TryAdd(monitorId, stopped));
+        var first = new MonitorFlowTools().PrMonitorStart(owner, "repo", 42, "");
+        Task<string>? second = null;
+        try
+        {
+            await _gh.WaitForStartupRequestsAsync(1);
+            second = new MonitorFlowTools().PrMonitorStart(owner, "repo", 42, "");
+            _gh.ReleaseStartupRequests();
+
+            var firstError = await Assert.ThrowsAsync<InvalidOperationException>(() => first);
+            var secondError = await Assert.ThrowsAsync<InvalidOperationException>(() => second);
+            Assert.Contains("fixture startup failure", firstError.Message);
+            Assert.Contains("fixture startup failure", secondError.Message);
+            Assert.Single(_gh.ReadStartupRequests());
+            Assert.False(sessions.ContainsKey(monitorId));
+        }
+        finally
+        {
+            _gh.ReleaseStartupRequests();
+            await Record.ExceptionAsync(() => first);
+            if (second != null)
+                await Record.ExceptionAsync(() => second);
+            sessions.TryRemove(monitorId, out _);
+        }
+    }
+
+    [Fact]
+    public async Task PrMonitorStart_CanceledWaiterDoesNotRestartSharedInitialization()
+    {
+        _gh.PauseStartupRequests();
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        var first = new MonitorFlowTools().PrMonitorStart(owner, "repo", 42, "");
+        Task<string>? second = null;
+        using var cancellation = new CancellationTokenSource();
+        try
+        {
+            await _gh.WaitForStartupRequestsAsync(1);
+            second = new MonitorFlowTools().PrMonitorStart(owner, "repo", 42, "", cancellation.Token);
+            cancellation.Cancel();
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => second.WaitAsync(TimeSpan.FromSeconds(2)));
+            Assert.False(first.IsCompleted);
+            _gh.ReleaseStartupRequests();
+            await Assert.ThrowsAsync<InvalidOperationException>(() => first);
+            Assert.Single(_gh.ReadStartupRequests());
+        }
+        finally
+        {
+            _gh.ReleaseStartupRequests();
+            await Record.ExceptionAsync(() => first);
+            if (second != null)
+                await Record.ExceptionAsync(() => second);
+        }
+    }
+
+    [Fact]
+    public async Task PrMonitorStart_DifferentPrInitializationsRemainIndependent()
+    {
+        _gh.PauseStartupRequests();
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        var first = new MonitorFlowTools().PrMonitorStart(owner, "first-repo", 42, "");
+        var second = new MonitorFlowTools().PrMonitorStart(owner, "second-repo", 42, "");
+        try
+        {
+            await _gh.WaitForStartupRequestsAsync(2);
+            _gh.ReleaseStartupRequests();
+            await Assert.ThrowsAsync<InvalidOperationException>(() => first);
+            await Assert.ThrowsAsync<InvalidOperationException>(() => second);
+            Assert.Equal(2, _gh.ReadStartupRequests().Count);
+        }
+        finally
+        {
+            _gh.ReleaseStartupRequests();
+            await Record.ExceptionAsync(() => first);
+            await Record.ExceptionAsync(() => second);
+        }
+    }
+
+    [Fact]
+    public async Task PrMonitorStart_FailedInitializationCanBeRetried()
+    {
+        _gh.PauseStartupRequests();
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        _gh.ReleaseStartupRequests();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new MonitorFlowTools().PrMonitorStart(owner, "repo", 42, ""));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new MonitorFlowTools().PrMonitorStart(owner, "repo", 42, ""));
+
+        Assert.Equal(2, _gh.ReadStartupRequests().Count);
+    }
+
     public void Dispose() => _gh.Dispose();
 
     private static async Task<bool> ExplainCommentAsync(FakeSamplingMcpServer server, MonitorState state)
