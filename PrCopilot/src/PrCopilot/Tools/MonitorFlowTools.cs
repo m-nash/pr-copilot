@@ -337,6 +337,9 @@ public class MonitorFlowTools
         [Description("Session folder path for log/trigger/debug files")] string sessionFolder,
         CancellationToken cancellationToken = default)
     {
+        if (cancellationToken.IsCancellationRequested)
+            return Task.FromCanceled<string>(cancellationToken);
+
         var monitorId = $"pr-{owner}-{repo}-{prNumber}";
         var initialization = _initializations.GetOrAdd(monitorId, key => new Lazy<Task<string>>(() =>
         {
@@ -352,7 +355,7 @@ public class MonitorFlowTools
         {
             try
             {
-                return await InitializeMonitorAsync(owner, repo, prNumber, sessionFolder, cancellationToken);
+                return await InitializeMonitorAsync(owner, repo, prNumber, sessionFolder, CancellationToken.None);
             }
             finally
             {

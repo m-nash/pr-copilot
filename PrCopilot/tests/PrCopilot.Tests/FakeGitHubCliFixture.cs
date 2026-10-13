@@ -30,6 +30,7 @@ internal sealed class FakeGitHubCliFixture : IDisposable
         SetEnvironment("PR_COPILOT_TEST_GH_CAPTURE", _captureFile);
         SetEnvironment("PR_COPILOT_TEST_GH_EXIT_CODE", "0");
         SetEnvironment("PR_COPILOT_TEST_GH_START_BARRIER", "");
+        SetEnvironment("PR_COPILOT_TEST_GH_START_SUCCESS", "");
     }
 
     public void Respond(string response, int exitCode = 0)
@@ -48,6 +49,11 @@ internal sealed class FakeGitHubCliFixture : IDisposable
         Directory.CreateDirectory(_startupDirectory);
         Environment.SetEnvironmentVariable("PR_COPILOT_TEST_GH_START_BARRIER", _startupDirectory);
     }
+
+    public string DirectoryPath => _directory;
+
+    public void CompleteStartupSuccessfully() =>
+        Environment.SetEnvironmentVariable("PR_COPILOT_TEST_GH_START_SUCCESS", "1");
 
     public IReadOnlyList<string[]> ReadStartupRequests() =>
         Directory.GetFiles(_startupDirectory, "*.entered")

@@ -58,7 +58,7 @@ public class MonitorFlowToolsTests : IDisposable
     [InlineData(true, false)]
     [InlineData(false, true)]
     [InlineData(true, true)]
-    public async Task PrMonitorStart_DiscardsStoppedSession(bool stoppedState, bool permanentlyStopped)
+    public async Task PrMonitorStart_AlreadyCanceledRequestDoesNotStartWork(bool stoppedState, bool permanentlyStopped)
     {
         var owner = $"fixture-{Guid.NewGuid():N}";
         var monitorId = $"pr-{owner}-repo-42";
@@ -82,12 +82,12 @@ public class MonitorFlowToolsTests : IDisposable
 
         try
         {
-            await Assert.ThrowsAsync<OperationCanceledException>(() =>
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
                 new MonitorFlowTools().PrMonitorStart(owner, "repo", 42, "", cancellation.Token));
 
-            Assert.False(sessions.ContainsKey(monitorId));
-            Assert.True(session.IsStopped);
-            Assert.True(pollToken.IsCancellationRequested);
+            Assert.Same(session, sessions[monitorId]);
+            Assert.Equal(permanentlyStopped, session.IsStopped);
+            Assert.Equal(permanentlyStopped, pollToken.IsCancellationRequested);
             Assert.Empty(_gh.ReadRequests());
         }
         finally
@@ -191,6 +191,48 @@ public class MonitorFlowToolsTests : IDisposable
             await Record.ExceptionAsync(() => first);
             if (second != null)
                 await Record.ExceptionAsync(() => second);
+        }
+    }
+
+    [Fact]
+    public async Task PrMonitorStart_CanceledFirstWaiterDoesNotCancelOtherWaiters()
+    {
+        _gh.PauseStartupRequests();
+        _gh.CompleteStartupSuccessfully();
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        var monitorId = $"pr-{owner}-repo-42";
+        var state = new MonitorState { Owner = owner, Repo = "repo", PrNumber = 42, SessionFolder = _gh.DirectoryPath };
+        File.WriteAllText(state.LogFile + ".viewer.pid",
+            Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        using var cancellation = new CancellationTokenSource();
+        var first = new MonitorFlowTools().PrMonitorStart(owner, "repo", 42, _gh.DirectoryPath, cancellation.Token);
+        Task<string>? second = null;
+        try
+        {
+            await _gh.WaitForStartupRequestsAsync(1);
+            second = new MonitorFlowTools().PrMonitorStart(owner, "repo", 42, _gh.DirectoryPath);
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
+            _gh.ReleaseStartupRequests();
+
+            var result = await second;
+            using var response = JsonDocument.Parse(result);
+            Assert.Equal(monitorId, response.RootElement.GetProperty("monitor_id").GetString());
+            Assert.Contains("Monitoring initialized", response.RootElement.GetProperty("message").GetString()!);
+            Assert.Single(_gh.ReadStartupRequests());
+            Assert.False(GetSessions()[monitorId].IsStopped);
+        }
+        finally
+        {
+            _gh.ReleaseStartupRequests();
+            await Record.ExceptionAsync(() => first);
+            if (second != null)
+                await Record.ExceptionAsync(() => second);
+            if (GetSessions().TryRemove(monitorId, out var session))
+            {
+                session.StopPermanently();
+                session.Dispose();
+            }
         }
     }
 

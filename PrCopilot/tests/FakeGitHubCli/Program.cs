@@ -19,11 +19,35 @@ if (!string.IsNullOrEmpty(startupDirectory) &&
     if (File.Exists(Path.Combine(startupDirectory, "release")))
         released.TrySetResult();
     await released.Task.WaitAsync(TimeSpan.FromSeconds(20));
+    if (Environment.GetEnvironmentVariable("PR_COPILOT_TEST_GH_START_SUCCESS") == "1")
+    {
+        Console.Write("""{"title":"Fixture PR","body":"","sha":"fixture-sha","head_branch":"fixture","base_branch":"","url":"https://github.com/owner/repo/pull/42","author":"fixture-author","mergeable":true,"mergeable_state":"clean","state":"open","merged":false}""");
+        return 0;
+    }
     Console.Error.WriteLine("fixture startup failure");
     return 1;
 }
 
 File.AppendAllText(captureFile, JsonSerializer.Serialize(args) + Environment.NewLine);
+
+if (Environment.GetEnvironmentVariable("PR_COPILOT_TEST_GH_START_SUCCESS") == "1" &&
+    args.Length >= 2 && args[0] == "api")
+{
+    var response = args[1] switch
+    {
+        var queryEndpoint when queryEndpoint.EndsWith("/check-runs?per_page=100", StringComparison.Ordinal) => """{"check_runs":[]}""",
+        var queryEndpoint when queryEndpoint.EndsWith("/status", StringComparison.Ordinal) => """{"statuses":[]}""",
+        var queryEndpoint when queryEndpoint.EndsWith("/reviews?per_page=100", StringComparison.Ordinal) => """[{"user":"Copilot","state":"COMMENTED","commit_id":"fixture-sha"}]""",
+        "graphql" => """{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}""",
+        "user" => "fixture-author",
+        _ => null
+    };
+    if (response != null)
+    {
+        Console.Write(response);
+        return 0;
+    }
+}
 
 if (args is ["api", var endpoint, "--paginate", "--slurp"] &&
     endpoint.EndsWith("/files?per_page=100", StringComparison.Ordinal))
