@@ -1,4 +1,7 @@
 <Solution>
+  <Folder Name="/tests/">
+    <Project Path="tests/FakeGitHubCli/FakeGitHubCli.csproj" />
+  </Folder>
   <Project Path="src/PrCopilot/PrCopilot.csproj" />
   <Project Path="tests/PrCopilot.Tests/PrCopilot.Tests.csproj" />
 </Solution>

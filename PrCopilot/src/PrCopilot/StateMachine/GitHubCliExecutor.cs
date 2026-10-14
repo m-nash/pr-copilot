@@ -1,6 +1,7 @@
 // Licensed under the MIT License.
 
 using System.Diagnostics;
+using System.Text.Json;
 using PrCopilot.Services;
 
 namespace PrCopilot.StateMachine;
@@ -122,16 +123,57 @@ public static class GitHubCliExecutor
     public static async Task<(bool success, string output)> FetchPrFileDiffAsync(
         string owner, string repo, int prNumber, string filePath)
     {
-        var (success, diff) = await RunGhAsync(
-            $"pr diff {prNumber} --repo {owner}/{repo} -- \"{filePath}\"");
+        var (success, response) = await RunGhAsync(
+            $"api \"repos/{owner}/{repo}/pulls/{prNumber}/files?per_page=100\" --paginate --slurp");
         if (!success)
-            return (false, diff);
+            return (false, response);
 
-        // Truncate very large diffs
-        if (diff.Length > 5000)
-            diff = diff[..5000] + "\n... [truncated]";
+        try
+        {
+            using var document = JsonDocument.Parse(response);
+            if (document.RootElement.ValueKind != JsonValueKind.Array)
+                throw new JsonException("Expected an array of PR file pages.");
 
-        return (true, diff);
+            var files = document.RootElement.EnumerateArray().SelectMany(page =>
+            {
+                if (page.ValueKind != JsonValueKind.Array)
+                    throw new JsonException("Expected each PR file page to be an array.");
+                return page.EnumerateArray();
+            }).ToArray();
+            if (files.Any(file => file.ValueKind != JsonValueKind.Object))
+                throw new JsonException("Expected each PR file to be an object.");
+
+            bool MatchesPath(JsonElement file, string propertyName) =>
+                file.TryGetProperty(propertyName, out var name) &&
+                name.ValueKind == JsonValueKind.String &&
+                name.GetString() == filePath;
+
+            var file = files.FirstOrDefault(file => MatchesPath(file, "filename"));
+            if (file.ValueKind == JsonValueKind.Undefined)
+                file = files.FirstOrDefault(file => MatchesPath(file, "previous_filename"));
+
+            var diff = file.ValueKind != JsonValueKind.Undefined &&
+                file.TryGetProperty("patch", out var patch) &&
+                patch.ValueKind == JsonValueKind.String
+                    ? patch.GetString()
+                    : null;
+            if (string.IsNullOrEmpty(diff))
+            {
+                var message = $"No textual patch available for {filePath} in PR #{prNumber}.";
+                DebugLogger.Log("GhCli", message);
+                return (false, message);
+            }
+
+            if (diff.Length > 5000)
+                diff = diff[..5000] + "\n... [truncated]";
+
+            return (true, diff);
+        }
+        catch (JsonException ex)
+        {
+            DebugLogger.Error("GhCli", ex);
+            return (false, $"Failed to parse PR file diffs: {ex.Message}");
+        }
     }
 
     /// <summary>

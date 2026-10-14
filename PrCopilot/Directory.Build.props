@@ -6,5 +6,7 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="StyleCop.Analyzers" Version="1.2.0-beta.556" PrivateAssets="all" />
+    <!-- Terminal.Gui brings in a vulnerable SourceLink build task transitively. -->
+    <PackageReference Include="Microsoft.Build.Tasks.Git" Version="10.0.401" PrivateAssets="all" />
   </ItemGroup>
 </Project>
