@@ -34,6 +34,7 @@ internal sealed class FakeGitHubCliFixture : IDisposable
         SetEnvironment("PR_COPILOT_TEST_GH_START_BARRIER", "");
         SetEnvironment("PR_COPILOT_TEST_GH_START_SUCCESS", "");
         SetEnvironment("PR_COPILOT_TEST_GH_RESOLVE_BARRIER", "");
+        SetEnvironment("PR_COPILOT_TEST_GH_PR_INFO", "");
     }
 
     public void Respond(string response, int exitCode = 0)
@@ -57,6 +58,13 @@ internal sealed class FakeGitHubCliFixture : IDisposable
 
     public void CompleteStartupSuccessfully() =>
         Environment.SetEnvironmentVariable("PR_COPILOT_TEST_GH_START_SUCCESS", "1");
+
+    public void RespondToPrInfo(string response)
+    {
+        var filename = Path.Combine(_directory, "pr-info.json");
+        File.WriteAllText(filename, response);
+        Environment.SetEnvironmentVariable("PR_COPILOT_TEST_GH_PR_INFO", filename);
+    }
 
     public IReadOnlyList<string[]> ReadStartupRequests() =>
         Directory.GetFiles(_startupDirectory, "*.entered")

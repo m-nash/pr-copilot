@@ -1283,6 +1283,7 @@ public class MonitorFlowTools
                 }
 
                 state.HeadSha = prInfo.HeadSha;
+                state.BaseBranch = prInfo.BaseBranch;
                 state.HasMergeConflict = !prInfo.Mergeable && prInfo.MergeableState == "dirty";
 
                 // New commit pushed — cancel any deferred rerun (CI restarts fresh)
@@ -1438,6 +1439,7 @@ public class MonitorFlowTools
         }
 
         state.HeadSha = prInfo.HeadSha;
+        state.BaseBranch = prInfo.BaseBranch;
         state.HasMergeConflict = !prInfo.Mergeable && prInfo.MergeableState == "dirty";
 
         var checkResult = await PrStatusFetcher.FetchCheckRunsAsync(state.Owner, state.Repo, state.HeadSha);

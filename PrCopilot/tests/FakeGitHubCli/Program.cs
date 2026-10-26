@@ -22,7 +22,10 @@ if (!string.IsNullOrEmpty(startupDirectory) &&
     await released.Task.WaitAsync(TimeSpan.FromSeconds(20));
     if (Environment.GetEnvironmentVariable("PR_COPILOT_TEST_GH_START_SUCCESS") == "1")
     {
-        Console.Write("""{"title":"Fixture PR","body":"","sha":"fixture-sha","head_branch":"fixture","base_branch":"","url":"https://github.com/owner/repo/pull/42","author":"fixture-author","mergeable":true,"mergeable_state":"clean","state":"open","merged":false}""");
+        var prInfoFile = Environment.GetEnvironmentVariable("PR_COPILOT_TEST_GH_PR_INFO");
+        Console.Write(!string.IsNullOrEmpty(prInfoFile)
+            ? File.ReadAllText(prInfoFile)
+            : """{"title":"Fixture PR","body":"","sha":"fixture-sha","head_branch":"fixture","base_branch":"","url":"https://github.com/owner/repo/pull/42","author":"fixture-author","mergeable":true,"mergeable_state":"clean","state":"open","merged":false}""");
         return 0;
     }
     Console.Error.WriteLine("fixture startup failure");

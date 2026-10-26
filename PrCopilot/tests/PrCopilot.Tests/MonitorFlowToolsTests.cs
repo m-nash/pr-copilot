@@ -660,6 +660,63 @@ public class MonitorFlowToolsTests : IDisposable
         }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PrMonitorNextStep_RetargetedPr_UsesFreshTargetBranchForConflictResolution(bool monitorAll)
+    {
+        _gh.PauseStartupRequests();
+        _gh.CompleteStartupSuccessfully();
+        _gh.RespondToPrInfo("""{"title":"Fixture PR","body":"","sha":"fixture-sha","head_branch":"feature/conflict-fix","base_branch":"release","url":"https://github.com/owner/repo/pull/42","author":"fixture-author","mergeable":false,"mergeable_state":"dirty","state":"open","merged":false}""");
+        _gh.ReleaseStartupRequests();
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        var monitorId = $"pr-{owner}-repo-42";
+        var state = new MonitorState
+        {
+            Owner = owner,
+            Repo = "repo",
+            PrNumber = 42,
+            SessionFolder = _gh.DirectoryPath,
+            HeadBranch = "feature/conflict-fix",
+            BaseBranch = "main",
+            HeadSha = "fixture-sha",
+            PrAuthor = "fixture-author",
+            CurrentUser = "fixture-author"
+        };
+        using var session = new MonitorSession { State = state };
+        var sessions = GetSessions();
+        Assert.True(sessions.TryAdd(monitorId, session));
+        var tools = new MonitorFlowTools();
+        var server = new FakeElicitationMcpServer("merge_target_branch");
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        try
+        {
+            var result = await tools.PrMonitorNextStep(monitorAll ? "all" : monitorId, "ready",
+                server: server, cancellationToken: cancellation.Token);
+            if (monitorAll)
+            {
+                using var relay = JsonDocument.Parse(result);
+                Assert.Equal("relay_choice", relay.RootElement.GetProperty("task").GetString());
+                result = await tools.PrMonitorNextStep(monitorId, "user_chose", choice: "merge_target_branch",
+                    server: server, cancellationToken: cancellation.Token);
+            }
+            using var response = JsonDocument.Parse(result);
+
+            Assert.Equal("merge_target_branch", response.RootElement.GetProperty("task").GetString());
+            Assert.Equal("release", state.BaseBranch);
+            Assert.Equal("release", response.RootElement.GetProperty("context").GetProperty("baseBranch").GetString());
+            Assert.Contains("target branch 'release' into PR head branch 'feature/conflict-fix'",
+                response.RootElement.GetProperty("instructions").GetString());
+            Assert.Single(server.Elicitations);
+            Assert.DoesNotContain(_gh.ReadRequests(), request => request.Contains("POST") || request.Contains("PATCH"));
+        }
+        finally
+        {
+            cancellation.Cancel();
+            sessions.TryRemove(monitorId, out _);
+        }
+    }
+
     [Fact]
     public async Task PrMonitorStart_SharesConcurrentStoppedInitialization()
     {
