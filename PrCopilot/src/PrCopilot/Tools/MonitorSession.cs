@@ -22,12 +22,19 @@ internal class MonitorSession : IDisposable
     private readonly SemaphoreSlim _stepGate = new(1, 1);
     private readonly object _stepLock = new();
     private CancellationTokenSource? _stepCancellation;
+    private bool _cancelStepOnStop = true;
+    private readonly CancellationTokenSource _stopCancellation = new();
+    public CancellationToken StopToken { get; }
+
+    public MonitorSession() => StopToken = _stopCancellation.Token;
 
     public async Task<string> RunStepAsync(
-        Func<CancellationToken, bool, Task<string>> execute, CancellationToken cancellationToken)
+        Func<CancellationToken, bool, Task<string>> execute, CancellationToken cancellationToken, bool cancelOnStop = true)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken, cancelOnStop ? StopToken : CancellationToken.None);
+        using var waitCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellation.Token, StopToken);
         CancellationTokenSource? previous;
         MonitorAction? expectedAction;
         MonitorStateId expectedState;
@@ -37,6 +44,7 @@ internal class MonitorSession : IDisposable
             previous = _stepCancellation;
             overlapping = previous != null || _stepGate.CurrentCount == 0;
             _stepCancellation = cancellation;
+            _cancelStepOnStop = cancelOnStop;
             expectedAction = State.PendingAction;
             expectedState = State.CurrentState;
         }
@@ -44,10 +52,10 @@ internal class MonitorSession : IDisposable
         {
             try { previous?.Cancel(); } catch (ObjectDisposedException) { }
             // Cancellation cannot undo an in-flight GitHub write; its owner must finish before a replacement proceeds.
-            await _stepGate.WaitAsync(cancellation.Token);
+            await _stepGate.WaitAsync(waitCancellation.Token);
             try
             {
-                cancellation.Token.ThrowIfCancellationRequested();
+                waitCancellation.Token.ThrowIfCancellationRequested();
                 var reconnect = overlapping || !ReferenceEquals(expectedAction, State.PendingAction) || expectedState != State.CurrentState;
                 return await execute(cancellation.Token, reconnect);
             }
@@ -70,8 +78,15 @@ internal class MonitorSession : IDisposable
     {
         CancellationTokenSource? cancellation;
         lock (_stepLock)
-            cancellation = _stepCancellation;
+            cancellation = _cancelStepOnStop ? _stepCancellation : null;
         try { cancellation?.Cancel(); } catch (ObjectDisposedException) { }
+    }
+
+    private void CancelStop()
+    {
+        try { _stopCancellation.Cancel(); } catch (ObjectDisposedException) { }
+        lock (_triggerLock)
+            _triggerTcs?.TrySetResult("STOP");
     }
 
     // Dedicated trigger file watcher — captures ACTION clicks even when not polling
@@ -136,6 +151,9 @@ internal class MonitorSession : IDisposable
     {
         lock (_triggerLock)
         {
+            if (StopToken.IsCancellationRequested)
+                return Task.FromResult("STOP");
+
             // If there's already pending content, return immediately
             if (PendingTriggerContent != null)
             {
@@ -181,6 +199,7 @@ internal class MonitorSession : IDisposable
     {
         DebugLogger.Log("Session", "StopPermanently called");
         IsStopped = true;
+        CancelStop();
         CancelStep();
         var cts = Interlocked.Exchange(ref _pollCts, null);
         if (cts != null)
@@ -206,7 +225,9 @@ internal class MonitorSession : IDisposable
 
     public void Dispose()
     {
+        CancelStop();
         CancelStep();
+        _stopCancellation.Dispose();
         _heartbeat.Dispose();
         _triggerWatcher?.Dispose();
         var cts = Interlocked.Exchange(ref _pollCts, null);

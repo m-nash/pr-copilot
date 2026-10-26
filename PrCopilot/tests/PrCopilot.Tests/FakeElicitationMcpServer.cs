@@ -11,6 +11,7 @@ internal class FakeElicitationMcpServer(params string[] choices) : FakeSamplingM
     private readonly Queue<string> _choices = new(choices);
 
     public List<ElicitRequestParams> Elicitations { get; } = [];
+    public Func<ElicitRequestParams, CancellationToken, Task>? BeforeResponse { get; set; }
 
     public override ClientCapabilities? ClientCapabilities => new()
     {
@@ -18,20 +19,22 @@ internal class FakeElicitationMcpServer(params string[] choices) : FakeSamplingM
         Elicitation = new() { Form = new() }
     };
 
-    public override Task<JsonRpcResponse> SendRequestAsync(JsonRpcRequest request, CancellationToken ct = default)
+    public override async Task<JsonRpcResponse> SendRequestAsync(JsonRpcRequest request, CancellationToken ct = default)
     {
         if (request.Method != "elicitation/create")
-            return base.SendRequestAsync(request, ct);
+            return await base.SendRequestAsync(request, ct);
 
         var parameters = Assert.IsAssignableFrom<JsonNode>(request.Params).Deserialize<ElicitRequestParams>();
         Assert.NotNull(parameters);
         Elicitations.Add(parameters);
+        if (BeforeResponse != null)
+            await BeforeResponse(parameters, ct);
         Assert.NotEmpty(_choices);
         var result = JsonSerializer.SerializeToNode(new
         {
             action = "accept",
             content = new { choice = _choices.Dequeue() }
         });
-        return Task.FromResult(new JsonRpcResponse { Id = request.Id, Result = result });
+        return new JsonRpcResponse { Id = request.Id, Result = result };
     }
 }

@@ -455,6 +455,82 @@ public class MonitorFlowToolsTests : IDisposable
         }
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task PrMonitorNextStep_MultiPrMemberStop_DoesNotStopOtherMembers(bool disposeMember, bool stopRemaining)
+    {
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        var firstId = $"pr-{owner}-first-repo-42";
+        var secondId = $"pr-{owner}-second-repo-42";
+        var firstState = new MonitorState
+        {
+            Owner = owner,
+            Repo = "first-repo",
+            PrNumber = 42,
+            SessionFolder = _gh.DirectoryPath
+        };
+        var prompt = MonitorTransitions.BuildTerminalAction(firstState, TerminalStateType.MergeConflict);
+        var secondState = CreateCommentState(owner);
+        secondState.Repo = "second-repo";
+        MonitorTransitions.ProcessEvent(secondState, "user_chose", "apply_fix", null);
+        using var first = new MonitorSession { State = firstState };
+        using var second = new MonitorSession { State = secondState };
+        var sessions = GetSessions();
+        Assert.True(sessions.TryAdd(firstId, first));
+        Assert.True(sessions.TryAdd(secondId, second));
+        var elicited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var server = new FakeElicitationMcpServer("stop")
+        {
+            BeforeResponse = async (request, token) =>
+            {
+                Assert.Equal(prompt.Question, request.Message);
+                elicited.SetResult();
+                await Task.Delay(Timeout.Infinite, token);
+            }
+        };
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var tools = new MonitorFlowTools();
+        var combined = tools.PrMonitorNextStep("all", "ready", server: server, cancellationToken: cancellation.Token);
+        try
+        {
+            await elicited.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            if (stopRemaining)
+                tools.PrMonitorStop(secondId);
+            if (disposeMember)
+            {
+                firstState.CurrentState = MonitorStateId.Stopped;
+                first.Dispose();
+            }
+            else
+            {
+                tools.PrMonitorStop(firstId);
+            }
+            using var response = JsonDocument.Parse(await combined.WaitAsync(TimeSpan.FromSeconds(3)));
+
+            Assert.Equal(stopRemaining ? "stop" : "execute", response.RootElement.GetProperty("action").GetString());
+            if (!stopRemaining)
+            {
+                Assert.Equal("resume_pending_task", response.RootElement.GetProperty("task").GetString());
+                Assert.Equal(secondId, response.RootElement.GetProperty("monitorId").GetString());
+                Assert.False(second.IsStopped);
+                Assert.Equal(MonitorStateId.ExecutingTask, secondState.CurrentState);
+            }
+            Assert.False(cancellation.IsCancellationRequested);
+            Assert.Single(server.Elicitations);
+            Assert.Empty(server.Requests);
+            Assert.Empty(_gh.ReadRequests());
+        }
+        finally
+        {
+            cancellation.Cancel();
+            await Record.ExceptionAsync(() => combined.WaitAsync(TimeSpan.FromSeconds(3)));
+            sessions.TryRemove(firstId, out _);
+            sessions.TryRemove(secondId, out _);
+        }
+    }
+
     [Fact]
     public async Task PrMonitorStart_SharesConcurrentStoppedInitialization()
     {
