@@ -15,7 +15,8 @@ if (!string.IsNullOrEmpty(startupDirectory) &&
     watcher.Created += (_, _) => released.TrySetResult();
     watcher.EnableRaisingEvents = true;
     var entered = Path.Combine(startupDirectory, Environment.ProcessId.ToString(CultureInfo.InvariantCulture) + ".entered");
-    File.WriteAllText(entered, JsonSerializer.Serialize(args));
+    File.WriteAllText(entered + ".tmp", JsonSerializer.Serialize(args));
+    File.Move(entered + ".tmp", entered);
     if (File.Exists(Path.Combine(startupDirectory, "release")))
         released.TrySetResult();
     await released.Task.WaitAsync(TimeSpan.FromSeconds(20));

@@ -60,10 +60,45 @@ internal sealed class FakeGitHubCliFixture : IDisposable
 
     public IReadOnlyList<string[]> ReadStartupRequests() =>
         Directory.GetFiles(_startupDirectory, "*.entered")
-            .Select(file => JsonSerializer.Deserialize<string[]>(File.ReadAllText(file))!).ToArray();
+            .Select(file =>
+            {
+                using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                using var reader = new StreamReader(stream);
+                return JsonSerializer.Deserialize<string[]>(reader.ReadToEnd())!;
+            }).ToArray();
 
     public Task WaitForStartupRequestsAsync(int count, CancellationToken cancellationToken = default) =>
         WaitForRequestsAsync(_startupDirectory, count, cancellationToken);
+
+    public async Task WaitForPrInfoRequestsAsync(string owner, string repo, int count, CancellationToken cancellationToken = default)
+    {
+        var arrived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        void Check()
+        {
+            try
+            {
+                if (ReadStartupRequests().Count(request => request[1] == $"repos/{owner}/{repo}/pulls/42") >= count)
+                    arrived.TrySetResult();
+            }
+            catch (IOException) { }
+            catch (JsonException) { }
+        }
+        using var watcher = new FileSystemWatcher(_startupDirectory, "*.entered");
+        watcher.Created += (_, _) => Check();
+        watcher.Renamed += (_, _) => Check();
+        watcher.EnableRaisingEvents = true;
+        Check();
+        try
+        {
+            await arrived.Task.WaitAsync(TimeSpan.FromSeconds(3), cancellationToken);
+        }
+        catch (TimeoutException)
+        {
+            Check();
+            if (!arrived.Task.IsCompleted)
+                throw;
+        }
+    }
 
     public void PauseResolveRequests()
     {
@@ -80,15 +115,20 @@ internal sealed class FakeGitHubCliFixture : IDisposable
     private static async Task WaitForRequestsAsync(string directory, int count, CancellationToken cancellationToken)
     {
         var arrived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var watcher = new FileSystemWatcher(directory, "*.entered");
-        watcher.Created += (_, _) =>
+        void Check()
         {
-            if (Directory.GetFiles(directory, "*.entered").Length >= count)
-                arrived.TrySetResult();
-        };
+            try
+            {
+                if (Directory.GetFiles(directory, "*.entered").Length >= count)
+                    arrived.TrySetResult();
+            }
+            catch (IOException) { }
+        }
+        using var watcher = new FileSystemWatcher(directory, "*.entered");
+        watcher.Created += (_, _) => Check();
+        watcher.Renamed += (_, _) => Check();
         watcher.EnableRaisingEvents = true;
-        if (Directory.GetFiles(directory, "*.entered").Length >= count)
-            arrived.TrySetResult();
+        Check();
         await arrived.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
     }
 

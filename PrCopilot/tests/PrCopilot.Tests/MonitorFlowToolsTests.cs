@@ -531,6 +531,74 @@ public class MonitorFlowToolsTests : IDisposable
         }
     }
 
+    [Theory]
+    [InlineData(MonitorStateId.Idle)]
+    [InlineData(MonitorStateId.Polling)]
+    public async Task PrMonitorNextStep_MultiPrMembership_NewInitializationJoinsRunningPoll(MonitorStateId currentState)
+    {
+        _gh.PauseStartupRequests();
+        _gh.CompleteStartupSuccessfully();
+        _gh.ReleaseStartupRequests();
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        var existingId = $"pr-{owner}-existing-repo-42";
+        var addedId = $"pr-{owner}-added-repo-42";
+        using var existing = new MonitorSession
+        {
+            State = new MonitorState
+            {
+                Owner = owner,
+                Repo = "existing-repo",
+                PrNumber = 42,
+                SessionFolder = _gh.DirectoryPath,
+                CurrentState = currentState,
+                HeadSha = "fixture-sha",
+                PrAuthor = "fixture-author",
+                CurrentUser = "fixture-author"
+            }
+        };
+        var sessions = GetSessions();
+        Assert.True(sessions.TryAdd(existingId, existing));
+        var addedState = new MonitorState { Owner = owner, Repo = "added-repo", PrNumber = 42, SessionFolder = _gh.DirectoryPath };
+        File.WriteAllText(addedState.LogFile + ".viewer.pid", Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        var tools = new MonitorFlowTools();
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var combined = tools.PrMonitorNextStep("all", "ready", server: new FakeMcpServer(), cancellationToken: cancellation.Token);
+        try
+        {
+            await WaitForStatusAsync(existing.State.LogFile, cancellation.Token);
+            Assert.False(combined.IsCompleted);
+
+            using var start = JsonDocument.Parse(await tools.PrMonitorStart(owner, "added-repo", 42, _gh.DirectoryPath));
+            Assert.Equal(addedId, start.RootElement.GetProperty("monitor_id").GetString());
+            try
+            {
+                await _gh.WaitForPrInfoRequestsAsync(owner, "added-repo", 2, cancellation.Token);
+            }
+            catch (TimeoutException)
+            {
+                var result = combined.IsCompletedSuccessfully ? await combined : combined.Status.ToString();
+                var count = _gh.ReadStartupRequests().Count(request => request[1] == $"repos/{owner}/added-repo/pulls/42");
+                var debug = File.Exists(addedState.DebugLogFile) ? File.ReadAllLines(addedState.DebugLogFile).TakeLast(8) : [];
+                Assert.Fail($"Expected initialization plus polling; observed {count} PR-info request(s). Combined result: {result}; debug: {string.Join(Environment.NewLine, debug)}");
+            }
+
+            Assert.False(combined.IsCompleted);
+            Assert.True(sessions[addedId].State.PollCount > 0);
+            Assert.True(existing.State.PollCount > 0);
+        }
+        finally
+        {
+            cancellation.Cancel();
+            await Record.ExceptionAsync(() => combined.WaitAsync(TimeSpan.FromSeconds(3)));
+            sessions.TryRemove(existingId, out _);
+            if (sessions.TryRemove(addedId, out var added))
+            {
+                added.StopPermanently();
+                added.Dispose();
+            }
+        }
+    }
+
     [Fact]
     public async Task PrMonitorStart_SharesConcurrentStoppedInitialization()
     {
@@ -678,6 +746,26 @@ public class MonitorFlowToolsTests : IDisposable
     }
 
     public void Dispose() => _gh.Dispose();
+
+    private static async Task WaitForStatusAsync(string filename, CancellationToken cancellationToken)
+    {
+        var written = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        void Check()
+        {
+            if (!File.Exists(filename))
+                return;
+            using var stream = new FileStream(filename, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new StreamReader(stream);
+            if (reader.ReadToEnd().Contains("STATUS|", StringComparison.Ordinal))
+                written.TrySetResult();
+        }
+        using var watcher = new FileSystemWatcher(Path.GetDirectoryName(filename)!, Path.GetFileName(filename));
+        watcher.Created += (_, _) => Check();
+        watcher.Changed += (_, _) => Check();
+        watcher.EnableRaisingEvents = true;
+        Check();
+        await written.Task.WaitAsync(TimeSpan.FromSeconds(3), cancellationToken);
+    }
 
     private MonitorState CreateCommentState(string owner) => new()
     {

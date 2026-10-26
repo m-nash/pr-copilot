@@ -28,6 +28,32 @@ public class MonitorFlowTools
     private static readonly ConcurrentDictionary<string, Lazy<Task<string>>> _initializations = new(StringComparer.Ordinal);
     private static readonly HashSet<string> _multiMonitorIds = new();
     private static readonly object _multiMonitorLock = new();
+    private static readonly object _membershipLock = new();
+    private static TaskCompletionSource _membershipChanged = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private static Task GetMembershipChangeTask()
+    {
+        lock (_membershipLock)
+            return _membershipChanged.Task;
+    }
+
+    private static void NotifyMembershipChanged()
+    {
+        TaskCompletionSource changed;
+        lock (_membershipLock)
+        {
+            changed = _membershipChanged;
+            _membershipChanged = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+        changed.TrySetResult();
+    }
+
+    private static bool MembershipMatches(IReadOnlyDictionary<string, MonitorSession> sessions) =>
+        sessions.Count == _sessions.Count &&
+        sessions.All(pair => _sessions.TryGetValue(pair.Key, out var current) && ReferenceEquals(pair.Value, current));
+
+    private static string RefreshSessionsAction() =>
+        SerializeAction(new MonitorAction { Action = "refresh_sessions" });
 
     private static string ShortSha(string? sha) =>
         string.IsNullOrEmpty(sha) ? "(none)" : sha.Length <= 7 ? sha : sha[..7];
@@ -265,6 +291,7 @@ public class MonitorFlowTools
         }
 
         _sessions.Clear();
+        NotifyMembershipChanged();
     }
 
     /// <summary>
@@ -391,6 +418,7 @@ public class MonitorFlowTools
             {
                 if (_sessions.TryRemove(new KeyValuePair<string, MonitorSession>(monitorId, existing)))
                 {
+                    NotifyMembershipChanged();
                     DebugLogger.Log("PrMonitorStart", $"Discarding stopped session for {monitorId}");
                     existing.StopPermanently();
                     existing.Dispose();
@@ -495,6 +523,7 @@ public class MonitorFlowTools
         };
         session.StartTriggerWatcher(state.TriggerFile);
         _sessions[monitorId] = session;
+        NotifyMembershipChanged();
 
         // Write server PID file so the viewer can detect if the server dies ungracefully
         var serverPidFile = state.LogFile + ".server.pid";
@@ -649,6 +678,24 @@ public class MonitorFlowTools
                 Message = "When using monitorId='all', only event='ready' is supported. Use the specific PR monitorId for other events."
             });
         }
+        while (true)
+        {
+            var membershipChanged = GetMembershipChangeTask();
+            var result = await PrMonitorNextStepOwnedAsync(monitorId, @event, choice, data, server, context,
+                membershipChanged, cancellationToken);
+            if (monitorId != "all")
+                return result;
+            using var response = JsonDocument.Parse(result);
+            if (response.RootElement.GetProperty("action").GetString() != "refresh_sessions")
+                return result;
+            DebugLogger.Log("NextStep", "Session membership changed; reacquiring multi-PR ownership");
+        }
+    }
+
+    private async Task<string> PrMonitorNextStepOwnedAsync(
+        string monitorId, string @event, string? choice, string? data, McpServer server,
+        RequestContext<CallToolRequestParams> context, Task membershipChanged, CancellationToken cancellationToken)
+    {
         KeyValuePair<string, MonitorSession>[] owned = monitorId == "all"
             ? _sessions.OrderBy(pair => pair.Key, StringComparer.Ordinal).ToArray()
             : _sessions.TryGetValue(monitorId, out var session)
@@ -666,9 +713,12 @@ public class MonitorFlowTools
             else if (owned.Length > 0)
                 waitingHeartbeat.StartForPr(server, owned[0].Value.State, progressToken);
         }
+        var executionToken = cancellationToken;
         try
         {
-            return await RunOwnedAsync(0, cancellationToken);
+            var result = await RunOwnedAsync(0, cancellationToken);
+            executionToken.ThrowIfCancellationRequested();
+            return result;
         }
         catch (OperationCanceledException)
         {
@@ -680,8 +730,12 @@ public class MonitorFlowTools
             token.ThrowIfCancellationRequested();
             if (index == owned.Length)
             {
+                executionToken = token;
                 waitingHeartbeat.Stop();
-                return await PrMonitorNextStepCoreAsync(monitorId, @event, choice, data, server!, context!, sessions, token);
+                if (monitorId == "all" && (membershipChanged.IsCompleted || !MembershipMatches(sessions)))
+                    return RefreshSessionsAction();
+                return await PrMonitorNextStepCoreAsync(monitorId, @event, choice, data, server!, context!, sessions,
+                    membershipChanged, token);
             }
             var member = owned[index].Value;
             if (monitorId == "all" && member.StopToken.IsCancellationRequested)
@@ -710,7 +764,7 @@ public class MonitorFlowTools
     private async Task<string> PrMonitorNextStepCoreAsync(
         string monitorId, string @event, string? choice, string? data, McpServer server,
         RequestContext<CallToolRequestParams> context, IReadOnlyDictionary<string, MonitorSession> sessions,
-        CancellationToken cancellationToken)
+        Task membershipChanged, CancellationToken cancellationToken)
     {
         // Debug: log what the client actually sent us
         var progressToken = context?.Params?.ProgressToken;
@@ -768,7 +822,9 @@ public class MonitorFlowTools
 
                 while (true)
                 {
-                    var action = await PollAllUntilTerminalStateAsync(sessions, cancellationToken);
+                    var action = await PollAllUntilTerminalStateAsync(sessions, membershipChanged, cancellationToken);
+                    if (action.Action != "merged" && (membershipChanged.IsCompleted || !MembershipMatches(sessions)))
+                        return RefreshSessionsAction();
                     if (action.Action != "merged" && action.MonitorId != null &&
                         sessions.TryGetValue(action.MonitorId, out var stoppedMember) && stoppedMember.StopToken.IsCancellationRequested)
                         continue;
@@ -1156,6 +1212,7 @@ public class MonitorFlowTools
                 catch { }
             }
             _sessions.Clear();
+            NotifyMembershipChanged();
             lock (_multiMonitorLock) { _multiMonitorIds.Clear(); }
             return SerializeAction(new MonitorAction
             {
@@ -1166,6 +1223,7 @@ public class MonitorFlowTools
 
         if (_sessions.TryRemove(monitorId, out var session))
         {
+            NotifyMembershipChanged();
             lock (_multiMonitorLock) { _multiMonitorIds.Remove(monitorId); }
             try
             {
@@ -1417,10 +1475,12 @@ public class MonitorFlowTools
     /// checks each for terminal states, and returns the first one found.
     /// </summary>
     private async Task<MonitorAction> PollAllUntilTerminalStateAsync(
-        IReadOnlyDictionary<string, MonitorSession> sessions, CancellationToken cancellationToken)
+        IReadOnlyDictionary<string, MonitorSession> sessions, Task membershipChanged, CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
         {
+            if (membershipChanged.IsCompleted || !MembershipMatches(sessions))
+                return new MonitorAction { Action = "refresh_sessions" };
             var activeSessions = sessions
                 .Where(kvp => !kvp.Value.StopToken.IsCancellationRequested && kvp.Value.State.CurrentState != MonitorStateId.Stopped)
                 .ToList();
@@ -1465,6 +1525,7 @@ public class MonitorFlowTools
                         // Remove merged/stopped sessions from the dictionary
                         if (action.Action == "merged" && _sessions.TryRemove(mid, out var removedSession))
                         {
+                            NotifyMembershipChanged();
                             removedSession.Dispose();
                             lock (_multiMonitorLock) { _multiMonitorIds.Remove(mid); }
                         }
@@ -1544,10 +1605,11 @@ public class MonitorFlowTools
                 using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(minSleepSeconds));
                 using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
 
-                var tasks = new List<Task> { Task.Delay(TimeSpan.FromSeconds(minSleepSeconds), linkedCts.Token) };
+                var tasks = new List<Task> { Task.Delay(TimeSpan.FromSeconds(minSleepSeconds), linkedCts.Token), membershipChanged };
                 tasks.AddRange(activeSessions.Select(kvp => kvp.Value.WaitForTriggerAsync(linkedCts.Token)));
 
                 await Task.WhenAny(tasks);
+                linkedCts.Cancel();
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
