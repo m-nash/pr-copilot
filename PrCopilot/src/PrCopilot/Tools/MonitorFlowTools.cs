@@ -641,6 +641,64 @@ public class MonitorFlowTools
         RequestContext<CallToolRequestParams> context = null!,
         CancellationToken cancellationToken = default)
     {
+        if (monitorId == "all" && @event != "ready")
+        {
+            return SerializeAction(new MonitorAction
+            {
+                Action = "stop",
+                Message = "When using monitorId='all', only event='ready' is supported. Use the specific PR monitorId for other events."
+            });
+        }
+        KeyValuePair<string, MonitorSession>[] owned = monitorId == "all"
+            ? _sessions.OrderBy(pair => pair.Key, StringComparer.Ordinal).ToArray()
+            : _sessions.TryGetValue(monitorId, out var session)
+                ? [new(monitorId, session)]
+                : [];
+        var sessions = owned.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+        using var waitingHeartbeat = new HeartbeatManager();
+        if (server != null)
+        {
+            var progressToken = context?.Params?.ProgressToken;
+            if (monitorId == "all")
+                waitingHeartbeat.StartForMultiPr(server, () => sessions.Count, progressToken);
+            else if (owned.Length > 0)
+                waitingHeartbeat.StartForPr(server, owned[0].Value.State, progressToken);
+        }
+        try
+        {
+            return await RunOwnedAsync(0, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            return SerializeAction(new MonitorAction { Action = "stop", Message = "Monitoring call cancelled or replaced." });
+        }
+
+        async Task<string> RunOwnedAsync(int index, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            if (index == owned.Length)
+            {
+                waitingHeartbeat.Stop();
+                return await PrMonitorNextStepCoreAsync(monitorId, @event, choice, data, server!, context!, sessions, token);
+            }
+            return await owned[index].Value.RunStepAsync(async (stepToken, reconnect) =>
+            {
+                if (reconnect && monitorId != "all")
+                {
+                    @event = "ready";
+                    choice = null;
+                    data = null;
+                }
+                return await RunOwnedAsync(index + 1, stepToken);
+            }, token);
+        }
+    }
+
+    private async Task<string> PrMonitorNextStepCoreAsync(
+        string monitorId, string @event, string? choice, string? data, McpServer server,
+        RequestContext<CallToolRequestParams> context, IReadOnlyDictionary<string, MonitorSession> sessions,
+        CancellationToken cancellationToken)
+    {
         // Debug: log what the client actually sent us
         var progressToken = context?.Params?.ProgressToken;
         DebugLogger.Log("NextStep", $"ProgressToken from client: {(progressToken.HasValue ? progressToken.Value.ToString() : "NONE")}");
@@ -656,16 +714,7 @@ public class MonitorFlowTools
         // Handle multi-PR monitoring: monitorId="all" enters combined poll loop
         if (monitorId == "all")
         {
-            if (@event != "ready")
-            {
-                return SerializeAction(new MonitorAction
-                {
-                    Action = "stop",
-                    Message = "When using monitorId='all', only event='ready' is supported. Use the specific PR monitorId for other events."
-                });
-            }
-
-            if (_sessions.IsEmpty)
+            if (sessions.Count == 0)
             {
                 lock (_multiMonitorLock) { _multiMonitorIds.Clear(); }
                 return SerializeAction(new MonitorAction
@@ -675,10 +724,10 @@ public class MonitorFlowTools
                 });
             }
 
-            DebugLogger.Log("NextStep", $"Entering multi-PR poll loop ({_sessions.Count} sessions)");
+            DebugLogger.Log("NextStep", $"Entering multi-PR poll loop ({sessions.Count} sessions)");
 
             // Start heartbeat for multi-PR mode
-            var heartbeatSession = _sessions.Values.FirstOrDefault();
+            var heartbeatSession = sessions.Values.FirstOrDefault();
             if (heartbeatSession == null)
             {
                 lock (_multiMonitorLock) { _multiMonitorIds.Clear(); }
@@ -691,40 +740,42 @@ public class MonitorFlowTools
             // Start a standalone heartbeat for multi-PR mode that doesn't depend on any particular session.
             using var multiPrHeartbeat = new HeartbeatManager();
             if (server != null)
-                multiPrHeartbeat.StartForMultiPr(server, () => _sessions.Count, progressToken);
+                multiPrHeartbeat.StartForMultiPr(server, () => sessions.Count, progressToken);
 
             try
             {
                 // Write RESUMING line to all session logs
-                foreach (var (_, s) in _sessions)
+                foreach (var (_, s) in sessions)
                 {
                     var resumingAction = new MonitorAction { Action = "polling", Message = "Resuming monitoring..." };
                     await WriteLogEntryAsync(s.State, resumingAction);
                 }
 
-                var action = await PollAllUntilTerminalStateAsync(cancellationToken);
+                var action = await PollAllUntilTerminalStateAsync(sessions, cancellationToken);
 
                 // Elicit directly for multi-PR terminal states
                 if (action.Action == "ask_user" && action.Choices?.Count > 0)
                 {
                     await WriteLogEntryAsync(
-                        action.MonitorId != null && _sessions.TryGetValue(action.MonitorId, out var logSession) ? logSession.State : heartbeatSession.State,
+                        action.MonitorId != null && sessions.TryGetValue(action.MonitorId, out var logSession) ? logSession.State : heartbeatSession.State,
                         action);
 
                     var elicitResult = await ElicitationHelper.ElicitChoiceAsync(server!, action, cancellationToken);
+                    cancellationToken.ThrowIfCancellationRequested();
                     DebugLogger.Log("NextStep", $"Multi-PR elicited: {(elicitResult.IsFreeform ? "freeform" : "choice")}={elicitResult.Value}");
 
                     // Log the elicitation result
-                    if (action.MonitorId != null && _sessions.TryGetValue(action.MonitorId, out var elicitSession))
+                    if (action.MonitorId != null && sessions.TryGetValue(action.MonitorId, out var elicitSession))
                         await WriteElicitedLogEntryAsync(elicitSession.State, elicitResult.Value);
 
-                    var activeState = action.MonitorId != null && _sessions.TryGetValue(action.MonitorId, out var activeSession)
+                    var activeState = action.MonitorId != null && sessions.TryGetValue(action.MonitorId, out var activeSession)
                         ? activeSession.State : heartbeatSession.State;
 
                     // Freeform text — try sampling classification first, fall back to agent
                     if (elicitResult.IsFreeform)
                     {
                         var mappedChoice = await TryClassifyFreeformViaSamplingAsync(server!, elicitResult, cancellationToken);
+                        cancellationToken.ThrowIfCancellationRequested();
                         if (mappedChoice != null)
                         {
                             DebugLogger.Log("NextStep", $"Multi-PR sampling classified freeform as choice: {mappedChoice}");
@@ -755,13 +806,18 @@ public class MonitorFlowTools
                 }
 
                 await WriteLogEntryAsync(
-                    action.MonitorId != null && _sessions.TryGetValue(action.MonitorId, out var actionSession) ? actionSession.State : heartbeatSession.State,
+                    action.MonitorId != null && sessions.TryGetValue(action.MonitorId, out var actionSession) ? actionSession.State : heartbeatSession.State,
                     action);
 
                 return SerializeAction(action);
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
             catch (Exception ex)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 DebugLogger.Error("NextStep", ex);
                 var errorAction = new MonitorAction
                 {
@@ -788,7 +844,7 @@ public class MonitorFlowTools
             }
         }
 
-        if (!_sessions.TryGetValue(monitorId, out var session))
+        if (!sessions.TryGetValue(monitorId, out var session))
         {
             DebugLogger.Log("NextStep", $"No session for {monitorId}");
             return SerializeAction(new MonitorAction
@@ -822,6 +878,7 @@ public class MonitorFlowTools
                     {
                         await WriteLogEntryAsync(state, triggerAction);
                         var triggerResult = await ElicitationHelper.ElicitChoiceAsync(server, triggerAction, cancellationToken);
+                        cancellationToken.ThrowIfCancellationRequested();
                         DebugLogger.Log("NextStep", $"Elicited viewer trigger: {(triggerResult.IsFreeform ? "freeform" : "choice")}={triggerResult.Value}");
                         await WriteElicitedLogEntryAsync(state, triggerResult.Value);
 
@@ -829,6 +886,7 @@ public class MonitorFlowTools
                         if (triggerResult.IsFreeform)
                         {
                             var mappedChoice = await TryClassifyFreeformViaSamplingAsync(server, triggerResult, cancellationToken);
+                            cancellationToken.ThrowIfCancellationRequested();
                             if (mappedChoice != null)
                             {
                                 DebugLogger.Log("NextStep", $"Trigger sampling classified freeform as choice: {mappedChoice}");
@@ -898,13 +956,16 @@ public class MonitorFlowTools
             // via MCP elicitation (bypassing the LLM entirely for user choices).
             while (true)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 state.RememberAction(action);
 
                 // Handle auto_execute: run the command in C# and loop back
                 while (action.Action == "auto_execute")
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     action = await ExecuteAutoAction(state, action);
                     state.RememberAction(action);
+                    cancellationToken.ThrowIfCancellationRequested();
                     DebugLogger.Log("NextStep", $"Auto-execute result: action={action.Action}, task={action.Task ?? "null"}");
                 }
 
@@ -953,6 +1014,7 @@ public class MonitorFlowTools
                     await WriteLogEntryAsync(state, action);
 
                     var elicitResult = await ElicitationHelper.ElicitChoiceAsync(server, action, cancellationToken);
+                    cancellationToken.ThrowIfCancellationRequested();
                     DebugLogger.Log("NextStep", $"Elicited: {(elicitResult.IsFreeform ? "freeform" : "choice")}={elicitResult.Value}");
                     await WriteElicitedLogEntryAsync(state, elicitResult.Value);
 
@@ -960,6 +1022,7 @@ public class MonitorFlowTools
                     if (elicitResult.IsFreeform)
                     {
                         var mappedChoice = await TryClassifyFreeformViaSamplingAsync(server, elicitResult, cancellationToken);
+                        cancellationToken.ThrowIfCancellationRequested();
                         if (mappedChoice != null)
                         {
                             DebugLogger.Log("NextStep", $"Sampling classified freeform as choice: {mappedChoice}");
@@ -983,6 +1046,7 @@ public class MonitorFlowTools
                 // Sampling-eligible tasks: handle server-side instead of delegating to agent
                 if (action.Action == "execute" && await TryHandleViaSamplingAsync(server, state, action, cancellationToken))
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     // Sampling handled it — feed result back to state machine and continue
                     action = MonitorTransitions.ProcessEvent(state, state.SamplingCompletionEvent!, null, null);
                     state.SamplingCompletionEvent = null;
@@ -999,8 +1063,13 @@ public class MonitorFlowTools
 
             return SerializeAction(action);
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             DebugLogger.Error("NextStep", ex);
             var errorAction = new MonitorAction
             {
@@ -1323,11 +1392,12 @@ public class MonitorFlowTools
     /// Combined poll loop for multi-PR monitoring. Iterates over all active sessions,
     /// checks each for terminal states, and returns the first one found.
     /// </summary>
-    private async Task<MonitorAction> PollAllUntilTerminalStateAsync(CancellationToken cancellationToken)
+    private async Task<MonitorAction> PollAllUntilTerminalStateAsync(
+        IReadOnlyDictionary<string, MonitorSession> sessions, CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
         {
-            var activeSessions = _sessions
+            var activeSessions = sessions
                 .Where(kvp => kvp.Value.State.CurrentState != MonitorStateId.Stopped)
                 .ToList();
 

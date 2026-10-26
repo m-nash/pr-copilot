@@ -62,4 +62,27 @@ public class MonitorSessionTests
         // The linked token should be cancelled because PollToken was cancelled
         Assert.True(linkedCts.Token.IsCancellationRequested);
     }
+
+    [Fact]
+    public async Task RunStep_ReplacingAnActiveOwnerRequiresReconnectEvenWhenStateIsUnchanged()
+    {
+        using var session = new MonitorSession();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var original = session.RunStepAsync(async (token, _) =>
+        {
+            entered.SetResult();
+            await Task.Delay(Timeout.Infinite, token);
+            return "original";
+        }, CancellationToken.None);
+        await entered.Task;
+
+        var replacement = session.RunStepAsync((_, reconnect) =>
+        {
+            Assert.True(reconnect);
+            return Task.FromResult("replacement");
+        }, CancellationToken.None);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => original);
+        Assert.Equal("replacement", await replacement);
+    }
 }

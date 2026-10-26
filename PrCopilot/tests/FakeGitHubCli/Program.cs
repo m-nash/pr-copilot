@@ -30,6 +30,32 @@ if (!string.IsNullOrEmpty(startupDirectory) &&
 
 File.AppendAllText(captureFile, JsonSerializer.Serialize(args) + Environment.NewLine);
 
+var resolveDirectory = Environment.GetEnvironmentVariable("PR_COPILOT_TEST_GH_RESOLVE_BARRIER");
+if (!string.IsNullOrEmpty(resolveDirectory))
+{
+    if (args is ["api", "graphql", "-f", var query] && query.Contains("resolveReviewThread", StringComparison.Ordinal))
+    {
+        var released = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var watcher = new FileSystemWatcher(resolveDirectory, "release");
+        watcher.Created += (_, _) => released.TrySetResult();
+        watcher.EnableRaisingEvents = true;
+        File.WriteAllText(Path.Combine(resolveDirectory, Environment.ProcessId.ToString(CultureInfo.InvariantCulture) + ".entered"),
+            JsonSerializer.Serialize(args));
+        if (File.Exists(Path.Combine(resolveDirectory, "release")))
+            released.TrySetResult();
+        await released.Task.WaitAsync(TimeSpan.FromSeconds(20));
+        Console.Write("""{"data":{"resolveReviewThread":{"thread":{"isResolved":true}}}}""");
+        return 0;
+    }
+
+    if (args is ["api", var replyEndpoint, "-X", "POST", "--input", _] &&
+        replyEndpoint.EndsWith("/replies", StringComparison.Ordinal))
+    {
+        Console.Write("{}");
+        return 0;
+    }
+}
+
 if (Environment.GetEnvironmentVariable("PR_COPILOT_TEST_GH_START_SUCCESS") == "1" &&
     args.Length >= 2 && args[0] == "api")
 {

@@ -338,6 +338,123 @@ public class MonitorFlowToolsTests : IDisposable
         }
     }
 
+    [Theory]
+    [InlineData(false, "ready", false, false)]
+    [InlineData(false, "task_complete", false, false)]
+    [InlineData(true, "ready", false, false)]
+    [InlineData(false, "ready", true, false)]
+    [InlineData(true, "ready", true, false)]
+    [InlineData(false, "ready", false, true)]
+    [InlineData(true, "ready", false, true)]
+    public async Task PrMonitorNextStep_InFlightWrite_BlocksReconciliationAndStaleCompletion(
+        bool monitorAll, string nextEvent, bool cancelOriginal, bool cancelWaiter)
+    {
+        _gh.PauseResolveRequests();
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        var monitorId = $"pr-{owner}-repo-42";
+        var state = CreateResolvingCommentState(owner);
+        using var session = new MonitorSession { State = state };
+        var sessions = GetSessions();
+        Assert.True(sessions.TryAdd(monitorId, session));
+        var tools = new MonitorFlowTools();
+        var originalServer = new FakeElicitationMcpServer("stop");
+        var replacementServer = new FakeElicitationMcpServer("Explain the remaining comment without editing code");
+        using var originalCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var replacementCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var original = tools.PrMonitorNextStep(monitorId, "comment_addressed",
+            data: "{\"reply_text\":\"Approved reply\"}", server: originalServer, cancellationToken: originalCancellation.Token);
+        Task<string>? replacement = null;
+        try
+        {
+            await _gh.WaitForResolveRequestsAsync(1);
+            if (cancelOriginal)
+                originalCancellation.Cancel();
+            replacement = tools.PrMonitorNextStep(monitorAll ? "all" : monitorId, nextEvent,
+                data: "{\"recommendation\":\"stale completion\"}", server: replacementServer, cancellationToken: replacementCancellation.Token);
+
+            await Assert.ThrowsAsync<TimeoutException>(() => replacement.WaitAsync(TimeSpan.FromMilliseconds(200)));
+            Assert.Equal(0, state.CurrentCommentIndex);
+            Assert.True(state.PendingResolveAfterAddress);
+            Assert.Empty(replacementServer.Elicitations);
+            if (cancelWaiter)
+            {
+                replacementCancellation.Cancel();
+                using var canceled = JsonDocument.Parse(await replacement.WaitAsync(TimeSpan.FromSeconds(2)));
+                Assert.Equal("stop", canceled.RootElement.GetProperty("action").GetString());
+                Assert.False(original.IsCompleted);
+            }
+
+            _gh.ReleaseResolveRequests();
+            using var originalResult = JsonDocument.Parse(await original.WaitAsync(TimeSpan.FromSeconds(3)));
+            Assert.Equal("stop", originalResult.RootElement.GetProperty("action").GetString());
+            if (cancelWaiter)
+            {
+                replacement = tools.PrMonitorNextStep(monitorAll ? "all" : monitorId, "ready", server: replacementServer);
+            }
+            using var response = JsonDocument.Parse(await replacement.WaitAsync(TimeSpan.FromSeconds(3)));
+
+            Assert.Equal("interpret_freeform", response.RootElement.GetProperty("task").GetString());
+            Assert.Contains("Second comment", Assert.Single(replacementServer.Elicitations).Message);
+            Assert.Empty(originalServer.Elicitations);
+            Assert.Equal(1, state.CurrentCommentIndex);
+            Assert.False(state.PendingResolveAfterAddress);
+            Assert.Equal("Original recommendation", state.LastRecommendation);
+            var requests = _gh.ReadRequests();
+            Assert.Equal(2, requests.Count);
+            Assert.Single(requests, request => request.Any(argument => argument.Contains("resolveReviewThread", StringComparison.Ordinal)));
+            Assert.Single(requests, request => request.Any(argument => argument.EndsWith("/replies", StringComparison.Ordinal)));
+        }
+        finally
+        {
+            _gh.ReleaseResolveRequests();
+            originalCancellation.Cancel();
+            replacementCancellation.Cancel();
+            await Record.ExceptionAsync(() => original.WaitAsync(TimeSpan.FromSeconds(3)));
+            if (replacement != null)
+                await Record.ExceptionAsync(() => replacement.WaitAsync(TimeSpan.FromSeconds(3)));
+            sessions.TryRemove(monitorId, out _);
+        }
+    }
+
+    [Fact]
+    public async Task PrMonitorNextStep_InFlightWrite_DoesNotBlockDifferentPr()
+    {
+        _gh.PauseResolveRequests();
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        var monitorId = $"pr-{owner}-repo-42";
+        var otherId = $"pr-{owner}-other-repo-42";
+        using var session = new MonitorSession { State = CreateResolvingCommentState(owner) };
+        var otherState = CreateCommentState(owner);
+        MonitorTransitions.ProcessEvent(otherState, "user_chose", "apply_fix", null);
+        using var other = new MonitorSession { State = otherState };
+        var sessions = GetSessions();
+        Assert.True(sessions.TryAdd(monitorId, session));
+        Assert.True(sessions.TryAdd(otherId, other));
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var tools = new MonitorFlowTools();
+        var original = tools.PrMonitorNextStep(monitorId, "comment_addressed", data: "{\"reply_text\":\"Approved reply\"}",
+            server: new FakeElicitationMcpServer("stop"), cancellationToken: cancellation.Token);
+        try
+        {
+            await _gh.WaitForResolveRequestsAsync(1);
+
+            using var response = JsonDocument.Parse(await tools.PrMonitorNextStep(
+                otherId, "ready", server: new FakeMcpServer()).WaitAsync(TimeSpan.FromSeconds(2)));
+
+            Assert.Equal("resume_pending_task", response.RootElement.GetProperty("task").GetString());
+            Assert.False(original.IsCompleted);
+            Assert.Equal(0, session.State.CurrentCommentIndex);
+        }
+        finally
+        {
+            cancellation.Cancel();
+            _gh.ReleaseResolveRequests();
+            await Record.ExceptionAsync(() => original.WaitAsync(TimeSpan.FromSeconds(3)));
+            sessions.TryRemove(monitorId, out _);
+            sessions.TryRemove(otherId, out _);
+        }
+    }
+
     [Fact]
     public async Task PrMonitorStart_SharesConcurrentStoppedInitialization()
     {
@@ -500,6 +617,23 @@ public class MonitorFlowToolsTests : IDisposable
         [
             new CommentInfo { Id = "first", Author = "reviewer", Body = "First comment" },
             new CommentInfo { Id = "second", Author = "reviewer", Body = "Preserve the completion marker" }
+        ]
+    };
+
+    private MonitorState CreateResolvingCommentState(string owner) => new()
+    {
+        Owner = owner,
+        Repo = "repo",
+        PrNumber = 42,
+        SessionFolder = _gh.DirectoryPath,
+        CurrentState = MonitorStateId.ExecutingTask,
+        CommentFlow = CommentFlowState.AddressAllIterating,
+        LastRecommendation = "Original recommendation",
+        ReviewsReRequested = ["reviewer"],
+        UnresolvedComments =
+        [
+            new CommentInfo { Id = "first", Author = "reviewer", Body = "First comment", RestCommentId = 1 },
+            new CommentInfo { Id = "second", Author = "reviewer", Body = "Second comment", RestCommentId = 2 }
         ]
     };
 

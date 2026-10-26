@@ -11,6 +11,7 @@ internal sealed class FakeGitHubCliFixture : IDisposable
     private readonly string _responseFile;
     private readonly string _captureFile;
     private readonly string _startupDirectory;
+    private readonly string _resolveDirectory;
     private bool _disposed;
 
     public FakeGitHubCliFixture()
@@ -23,6 +24,7 @@ internal sealed class FakeGitHubCliFixture : IDisposable
         _responseFile = Path.Combine(_directory, "response.json");
         _captureFile = Path.Combine(_directory, "arguments.jsonl");
         _startupDirectory = Path.Combine(_directory, "startup");
+        _resolveDirectory = Path.Combine(_directory, "resolve");
         File.WriteAllText(_responseFile, "[]");
 
         SetEnvironment("PATH", executableDirectory + Path.PathSeparator + Environment.GetEnvironmentVariable("PATH"));
@@ -31,6 +33,7 @@ internal sealed class FakeGitHubCliFixture : IDisposable
         SetEnvironment("PR_COPILOT_TEST_GH_EXIT_CODE", "0");
         SetEnvironment("PR_COPILOT_TEST_GH_START_BARRIER", "");
         SetEnvironment("PR_COPILOT_TEST_GH_START_SUCCESS", "");
+        SetEnvironment("PR_COPILOT_TEST_GH_RESOLVE_BARRIER", "");
     }
 
     public void Respond(string response, int exitCode = 0)
@@ -59,17 +62,32 @@ internal sealed class FakeGitHubCliFixture : IDisposable
         Directory.GetFiles(_startupDirectory, "*.entered")
             .Select(file => JsonSerializer.Deserialize<string[]>(File.ReadAllText(file))!).ToArray();
 
-    public async Task WaitForStartupRequestsAsync(int count, CancellationToken cancellationToken = default)
+    public Task WaitForStartupRequestsAsync(int count, CancellationToken cancellationToken = default) =>
+        WaitForRequestsAsync(_startupDirectory, count, cancellationToken);
+
+    public void PauseResolveRequests()
+    {
+        Directory.CreateDirectory(_resolveDirectory);
+        Environment.SetEnvironmentVariable("PR_COPILOT_TEST_GH_RESOLVE_BARRIER", _resolveDirectory);
+    }
+
+    public Task WaitForResolveRequestsAsync(int count, CancellationToken cancellationToken = default) =>
+        WaitForRequestsAsync(_resolveDirectory, count, cancellationToken);
+
+    public void ReleaseResolveRequests() =>
+        File.WriteAllText(Path.Combine(_resolveDirectory, "release"), "");
+
+    private static async Task WaitForRequestsAsync(string directory, int count, CancellationToken cancellationToken)
     {
         var arrived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var watcher = new FileSystemWatcher(_startupDirectory, "*.entered");
+        using var watcher = new FileSystemWatcher(directory, "*.entered");
         watcher.Created += (_, _) =>
         {
-            if (Directory.GetFiles(_startupDirectory, "*.entered").Length >= count)
+            if (Directory.GetFiles(directory, "*.entered").Length >= count)
                 arrived.TrySetResult();
         };
         watcher.EnableRaisingEvents = true;
-        if (Directory.GetFiles(_startupDirectory, "*.entered").Length >= count)
+        if (Directory.GetFiles(directory, "*.entered").Length >= count)
             arrived.TrySetResult();
         await arrived.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
     }

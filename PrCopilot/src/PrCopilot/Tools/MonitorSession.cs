@@ -19,6 +19,60 @@ internal class MonitorSession : IDisposable
     private CancellationTokenSource? _pollCts = new();
     public CancellationToken PollToken => _pollCts?.Token ?? CancellationToken.None;
     public volatile bool IsStopped;
+    private readonly SemaphoreSlim _stepGate = new(1, 1);
+    private readonly object _stepLock = new();
+    private CancellationTokenSource? _stepCancellation;
+
+    public async Task<string> RunStepAsync(
+        Func<CancellationToken, bool, Task<string>> execute, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        CancellationTokenSource? previous;
+        MonitorAction? expectedAction;
+        MonitorStateId expectedState;
+        bool overlapping;
+        lock (_stepLock)
+        {
+            previous = _stepCancellation;
+            overlapping = previous != null || _stepGate.CurrentCount == 0;
+            _stepCancellation = cancellation;
+            expectedAction = State.PendingAction;
+            expectedState = State.CurrentState;
+        }
+        try
+        {
+            try { previous?.Cancel(); } catch (ObjectDisposedException) { }
+            // Cancellation cannot undo an in-flight GitHub write; its owner must finish before a replacement proceeds.
+            await _stepGate.WaitAsync(cancellation.Token);
+            try
+            {
+                cancellation.Token.ThrowIfCancellationRequested();
+                var reconnect = overlapping || !ReferenceEquals(expectedAction, State.PendingAction) || expectedState != State.CurrentState;
+                return await execute(cancellation.Token, reconnect);
+            }
+            finally
+            {
+                _stepGate.Release();
+            }
+        }
+        finally
+        {
+            lock (_stepLock)
+            {
+                if (ReferenceEquals(_stepCancellation, cancellation))
+                    _stepCancellation = null;
+            }
+        }
+    }
+
+    private void CancelStep()
+    {
+        CancellationTokenSource? cancellation;
+        lock (_stepLock)
+            cancellation = _stepCancellation;
+        try { cancellation?.Cancel(); } catch (ObjectDisposedException) { }
+    }
 
     // Dedicated trigger file watcher — captures ACTION clicks even when not polling
     private FileSystemWatcher? _triggerWatcher;
@@ -127,6 +181,7 @@ internal class MonitorSession : IDisposable
     {
         DebugLogger.Log("Session", "StopPermanently called");
         IsStopped = true;
+        CancelStep();
         var cts = Interlocked.Exchange(ref _pollCts, null);
         if (cts != null)
         {
@@ -151,6 +206,7 @@ internal class MonitorSession : IDisposable
 
     public void Dispose()
     {
+        CancelStep();
         _heartbeat.Dispose();
         _triggerWatcher?.Dispose();
         var cts = Interlocked.Exchange(ref _pollCts, null);
