@@ -600,6 +600,67 @@ public class MonitorFlowToolsTests : IDisposable
     }
 
     [Fact]
+    public async Task PrMonitorNextStep_QueuedMemberStop_ExcludesStoppedMemberAfterAnotherWriteCompletes()
+    {
+        _gh.PauseResolveRequests();
+        _gh.PauseStartupRequests();
+        _gh.CompleteStartupSuccessfully();
+        _gh.ReleaseStartupRequests();
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        var firstId = $"pr-{owner}-repo-42";
+        var secondId = $"pr-{owner}-second-repo-42";
+        var firstState = CreateResolvingCommentState(owner);
+        firstState.UnresolvedComments.RemoveAt(1);
+        var secondState = CreateCommentState(owner);
+        secondState.Repo = "second-repo";
+        MonitorTransitions.ProcessEvent(secondState, "user_chose", "apply_fix", null);
+        using var first = new MonitorSession { State = firstState };
+        using var second = new MonitorSession { State = secondState };
+        var sessions = GetSessions();
+        Assert.True(sessions.TryAdd(firstId, first));
+        Assert.True(sessions.TryAdd(secondId, second));
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var tools = new MonitorFlowTools();
+        var original = tools.PrMonitorNextStep(firstId, "comment_addressed", data: "{\"reply_text\":\"Approved reply\"}",
+            server: new FakeElicitationMcpServer("stop"), cancellationToken: cancellation.Token);
+        Task<string>? combined = null;
+        try
+        {
+            await _gh.WaitForResolveRequestsAsync(1);
+            combined = tools.PrMonitorNextStep("all", "ready", server: new FakeMcpServer(), cancellationToken: cancellation.Token);
+
+            tools.PrMonitorStop(secondId);
+
+            Assert.False(original.IsCompleted);
+            Assert.False(combined.IsCompleted);
+            Assert.True(second.IsStopped);
+            Assert.Equal(MonitorStateId.ExecutingTask, secondState.CurrentState);
+            _gh.ReleaseResolveRequests();
+            using var originalResult = JsonDocument.Parse(await original.WaitAsync(TimeSpan.FromSeconds(3)));
+            Assert.Equal("stop", originalResult.RootElement.GetProperty("action").GetString());
+            await _gh.WaitForPrInfoRequestsAsync(owner, "repo", 1, cancellation.Token);
+
+            Assert.False(combined.IsCompleted);
+            Assert.False(sessions.ContainsKey(secondId));
+            Assert.Equal(0, secondState.PollCount);
+            Assert.Equal(1, firstState.CurrentCommentIndex);
+            Assert.DoesNotContain(_gh.ReadRequests(), request => request.Any(argument => argument.Contains("second-repo", StringComparison.Ordinal)));
+            Assert.DoesNotContain(_gh.ReadStartupRequests(), request => request[1].Contains("second-repo", StringComparison.Ordinal));
+            Assert.Single(_gh.ReadRequests(), request => request.Any(argument => argument.Contains("resolveReviewThread", StringComparison.Ordinal)));
+        }
+        finally
+        {
+            cancellation.Cancel();
+            _gh.ReleaseResolveRequests();
+            await Record.ExceptionAsync(() => original.WaitAsync(TimeSpan.FromSeconds(3)));
+            if (combined != null)
+                await Record.ExceptionAsync(() => combined.WaitAsync(TimeSpan.FromSeconds(3)));
+            sessions.TryRemove(firstId, out _);
+            sessions.TryRemove(secondId, out _);
+        }
+    }
+
+    [Fact]
     public async Task PrMonitorStart_SharesConcurrentStoppedInitialization()
     {
         _gh.PauseStartupRequests();
