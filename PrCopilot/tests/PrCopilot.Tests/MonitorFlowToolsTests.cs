@@ -663,7 +663,7 @@ public class MonitorFlowToolsTests : IDisposable
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task PrMonitorNextStep_RetargetedPr_UsesFreshTargetBranchForConflictResolution(bool monitorAll)
+    public async Task PrMonitorNextStep_ChangedTargetBranch_UsesFreshTargetBranchForConflictResolution(bool monitorAll)
     {
         _gh.PauseStartupRequests();
         _gh.CompleteStartupSuccessfully();
