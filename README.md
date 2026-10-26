@@ -9,6 +9,7 @@ An MCP server that monitors GitHub pull requests through GitHub Copilot CLI. It 
 - **TUI dashboard** — live Terminal.Gui viewer with CI status, comments, approvals, progress bars, and deep links
 - **Comment handling** — address, explain, or ignore review comments one-by-one or in batch
 - **CI failure investigation** — analyze failed check logs, suggest fixes, rerun failed jobs via Azure DevOps
+- **Merge conflict handling** — fetches and merges the latest target branch into the PR branch with git-workflow approvals and a normal push; no rebasing or force-pushes
 - **Auto-merge** — squash merge when approved + CI green (with admin override option)
 - **Stale approval reminders** — optionally message prior approvers when CI is green after new commits, using any messaging capability available to the agent
 - **After-hours awareness** — pauses polling during off-hours, resumes automatically
@@ -119,7 +120,9 @@ The `pr-monitor` skill activates automatically on:
    - ⚠️ Merge conflict → Handle myself
 4. **After your action** — monitoring resumes automatically
 
-Starting monitoring again reuses active sessions but initializes a fresh session after a monitor has stopped. Concurrent starts for the same PR share one initialization with independently cancelable waits. Canceling a wait does not abort the shared startup, while an already-canceled request creates no work. Reviewer-comment explanations fetch the matching file patch across all PR file pages and use a 4,096-token sampling budget, with one 8,192-token retry if the response JSON is incomplete or invalid.
+Starting monitoring again reconnects to an active session but initializes a fresh session after a monitor has stopped. `ready` re-presents a pending prompt or returns `resume_pending_task` with the original action and reconciliation instructions; it never marks work complete or automatically repeats a GitHub write. This also applies to multi-PR monitoring. After pushing a fix, reconnect and report the original task's completion event rather than resetting the monitor or reapplying completed work. Pending actions are retained for the lifetime of the MCP server, not across server restarts.
+
+Concurrent starts for the same PR share one initialization with independently cancelable waits. Canceling a wait does not abort the shared startup, while an already-canceled request creates no work. Reviewer-comment explanations fetch the matching file patch across all PR file pages and use a 4,096-token sampling budget, with one 8,192-token retry if the response JSON is incomplete or invalid.
 
 ### CLI flags
 

@@ -19,6 +19,75 @@ internal class MonitorSession : IDisposable
     private CancellationTokenSource? _pollCts = new();
     public CancellationToken PollToken => _pollCts?.Token ?? CancellationToken.None;
     public volatile bool IsStopped;
+    private readonly SemaphoreSlim _stepGate = new(1, 1);
+    private readonly object _stepLock = new();
+    private CancellationTokenSource? _stepCancellation;
+    private bool _cancelStepOnStop = true;
+    private readonly CancellationTokenSource _stopCancellation = new();
+    public CancellationToken StopToken { get; }
+
+    public MonitorSession() => StopToken = _stopCancellation.Token;
+
+    public async Task<string> RunStepAsync(
+        Func<CancellationToken, bool, Task<string>> execute, CancellationToken cancellationToken, bool cancelOnStop = true)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken, cancelOnStop ? StopToken : CancellationToken.None);
+        using var waitCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellation.Token, StopToken);
+        CancellationTokenSource? previous;
+        MonitorAction? expectedAction;
+        MonitorStateId expectedState;
+        bool overlapping;
+        lock (_stepLock)
+        {
+            previous = _stepCancellation;
+            overlapping = previous != null || _stepGate.CurrentCount == 0;
+            _stepCancellation = cancellation;
+            _cancelStepOnStop = cancelOnStop;
+            expectedAction = State.PendingAction;
+            expectedState = State.CurrentState;
+        }
+        try
+        {
+            try { previous?.Cancel(); } catch (ObjectDisposedException) { }
+            // Cancellation cannot undo an in-flight GitHub write; its owner must finish before a replacement proceeds.
+            await _stepGate.WaitAsync(waitCancellation.Token);
+            try
+            {
+                waitCancellation.Token.ThrowIfCancellationRequested();
+                var reconnect = overlapping || !ReferenceEquals(expectedAction, State.PendingAction) || expectedState != State.CurrentState;
+                return await execute(cancellation.Token, reconnect);
+            }
+            finally
+            {
+                _stepGate.Release();
+            }
+        }
+        finally
+        {
+            lock (_stepLock)
+            {
+                if (ReferenceEquals(_stepCancellation, cancellation))
+                    _stepCancellation = null;
+            }
+        }
+    }
+
+    private void CancelStep()
+    {
+        CancellationTokenSource? cancellation;
+        lock (_stepLock)
+            cancellation = _cancelStepOnStop ? _stepCancellation : null;
+        try { cancellation?.Cancel(); } catch (ObjectDisposedException) { }
+    }
+
+    private void CancelStop()
+    {
+        try { _stopCancellation.Cancel(); } catch (ObjectDisposedException) { }
+        lock (_triggerLock)
+            _triggerTcs?.TrySetResult("STOP");
+    }
 
     // Dedicated trigger file watcher — captures ACTION clicks even when not polling
     private FileSystemWatcher? _triggerWatcher;
@@ -82,6 +151,9 @@ internal class MonitorSession : IDisposable
     {
         lock (_triggerLock)
         {
+            if (StopToken.IsCancellationRequested)
+                return Task.FromResult("STOP");
+
             // If there's already pending content, return immediately
             if (PendingTriggerContent != null)
             {
@@ -127,6 +199,8 @@ internal class MonitorSession : IDisposable
     {
         DebugLogger.Log("Session", "StopPermanently called");
         IsStopped = true;
+        CancelStop();
+        CancelStep();
         var cts = Interlocked.Exchange(ref _pollCts, null);
         if (cts != null)
         {
@@ -151,6 +225,9 @@ internal class MonitorSession : IDisposable
 
     public void Dispose()
     {
+        CancelStop();
+        CancelStep();
+        _stopCancellation.Dispose();
         _heartbeat.Dispose();
         _triggerWatcher?.Dispose();
         var cts = Interlocked.Exchange(ref _pollCts, null);

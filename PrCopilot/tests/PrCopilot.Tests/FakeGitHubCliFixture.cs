@@ -11,6 +11,8 @@ internal sealed class FakeGitHubCliFixture : IDisposable
     private readonly string _responseFile;
     private readonly string _captureFile;
     private readonly string _startupDirectory;
+    private readonly string _resolveDirectory;
+    private readonly string _mergeDirectory;
     private bool _disposed;
 
     public FakeGitHubCliFixture()
@@ -23,6 +25,8 @@ internal sealed class FakeGitHubCliFixture : IDisposable
         _responseFile = Path.Combine(_directory, "response.json");
         _captureFile = Path.Combine(_directory, "arguments.jsonl");
         _startupDirectory = Path.Combine(_directory, "startup");
+        _resolveDirectory = Path.Combine(_directory, "resolve");
+        _mergeDirectory = Path.Combine(_directory, "merge");
         File.WriteAllText(_responseFile, "[]");
 
         SetEnvironment("PATH", executableDirectory + Path.PathSeparator + Environment.GetEnvironmentVariable("PATH"));
@@ -31,6 +35,9 @@ internal sealed class FakeGitHubCliFixture : IDisposable
         SetEnvironment("PR_COPILOT_TEST_GH_EXIT_CODE", "0");
         SetEnvironment("PR_COPILOT_TEST_GH_START_BARRIER", "");
         SetEnvironment("PR_COPILOT_TEST_GH_START_SUCCESS", "");
+        SetEnvironment("PR_COPILOT_TEST_GH_RESOLVE_BARRIER", "");
+        SetEnvironment("PR_COPILOT_TEST_GH_PR_INFO", "");
+        SetEnvironment("PR_COPILOT_TEST_GH_MERGE_BARRIER", "");
     }
 
     public void Respond(string response, int exitCode = 0)
@@ -55,22 +62,96 @@ internal sealed class FakeGitHubCliFixture : IDisposable
     public void CompleteStartupSuccessfully() =>
         Environment.SetEnvironmentVariable("PR_COPILOT_TEST_GH_START_SUCCESS", "1");
 
+    public void RespondToPrInfo(string response)
+    {
+        var filename = Path.Combine(_directory, "pr-info.json");
+        File.WriteAllText(filename, response);
+        Environment.SetEnvironmentVariable("PR_COPILOT_TEST_GH_PR_INFO", filename);
+    }
+
     public IReadOnlyList<string[]> ReadStartupRequests() =>
         Directory.GetFiles(_startupDirectory, "*.entered")
-            .Select(file => JsonSerializer.Deserialize<string[]>(File.ReadAllText(file))!).ToArray();
+            .Select(file =>
+            {
+                using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                using var reader = new StreamReader(stream);
+                return JsonSerializer.Deserialize<string[]>(reader.ReadToEnd())!;
+            }).ToArray();
 
-    public async Task WaitForStartupRequestsAsync(int count, CancellationToken cancellationToken = default)
+    public Task WaitForStartupRequestsAsync(int count, CancellationToken cancellationToken = default) =>
+        WaitForRequestsAsync(_startupDirectory, count, cancellationToken);
+
+    public async Task WaitForPrInfoRequestsAsync(string owner, string repo, int count, CancellationToken cancellationToken = default)
     {
         var arrived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var watcher = new FileSystemWatcher(_startupDirectory, "*.entered");
-        watcher.Created += (_, _) =>
+        void Check()
         {
-            if (Directory.GetFiles(_startupDirectory, "*.entered").Length >= count)
-                arrived.TrySetResult();
-        };
+            try
+            {
+                if (ReadStartupRequests().Count(request => request[1] == $"repos/{owner}/{repo}/pulls/42") >= count)
+                    arrived.TrySetResult();
+            }
+            catch (IOException) { }
+            catch (JsonException) { }
+        }
+        using var watcher = new FileSystemWatcher(_startupDirectory, "*.entered");
+        watcher.Created += (_, _) => Check();
+        watcher.Renamed += (_, _) => Check();
         watcher.EnableRaisingEvents = true;
-        if (Directory.GetFiles(_startupDirectory, "*.entered").Length >= count)
-            arrived.TrySetResult();
+        Check();
+        try
+        {
+            await arrived.Task.WaitAsync(TimeSpan.FromSeconds(3), cancellationToken);
+        }
+        catch (TimeoutException)
+        {
+            Check();
+            if (!arrived.Task.IsCompleted)
+                throw;
+        }
+    }
+
+    public void PauseResolveRequests()
+    {
+        Directory.CreateDirectory(_resolveDirectory);
+        Environment.SetEnvironmentVariable("PR_COPILOT_TEST_GH_RESOLVE_BARRIER", _resolveDirectory);
+    }
+
+    public Task WaitForResolveRequestsAsync(int count, CancellationToken cancellationToken = default) =>
+        WaitForRequestsAsync(_resolveDirectory, count, cancellationToken);
+
+    public void ReleaseResolveRequests() =>
+        File.WriteAllText(Path.Combine(_resolveDirectory, "release"), "");
+
+    public void PauseMergeRequests()
+    {
+        Directory.CreateDirectory(_mergeDirectory);
+        Environment.SetEnvironmentVariable("PR_COPILOT_TEST_GH_MERGE_BARRIER", _mergeDirectory);
+    }
+
+    public Task WaitForMergeRequestsAsync(int count, CancellationToken cancellationToken = default) =>
+        WaitForRequestsAsync(_mergeDirectory, count, cancellationToken);
+
+    public void ReleaseMergeRequests() =>
+        File.WriteAllText(Path.Combine(_mergeDirectory, "release"), "");
+
+    private static async Task WaitForRequestsAsync(string directory, int count, CancellationToken cancellationToken)
+    {
+        var arrived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        void Check()
+        {
+            try
+            {
+                if (Directory.GetFiles(directory, "*.entered").Length >= count)
+                    arrived.TrySetResult();
+            }
+            catch (IOException) { }
+        }
+        using var watcher = new FileSystemWatcher(directory, "*.entered");
+        watcher.Created += (_, _) => Check();
+        watcher.Renamed += (_, _) => Check();
+        watcher.EnableRaisingEvents = true;
+        Check();
         await arrived.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
     }
 

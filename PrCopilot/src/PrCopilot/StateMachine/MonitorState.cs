@@ -36,6 +36,12 @@ public class MonitorState
     public CiFailureFlowState CiFailureFlow { get; set; } = CiFailureFlowState.None;
     public TerminalStateType? LastTerminalState { get; set; }
 
+    /// <summary>The action awaiting completion or user input, retained across reconnects.</summary>
+    public MonitorAction? PendingAction { get; set; }
+
+    internal bool HasPendingAction => CurrentState != MonitorStateId.Stopped &&
+        (PendingAction != null || CurrentState is not (MonitorStateId.Idle or MonitorStateId.Polling));
+
     // CI check status
     public CheckRunCounts Checks { get; set; } = new();
 
@@ -125,6 +131,13 @@ public class MonitorState
         PendingReRequestReviewer = null;
         SamplingCompletionEvent = null;
         PendingCompletionEvent = null;
+    }
+
+    internal MonitorAction RememberAction(MonitorAction action)
+    {
+        if (action.Task != "resume_pending_task")
+            PendingAction = action.Action is "execute" or "ask_user" or "auto_execute" ? action : null;
+        return action;
     }
 
     /// <summary>
