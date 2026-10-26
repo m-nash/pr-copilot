@@ -841,6 +841,254 @@ public class StateMachineTests
     }
 
     [Fact]
+    public void ProcessEvent_Ready_ResumesPendingCommentWithoutLosingProgress()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.CommentFlow = CommentFlowState.ExplainAllIterating;
+        state.UnresolvedComments = [MakeComment("first"), MakeComment("second")];
+        state.CurrentCommentIndex = 1;
+        state.LastRecommendation = "Preserve the completion marker";
+        var pending = MonitorTransitions.ProcessEvent(state, "user_chose", "apply_fix", null);
+        state.HeadSha = "already-pushed-fix";
+
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            var action = MonitorTransitions.ProcessEvent(state, "ready", null, null);
+
+            Assert.Equal("execute", action.Action);
+            Assert.Equal("resume_pending_task", action.Task);
+            Assert.Same(pending, action.Context);
+            Assert.Contains("Preserve the completion marker", action.Instructions);
+            Assert.Equal(MonitorStateId.ExecutingTask, state.CurrentState);
+            Assert.Equal(CommentFlowState.ExplainAllIterating, state.CommentFlow);
+            Assert.Equal(1, state.CurrentCommentIndex);
+            Assert.Equal("Preserve the completion marker", state.LastRecommendation);
+            Assert.False(state.UnresolvedComments[1].IsAddressed);
+            Assert.Null(state.PendingReplyText);
+            Assert.False(state.PendingResolveAfterAddress);
+        }
+
+        state.PendingReplyText = "Approved reply linking the fix";
+        var completion = MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
+
+        Assert.Equal("resolve_thread", completion.Task);
+        Assert.Same(state.UnresolvedComments[1], completion.Context);
+        Assert.True(state.UnresolvedComments[1].IsAddressed);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ProcessEvent_Ready_ResumesPendingCiTask(bool applyingFix)
+    {
+        var state = CreateState();
+        SetChecksFailed(state);
+        var pending = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.CiFailure);
+        if (applyingFix)
+        {
+            state.InvestigationFindings = "A regression broke the build";
+            state.SuggestedFix = "Fix the regression";
+            MonitorTransitions.ProcessEvent(state, "investigation_complete", null, null);
+            pending = MonitorTransitions.ProcessEvent(state, "user_chose", "apply_fix", null);
+        }
+        var currentState = state.CurrentState;
+        var ciFlow = state.CiFailureFlow;
+
+        var action = MonitorTransitions.ProcessEvent(state, "ready", null, null);
+
+        Assert.Equal("execute", action.Action);
+        Assert.Equal("resume_pending_task", action.Task);
+        Assert.Same(pending, action.Context);
+        Assert.Equal(currentState, state.CurrentState);
+        Assert.Equal(ciFlow, state.CiFailureFlow);
+        Assert.Single(state.FailedChecks);
+
+        var completion = MonitorTransitions.ProcessEvent(
+            state, applyingFix ? "push_completed" : "investigation_complete", null, null);
+        Assert.Equal(applyingFix ? "polling" : "ask_user", completion.Action);
+    }
+
+    [Fact]
+    public void ProcessEvent_Ready_RePresentsPendingCommentPrompt()
+    {
+        var state = CreateState();
+        state.UnresolvedComments = [MakeComment("first"), MakeComment("second")];
+        var prompt = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.NewComment);
+
+        var action = MonitorTransitions.ProcessEvent(state, "ready", null, null);
+
+        Assert.Same(prompt, action);
+        Assert.Equal(MonitorStateId.AwaitingUser, state.CurrentState);
+        Assert.Equal(CommentFlowState.MultiCommentPrompt, state.CommentFlow);
+    }
+
+    [Fact]
+    public void ProcessEvent_Ready_RePresentsRecommendationWithoutExplainingAgain()
+    {
+        var state = CreateState();
+        state.UnresolvedComments = [MakeComment()];
+        MonitorTransitions.BuildTerminalAction(state, TerminalStateType.NewComment);
+        state.LastRecommendation = "The fix is already understood";
+        var prompt = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        var action = MonitorTransitions.ProcessEvent(state, "ready", null, null);
+
+        Assert.Same(prompt, action);
+        Assert.Equal("ask_user", action.Action);
+        Assert.Equal("The fix is already understood", state.LastRecommendation);
+        Assert.Equal(CommentFlowState.SingleCommentPrompt, state.CommentFlow);
+    }
+
+    [Fact]
+    public void ProcessEvent_Ready_RePresentsWaitingCommentPrompt()
+    {
+        var state = CreateState();
+        var comment = MakeComment();
+        var prompt = MonitorTransitions.BuildWaitingCommentAction(state, comment);
+
+        var action = MonitorTransitions.ProcessEvent(state, "ready", null, null);
+
+        Assert.Same(prompt, action);
+        Assert.Same(comment, state.ActiveWaitingComment);
+        Assert.Equal(MonitorStateId.AwaitingUser, state.CurrentState);
+    }
+
+    [Fact]
+    public void ProcessEvent_Ready_DoesNotRepeatPendingGitHubAction()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        state.CommentFlow = CommentFlowState.ExplainAllIterating;
+        state.UnresolvedComments = [MakeComment()];
+        state.PendingReplyText = "Approved reply";
+        var pending = MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
+        Assert.Equal("auto_execute", pending.Action);
+
+        var action = MonitorTransitions.ProcessEvent(state, "ready", null, null);
+
+        Assert.Equal("execute", action.Action);
+        Assert.Equal("resume_pending_task", action.Task);
+        Assert.Same(pending, action.Context);
+        Assert.True(state.PendingResolveAfterAddress);
+        Assert.Equal("Approved reply", state.PendingReplyText);
+    }
+
+    [Fact]
+    public void ProcessEvent_Ready_ReconcilesPendingNewBuildBeforePolling()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.CiFailureFlow = CiFailureFlowState.InvestigationResults;
+        var pending = MonitorTransitions.ProcessEvent(state, "user_chose", "run_new", null);
+        Assert.Equal(MonitorStateId.Polling, state.CurrentState);
+
+        var action = MonitorTransitions.ProcessEvent(state, "ready", null, null);
+
+        Assert.Equal("resume_pending_task", action.Task);
+        Assert.Same(pending, action.Context);
+        var completion = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        Assert.Equal("polling", completion.Action);
+        Assert.Equal("polling", MonitorTransitions.ProcessEvent(state, "ready", null, null).Action);
+    }
+
+    [Theory]
+    [InlineData(MonitorStateId.ExecutingTask)]
+    [InlineData(MonitorStateId.Investigating)]
+    [InlineData(MonitorStateId.ApplyingFix)]
+    [InlineData(MonitorStateId.AwaitingUser)]
+    public void ProcessEvent_Ready_WithMissingPendingActionPreservesState(MonitorStateId currentState)
+    {
+        var state = CreateState();
+        state.CurrentState = currentState;
+        state.CommentFlow = CommentFlowState.ExplainAllIterating;
+        state.UnresolvedComments = [MakeComment()];
+        state.LastRecommendation = "Preserve this recommendation";
+
+        var action = MonitorTransitions.ProcessEvent(state, "ready", null, null);
+
+        Assert.Equal("execute", action.Action);
+        Assert.Equal("resume_pending_task", action.Task);
+        Assert.Contains("no saved", action.Instructions, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(currentState, state.CurrentState);
+        Assert.Equal(CommentFlowState.ExplainAllIterating, state.CommentFlow);
+        Assert.Equal("Preserve this recommendation", state.LastRecommendation);
+    }
+
+    [Theory]
+    [InlineData(MonitorStateId.AwaitingUser)]
+    [InlineData(MonitorStateId.ExecutingTask)]
+    public void ProcessEvent_MergeConflictTargetMerge_ExecutesAndResumesUntilPushCompleted(MonitorStateId currentState)
+    {
+        var state = CreateState();
+        state.BaseBranch = "release";
+        state.HasMergeConflict = true;
+        var prompt = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.MergeConflict);
+        Assert.Contains("Resolve the conflict (merge target branch)", prompt.Choices!);
+        Assert.DoesNotContain("Resolve the conflict (rebase)", prompt.Choices!);
+        var choice = MonitorTransitions.ChoiceValueMap["Resolve the conflict (merge target branch)"];
+        Assert.Equal("merge_target_branch", choice);
+        state.CurrentState = currentState;
+
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", choice, null);
+
+        Assert.Equal("execute", action.Action);
+        Assert.Equal("merge_target_branch", action.Task);
+        Assert.Equal(MonitorStateId.ExecutingTask, state.CurrentState);
+        Assert.Equal(CommentFlowState.None, state.CommentFlow);
+        Assert.Equal(CiFailureFlowState.None, state.CiFailureFlow);
+        Assert.True(state.HasMergeConflict);
+        Assert.Contains("target branch 'release' into PR head branch 'feature/test'", action.Instructions);
+        Assert.Contains("fetch", action.Instructions, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("target repository", action.Instructions);
+        Assert.Contains("git merge --no-commit", action.Instructions);
+        Assert.Contains("Do not rebase", action.Instructions);
+        Assert.Contains("approval", action.Instructions, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("staging", action.Instructions, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("regular git push", action.Instructions);
+        Assert.Contains("Never force-push", action.Instructions);
+        Assert.Contains("push_completed", action.Instructions);
+        var context = System.Text.Json.JsonSerializer.SerializeToElement(action.Context);
+        Assert.Equal(state.Owner, context.GetProperty("Owner").GetString());
+        Assert.Equal(state.Repo, context.GetProperty("Repo").GetString());
+        Assert.Equal(state.PrNumber, context.GetProperty("PrNumber").GetInt32());
+        Assert.Equal(state.HeadBranch, context.GetProperty("HeadBranch").GetString());
+        Assert.Equal(state.BaseBranch, context.GetProperty("BaseBranch").GetString());
+        Assert.Equal(state.HeadSha, context.GetProperty("HeadSha").GetString());
+
+        var resumed = MonitorTransitions.ProcessEvent(state, "ready", null, null);
+        Assert.Equal("resume_pending_task", resumed.Task);
+        Assert.Same(action, resumed.Context);
+
+        var completed = MonitorTransitions.ProcessEvent(state, "push_completed", null, null);
+        Assert.Equal("polling", completed.Action);
+        Assert.Equal(MonitorStateId.Polling, state.CurrentState);
+        Assert.Null(state.PendingAction);
+    }
+
+    [Theory]
+    [InlineData(MonitorStateId.AwaitingUser)]
+    [InlineData(MonitorStateId.ExecutingTask)]
+    public void ProcessEvent_LegacyRebaseChoice_MergesTargetBranchWithoutRewritingHistory(MonitorStateId currentState)
+    {
+        var state = CreateState();
+        state.BaseBranch = "release";
+        state.HasMergeConflict = true;
+        MonitorTransitions.BuildTerminalAction(state, TerminalStateType.MergeConflict);
+        state.CurrentState = currentState;
+
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "rebase", null);
+
+        Assert.Equal("execute", action.Action);
+        Assert.Equal("merge_target_branch", action.Task);
+        Assert.Contains("target branch 'release' into PR head branch 'feature/test'", action.Instructions);
+        Assert.Contains("git merge --no-commit", action.Instructions);
+        Assert.Contains("Do not rebase", action.Instructions);
+        Assert.Contains("Never force-push", action.Instructions);
+        Assert.Equal(MonitorStateId.ExecutingTask, state.CurrentState);
+    }
+
+    [Fact]
     public void ProcessEvent_UnknownStateEvent_ReturnsRecoveryAction()
     {
         var state = CreateState();

@@ -163,7 +163,7 @@ public class MonitorFlowTools
 
         var pathBInstructions = BuildFreeformPathBInstructions(state);
 
-        return new MonitorAction
+        return state.RememberAction(new MonitorAction
         {
             Action = "execute",
             MonitorId = monitorId,
@@ -175,7 +175,7 @@ public class MonitorFlowTools
                 "tell the user 'I'm interpreting this as [choice display text]' and call pr_monitor_next_step " +
                 "with event='user_chose' and choice=<mapped_value>. " +
                 pathBInstructions
-        };
+        });
     }
 
     /// <summary>
@@ -227,6 +227,13 @@ public class MonitorFlowTools
                 "draft the reply text and pass it via data='{\"reply_text\": \"your reply\"}' in pr_monitor_next_step — " +
                 "the server will post it. Then call pr_monitor_next_step with event='comment_replied' and data containing reply_text. " +
                 "If the instruction is some other non-reply task (analysis, questions, etc.), execute it and call pr_monitor_next_step with event='task_complete'.";
+        }
+
+        if (state.LastTerminalState == TerminalStateType.MergeConflict && state.ActiveWaitingComment == null)
+        {
+            return "**Path B — custom instruction:** Execute the user's request. If it involves resolving this conflict, " +
+                MonitorTransitions.BuildMergeTargetBranchInstructions(state) +
+                " If it is an analysis-only request, do not change code; call pr_monitor_next_step with event='task_complete'.";
         }
 
         // No active flow — generic fallback
@@ -405,7 +412,7 @@ public class MonitorFlowTools
                 waiting_for_reply_comments = s.WaitingForReplyComments.Count,
                 merge_conflict = s.HasMergeConflict,
                 copilot_review_requested = false,
-                message = $"Resuming existing monitor for PR #{prNumber}. Call pr_monitor_next_step with event='ready' to continue."
+                message = $"Resuming existing monitor for PR #{prNumber}. Call pr_monitor_next_step with event='ready' to reconnect to pending work before polling."
             }, _jsonOptions);
         }
 
@@ -627,7 +634,7 @@ public class MonitorFlowTools
     [McpServerTool(Name = "pr_monitor_next_step"), Description("The one tool the agent calls in a loop. Reports the result of the last action and gets the next instruction. May block for minutes/hours when in polling mode (zero tokens burned), or return instantly during active flows.")]
     public async Task<string> PrMonitorNextStep(
         [Description("Monitor ID from pr_monitor_start")] string monitorId,
-        [Description("Event: ready, user_chose, comment_addressed, comment_replied, investigation_complete, push_completed, task_complete")] string @event,
+        [Description("Event: ready (start/reconnect without completing pending work), user_chose, comment_addressed, comment_replied, investigation_complete, push_completed, task_complete")] string @event,
         [Description("User's choice (for user_chose events)")] string? choice = null,
         [Description("Event data as JSON string (findings, suggested_fix, etc.)")] string? data = null,
         McpServer server = null!,
@@ -711,6 +718,9 @@ public class MonitorFlowTools
                     if (action.MonitorId != null && _sessions.TryGetValue(action.MonitorId, out var elicitSession))
                         await WriteElicitedLogEntryAsync(elicitSession.State, elicitResult.Value);
 
+                    var activeState = action.MonitorId != null && _sessions.TryGetValue(action.MonitorId, out var activeSession)
+                        ? activeSession.State : heartbeatSession.State;
+
                     // Freeform text — try sampling classification first, fall back to agent
                     if (elicitResult.IsFreeform)
                     {
@@ -719,31 +729,29 @@ public class MonitorFlowTools
                         {
                             DebugLogger.Log("NextStep", $"Multi-PR sampling classified freeform as choice: {mappedChoice}");
                             // Return the classified choice to the agent to relay to the specific PR's monitor
-                            return SerializeAction(new MonitorAction
+                            return SerializeAction(activeState.RememberAction(new MonitorAction
                             {
                                 Action = "execute",
                                 MonitorId = action.MonitorId,
                                 Task = "relay_choice",
                                 Instructions = $"The user chose '{mappedChoice}' for PR monitor {action.MonitorId}. Call pr_monitor_next_step with monitorId='{action.MonitorId}', event='user_chose', choice='{mappedChoice}'. After handling, call pr_monitor_next_step with monitorId='all' and event='ready' to resume monitoring all PRs."
-                            });
+                            }));
                         }
 
                         // Custom instruction — delegate to agent
-                        var freeformState = action.MonitorId != null && _sessions.TryGetValue(action.MonitorId, out var fs)
-                            ? fs.State : heartbeatSession.State;
-                        freeformState.CurrentState = MonitorStateId.ExecutingTask;
-                        var freeformAction = BuildFreeformInterpretAction(elicitResult, freeformState, action.MonitorId);
+                        activeState.CurrentState = MonitorStateId.ExecutingTask;
+                        var freeformAction = BuildFreeformInterpretAction(elicitResult, activeState, action.MonitorId);
                         return SerializeAction(freeformAction);
                     }
 
                     // Return the choice to the agent with instructions to feed it to the specific PR's monitor
-                    return SerializeAction(new MonitorAction
+                    return SerializeAction(activeState.RememberAction(new MonitorAction
                     {
                         Action = "execute",
                         MonitorId = action.MonitorId,
                         Task = "relay_choice",
                         Instructions = $"The user chose '{elicitResult.Value}' for PR monitor {action.MonitorId}. Call pr_monitor_next_step with monitorId='{action.MonitorId}', event='user_chose', choice='{elicitResult.Value}'. After handling, call pr_monitor_next_step with monitorId='all' and event='ready' to resume monitoring all PRs."
-                    });
+                    }));
                 }
 
                 await WriteLogEntryAsync(
@@ -800,7 +808,7 @@ public class MonitorFlowTools
             DebugLogger.Log("NextStep", $"Called: event={@event}, choice={choice ?? "null"}, state={state.CurrentState}");
             // Check for pending viewer action (captured by FileSystemWatcher even when not polling)
             if (session.PendingTriggerContent != null && session.PendingTriggerContent.StartsWith("ACTION|") &&
-                state.ActiveWaitingComment == null && @event != "user_chose")
+                !state.HasPendingAction && state.ActiveWaitingComment == null && @event != "user_chose")
             {
                 var threadId = session.PendingTriggerContent["ACTION|".Length..];
                 session.PendingTriggerContent = null;
@@ -890,10 +898,13 @@ public class MonitorFlowTools
             // via MCP elicitation (bypassing the LLM entirely for user choices).
             while (true)
             {
+                state.RememberAction(action);
+
                 // Handle auto_execute: run the command in C# and loop back
                 while (action.Action == "auto_execute")
                 {
                     action = await ExecuteAutoAction(state, action);
+                    state.RememberAction(action);
                     DebugLogger.Log("NextStep", $"Auto-execute result: action={action.Action}, task={action.Task ?? "null"}");
                 }
 
@@ -1324,6 +1335,16 @@ public class MonitorFlowTools
             {
                 lock (_multiMonitorLock) { _multiMonitorIds.Clear(); }
                 return new MonitorAction { Action = "stop", Message = "All PRs have been merged or closed. Monitoring complete." };
+            }
+
+            foreach (var (mid, session) in activeSessions)
+            {
+                if (session.State.HasPendingAction)
+                {
+                    var pending = MonitorTransitions.ProcessEvent(session.State, "ready", null, null);
+                    pending.MonitorId = mid;
+                    return pending;
+                }
             }
 
             var minSleepSeconds = int.MaxValue;

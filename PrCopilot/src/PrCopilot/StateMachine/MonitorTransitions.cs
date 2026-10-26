@@ -82,7 +82,7 @@ public static class MonitorTransitions
         state.LastTerminalState = terminal;
         state.CurrentState = MonitorStateId.AwaitingUser;
 
-        return terminal switch
+        return state.RememberAction(terminal switch
         {
             TerminalStateType.NewComment => BuildCommentAction(state, timestamp),
             TerminalStateType.ReviewerReplied => BuildReviewerRepliedAction(state, timestamp),
@@ -92,7 +92,7 @@ public static class MonitorTransitions
             TerminalStateType.ApprovedCiGreen => BuildApprovedAction(state, timestamp),
             TerminalStateType.StaleApprovalCiGreen => BuildStaleApprovalAction(state, timestamp),
             _ => new MonitorAction { Action = "stop", Message = "Unknown terminal state" }
-        };
+        });
     }
 
     /// <summary>
@@ -112,7 +112,7 @@ public static class MonitorTransitions
         ["Stop monitoring"] = "stop",
         ["I'll handle it myself"] = "handle_myself",
         ["Re-run cancelled jobs"] = "rerun_failed",
-        ["Resolve the conflict (rebase)"] = "rebase",
+        ["Resolve the conflict (merge target branch)"] = "merge_target_branch",
 
         // Comment flow choices (ProcessCommentChoice)
         ["Address all comments"] = "address_all",
@@ -149,7 +149,7 @@ public static class MonitorTransitions
     {
         DebugLogger.Log("StateMachine", "All checks complete — executing deferred rerun");
         state.PendingRerunWhenChecksComplete = false;
-        return BuildRerunAction(state);
+        return state.RememberAction(BuildRerunAction(state));
     }
 
     /// <summary>
@@ -159,6 +159,9 @@ public static class MonitorTransitions
     public static MonitorAction ProcessEvent(MonitorState state, string eventType, string? choice, object? data)
     {
         DebugLogger.Log("StateMachine", $"ProcessEvent: state={state.CurrentState}, event={eventType}, choice={choice ?? "null"}, commentFlow={state.CommentFlow}");
+        if (eventType == "ready" && state.HasPendingAction)
+            return ResumePendingAction(state);
+
         var result = (state.CurrentState, eventType) switch
         {
             // After start, agent signals ready → begin polling (blocks)
@@ -191,13 +194,53 @@ public static class MonitorTransitions
             // LLM finished executing a generic task
             (MonitorStateId.ExecutingTask, "task_complete") => ProcessTaskComplete(state),
 
+            (MonitorStateId.Polling, "task_complete") when state.PendingAction?.Action == "auto_execute" =>
+                TransitionToPolling(state),
+
             // Recovery: agent sent task_complete from AwaitingUser (skipped a tool call)
             (MonitorStateId.AwaitingUser, "task_complete") => RecoverFromUnexpectedTaskComplete(state),
 
             _ => RecoverFromUnexpectedState(state, eventType)
         };
         DebugLogger.Log("StateMachine", $"ProcessEvent result: action={result.Action}, task={result.Task ?? "null"}");
-        return result;
+        return state.RememberAction(result);
+    }
+
+    private static MonitorAction ResumePendingAction(MonitorState state)
+    {
+        var pending = state.PendingAction;
+        DebugLogger.Log("StateMachine", $"Reconnecting: state={state.CurrentState}, task={pending?.Task ?? pending?.Action ?? "missing"}");
+        if (pending?.Action == "ask_user")
+            return pending;
+
+        var instructions = "Resume the existing task, not a new task. The original action is provided in context. " +
+            "Check session history, the working tree, and pushed commits to establish which steps already finished. " +
+            "Do not repeat completed code changes, pushes, messages, or GitHub writes. Continue only unfinished work, " +
+            "honoring the user's approval requirements. Report the original task's completion event and data to " +
+            "pr_monitor_next_step only after verifying completion; ready is not a completion event.";
+        if (pending == null)
+        {
+            DebugLogger.Error("StateMachine", $"No saved action for {state.CurrentState}; preserving the active flow for recovery.");
+            instructions = $"There are no saved task instructions for state {state.CurrentState}. " +
+                "Recover the original task from session history or ask the user before changing code, making GitHub writes, " +
+                "or reporting completion. Do not reset the monitor or assume the task is complete.";
+        }
+        else if (pending.Action == "auto_execute")
+        {
+            instructions += " The pending server-side action may already have run. Verify its result before any retry. " +
+                "If it completed, report event='task_complete'; do not repeat it or permit further GitHub writes without the required approval.";
+        }
+        if (!string.IsNullOrWhiteSpace(state.LastRecommendation))
+            instructions += $" Last recommendation: {state.LastRecommendation}";
+
+        return new MonitorAction
+        {
+            Action = "execute",
+            MonitorId = pending?.MonitorId,
+            Task = "resume_pending_task",
+            Instructions = instructions,
+            Context = pending
+        };
     }
 
     private static MonitorAction ProcessTaskComplete(MonitorState state)
@@ -393,6 +436,7 @@ public static class MonitorTransitions
             "handle_myself" => StopMonitoring(state),
             "stop" => StopMonitoring(state),
             "resume" => TransitionToPolling(state),
+            "merge_target_branch" or "rebase" => BuildMergeTargetBranchAction(state),
             "merge" => BuildMergeAction(state),
             "merge_admin" => BuildMergeAdminAction(state),
             "wait_for_approver" => WaitForAdditionalApprover(state),
@@ -816,13 +860,13 @@ public static class MonitorTransitions
         state.CurrentState = MonitorStateId.AwaitingUser;
         state.ActiveWaitingComment = comment;
 
-        return new MonitorAction
+        return state.RememberAction(new MonitorAction
         {
             Action = "ask_user",
             Question = FormatComment(comment, $"[{timestamp}] ⏳ Waiting — You replied, ball is in reviewer's court"),
             Choices = ["Resolve this thread", "Go back to monitoring"],
             Context = comment
-        };
+        });
     }
 
     private static MonitorAction ProcessWaitingCommentChoice(MonitorState state, string? choice)
@@ -1120,9 +1164,38 @@ public static class MonitorTransitions
         {
             Action = "ask_user",
             Question = $"[{timestamp}] ⚠️ PR #{state.PrNumber} has a merge conflict with the base branch.",
-            Choices = ["Resolve the conflict (rebase)", "I'll handle it myself"]
+            Choices = ["Resolve the conflict (merge target branch)", "I'll handle it myself"]
         };
     }
+
+    private static MonitorAction BuildMergeTargetBranchAction(MonitorState state)
+    {
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        return new MonitorAction
+        {
+            Action = "execute",
+            Task = "merge_target_branch",
+            Instructions = BuildMergeTargetBranchInstructions(state),
+            Context = new { state.Owner, state.Repo, state.PrNumber, state.HeadBranch, state.BaseBranch, state.HeadSha }
+        };
+    }
+
+    internal static string BuildMergeTargetBranchInstructions(MonitorState state) =>
+        $"Resolve the merge conflict for {state.Owner}/{state.Repo} PR #{state.PrNumber} by merging the latest " +
+        $"target branch '{state.BaseBranch}' into PR head branch '{state.HeadBranch}'. " +
+        "Verify the repository, branches, and remotes, including the target repository when the PR comes from a fork. " +
+        "Inspect any in-progress merge or rebase before changing files; do not abort existing work without approval. " +
+        "Preserve unrelated working-tree changes; do not discard or automatically stash them. " +
+        "While on the PR head branch, fetch the latest target branch from its verified remote, then use git merge --no-commit " +
+        "to merge that fetched branch into the PR branch without automatically creating a merge commit. " +
+        "Do not assume the target remote is origin or the branch is main, and do not rely on git pull defaults that may enable rebasing. " +
+        "Do not rebase or rewrite existing commits, even if the request uses the old rebase wording. " +
+        "Resolve conflicts preserving the intended changes from both branches and run relevant validation. " +
+        "STOP and present the resolution for review. Obtain approval before staging, committing, or pushing as required by the user's git workflow. " +
+        "Never force-push or bypass a push rejection. After approval, use regular git push; on rejection, stop and ask the user how to proceed. " +
+        "Do not report completion while the push is blocked. " +
+        "After a successful push, follow the mandatory pr-monitor skill and reconnect to this task, then call pr_monitor_next_step with event='push_completed'. " +
+        "If the work was already pushed, verify it and report completion instead of repeating the merge.";
 
     private static MonitorAction BuildCiCancelledAction(MonitorState state, string timestamp)
     {

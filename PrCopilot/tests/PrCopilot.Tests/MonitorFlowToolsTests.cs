@@ -128,6 +128,216 @@ public class MonitorFlowToolsTests : IDisposable
         }
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task PrMonitorNextStep_ReadyResumesPendingWorkWithoutSideEffects(bool monitorAll, bool pendingGitHubAction)
+    {
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        var monitorId = $"pr-{owner}-repo-42";
+        var state = CreateCommentState(owner);
+        var pending = MonitorTransitions.ProcessEvent(state, "user_chose", "apply_fix", null);
+        if (pendingGitHubAction)
+        {
+            state.PendingReplyText = "Approved reply linking the fix";
+            pending = MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
+        }
+        state.HeadSha = "already-pushed-fix";
+        var sessions = GetSessions();
+        state.WaitingForReplyComments = [new CommentInfo { Id = "waiting", Author = "another-reviewer" }];
+        using var session = new MonitorSession { State = state, PendingTriggerContent = "ACTION|waiting" };
+        Assert.True(sessions.TryAdd(monitorId, session));
+        var server = new FakeElicitationMcpServer("stop");
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+
+        try
+        {
+            var tools = new MonitorFlowTools();
+            using var start = JsonDocument.Parse(await tools.PrMonitorStart(owner, "repo", 42, _gh.DirectoryPath));
+            Assert.Contains("event='ready'", start.RootElement.GetProperty("message").GetString()!);
+            using var response = JsonDocument.Parse(await tools.PrMonitorNextStep(
+                monitorAll ? "all" : monitorId, "ready", server: server, cancellationToken: cancellation.Token));
+
+            Assert.Equal("execute", response.RootElement.GetProperty("action").GetString());
+            Assert.Equal("resume_pending_task", response.RootElement.GetProperty("task").GetString());
+            var context = response.RootElement.GetProperty("context");
+            Assert.Equal(pending.Task, context.GetProperty("task").GetString());
+            Assert.Equal("second", context.GetProperty("context").GetProperty("id").GetString());
+            Assert.Equal(MonitorStateId.ExecutingTask, state.CurrentState);
+            Assert.Equal(CommentFlowState.ExplainAllIterating, state.CommentFlow);
+            Assert.Equal(1, state.CurrentCommentIndex);
+            Assert.Equal("Preserve the completion marker", state.LastRecommendation);
+            Assert.Equal(pendingGitHubAction, state.UnresolvedComments[1].IsAddressed);
+            Assert.Equal("ACTION|waiting", session.PendingTriggerContent);
+            Assert.Empty(server.Elicitations);
+            Assert.Empty(server.Requests);
+            Assert.Empty(_gh.ReadRequests());
+            if (monitorAll)
+                Assert.Equal(monitorId, response.RootElement.GetProperty("monitorId").GetString());
+        }
+        finally
+        {
+            sessions.TryRemove(monitorId, out _);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PrMonitorNextStep_ReadyRePresentsPromptAndRetainsFreeformTask(bool monitorAll)
+    {
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        var monitorId = $"pr-{owner}-repo-42";
+        var state = CreateCommentState(owner);
+        state.CurrentState = MonitorStateId.ExecutingTask;
+        var prompt = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        var sessions = GetSessions();
+        using var session = new MonitorSession { State = state };
+        Assert.True(sessions.TryAdd(monitorId, session));
+        var server = new FakeElicitationMcpServer("Continue with our previous plan");
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+
+        try
+        {
+            var tools = new MonitorFlowTools();
+            await tools.PrMonitorStart(owner, "repo", 42, _gh.DirectoryPath);
+            var nextMonitorId = monitorAll ? "all" : monitorId;
+            using var response = JsonDocument.Parse(await tools.PrMonitorNextStep(
+                nextMonitorId, "ready", server: server, cancellationToken: cancellation.Token));
+
+            Assert.Equal("interpret_freeform", response.RootElement.GetProperty("task").GetString());
+            Assert.Equal(prompt.Question, Assert.Single(server.Elicitations).Message);
+            Assert.Equal(1, state.CurrentCommentIndex);
+            Assert.Equal(CommentFlowState.ExplainAllIterating, state.CommentFlow);
+
+            using var resumed = JsonDocument.Parse(await tools.PrMonitorNextStep(
+                nextMonitorId, "ready", server: server, cancellationToken: cancellation.Token));
+
+            Assert.Equal("resume_pending_task", resumed.RootElement.GetProperty("task").GetString());
+            var pending = resumed.RootElement.GetProperty("context");
+            Assert.Equal("interpret_freeform", pending.GetProperty("task").GetString());
+            Assert.Contains("Continue with our previous plan", pending.GetProperty("instructions").GetString()!);
+            Assert.Single(server.Elicitations);
+            Assert.Single(server.Requests);
+            Assert.Empty(_gh.ReadRequests());
+        }
+        finally
+        {
+            sessions.TryRemove(monitorId, out _);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PrMonitorNextStep_MergeConflictTargetMerge_DelegatesWithoutGitHubWrites(bool monitorAll)
+    {
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        var monitorId = $"pr-{owner}-repo-42";
+        var state = new MonitorState
+        {
+            Owner = owner,
+            Repo = "repo",
+            PrNumber = 42,
+            SessionFolder = _gh.DirectoryPath,
+            HeadBranch = "feature/conflict-fix",
+            BaseBranch = "release",
+            HeadSha = "original-head",
+            HasMergeConflict = true
+        };
+        var prompt = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.MergeConflict);
+        var sessions = GetSessions();
+        using var session = new MonitorSession { State = state };
+        Assert.True(sessions.TryAdd(monitorId, session));
+        var server = new FakeElicitationMcpServer("merge_target_branch", "stop");
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+
+        try
+        {
+            var tools = new MonitorFlowTools();
+            var result = await tools.PrMonitorNextStep(
+                monitorAll ? "all" : monitorId, "ready", server: server, cancellationToken: cancellation.Token);
+            Assert.Equal(prompt.Question, Assert.Single(server.Elicitations).Message);
+            if (monitorAll)
+            {
+                using var relay = JsonDocument.Parse(result);
+                Assert.Equal("relay_choice", relay.RootElement.GetProperty("task").GetString());
+                Assert.Equal(monitorId, relay.RootElement.GetProperty("monitorId").GetString());
+                result = await tools.PrMonitorNextStep(
+                    monitorId, "user_chose", choice: "merge_target_branch", server: server, cancellationToken: cancellation.Token);
+            }
+
+            using var response = JsonDocument.Parse(result);
+            Assert.Equal("execute", response.RootElement.GetProperty("action").GetString());
+            Assert.Equal("merge_target_branch", response.RootElement.GetProperty("task").GetString());
+            var instructions = response.RootElement.GetProperty("instructions").GetString();
+            Assert.Contains("target branch 'release' into PR head branch 'feature/conflict-fix'", instructions);
+            Assert.Contains("git merge --no-commit", instructions);
+            Assert.Contains("Do not rebase", instructions);
+            var context = response.RootElement.GetProperty("context");
+            Assert.Equal("feature/conflict-fix", context.GetProperty("headBranch").GetString());
+            Assert.Equal("release", context.GetProperty("baseBranch").GetString());
+            Assert.Equal("original-head", context.GetProperty("headSha").GetString());
+            Assert.Equal(MonitorStateId.ExecutingTask, state.CurrentState);
+            Assert.Single(server.Elicitations);
+            Assert.Empty(server.Requests);
+            Assert.Empty(_gh.ReadRequests());
+        }
+        finally
+        {
+            sessions.TryRemove(monitorId, out _);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PrMonitorNextStep_MergeConflictTargetMerge_FreeformUsesTheSameMergeInstructions(bool monitorAll)
+    {
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        var monitorId = $"pr-{owner}-repo-42";
+        var state = new MonitorState
+        {
+            Owner = owner,
+            Repo = "repo",
+            PrNumber = 42,
+            SessionFolder = _gh.DirectoryPath,
+            HeadBranch = "feature/conflict-fix",
+            BaseBranch = "release",
+            HasMergeConflict = true
+        };
+        MonitorTransitions.BuildTerminalAction(state, TerminalStateType.MergeConflict);
+        var sessions = GetSessions();
+        using var session = new MonitorSession { State = state };
+        Assert.True(sessions.TryAdd(monitorId, session));
+        var server = new FakeElicitationMcpServer("rebase and run the focused tests");
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+
+        try
+        {
+            var tools = new MonitorFlowTools();
+            using var response = JsonDocument.Parse(await tools.PrMonitorNextStep(
+                monitorAll ? "all" : monitorId, "ready", server: server, cancellationToken: cancellation.Token));
+
+            Assert.Equal("interpret_freeform", response.RootElement.GetProperty("task").GetString());
+            var instructions = response.RootElement.GetProperty("instructions").GetString();
+            Assert.Contains("target branch 'release' into PR head branch 'feature/conflict-fix'", instructions);
+            Assert.Contains("git merge --no-commit", instructions);
+            Assert.Contains("Do not rebase", instructions);
+            Assert.Contains("push_completed", instructions);
+            Assert.Single(server.Elicitations);
+            Assert.Single(server.Requests);
+            Assert.Empty(_gh.ReadRequests());
+            Assert.Equal(MonitorStateId.ExecutingTask, state.CurrentState);
+        }
+        finally
+        {
+            sessions.TryRemove(monitorId, out _);
+        }
+    }
+
     [Fact]
     public async Task PrMonitorStart_SharesConcurrentStoppedInitialization()
     {
@@ -275,6 +485,23 @@ public class MonitorFlowToolsTests : IDisposable
     }
 
     public void Dispose() => _gh.Dispose();
+
+    private MonitorState CreateCommentState(string owner) => new()
+    {
+        Owner = owner,
+        Repo = "repo",
+        PrNumber = 42,
+        SessionFolder = _gh.DirectoryPath,
+        CurrentState = MonitorStateId.AwaitingUser,
+        CommentFlow = CommentFlowState.ExplainAllIterating,
+        CurrentCommentIndex = 1,
+        LastRecommendation = "Preserve the completion marker",
+        UnresolvedComments =
+        [
+            new CommentInfo { Id = "first", Author = "reviewer", Body = "First comment" },
+            new CommentInfo { Id = "second", Author = "reviewer", Body = "Preserve the completion marker" }
+        ]
+    };
 
     private static async Task<bool> ExplainCommentAsync(FakeSamplingMcpServer server, MonitorState state)
     {

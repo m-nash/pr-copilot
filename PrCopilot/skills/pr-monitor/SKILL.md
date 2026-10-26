@@ -55,9 +55,11 @@ When triggered:
    ```
    This returns a `monitor_id`, PR title, URL, CI counts, and other status data. The viewer is launched by the MCP server — the agent does NOT need to launch it.
 
-4. **Enter the loop**: Call `pr_monitor_next_step(monitor_id, event="ready")` — this is where monitoring begins.
+4. **Start or reconnect**: Call `pr_monitor_next_step(monitor_id, event="ready")`. An idle monitor begins polling; an active monitor resumes its pending task or re-presents its pending prompt. `ready` never marks work complete.
 
 **Do NOT skip step 3 on resume.** The MCP server handles viewer launch automatically — just call `pr_monitor_start` and it will launch or reuse the viewer.
+
+**After a push:** Load this skill and call `pr_monitor_start` as required, but do NOT stop an active monitor for a fresh baseline. Reconnect with `ready` and finish the original task's handoff before polling: use `comment_addressed` for an addressed comment or `push_completed` for a CI fix or conflict resolution, with the original task's required data and approvals. If the work is already pushed, verify it instead of applying the same fix again.
 
 ## The Agent Loop
 
@@ -77,7 +79,7 @@ call pr_monitor_next_step(monitor_id, event, data)
 
 | Event | When to send | Additional fields |
 |-------|-------------|-------------------|
-| `ready` | After `pr_monitor_start`, or after resuming | — |
+| `ready` | Start/reconnect; resumes pending work before polling, never completes it | — |
 | `comment_addressed` | Finished addressing a review comment (implemented fix or agreed) | `data`: JSON with `reply_text` |
 | `comment_replied` | Replied to a comment without code changes (pushback or clarification) | `data`: JSON with `reply_text` |
 | `investigation_complete` | Finished analyzing CI failures | `data`: JSON with `findings` and optional `suggested_fix` |
@@ -97,11 +99,16 @@ When a terminal state is detected, the user sees both enum choices and a text in
 Execute the user's request directly, then call `pr_monitor_next_step` with the appropriate event:
 - **Comment flows:** Use `event='comment_addressed'` (with `reply_text` in data) if code was changed, `event='comment_replied'` (with `reply_text` in data) if replying without code changes, or `event='task_complete'` for non-reply tasks (analysis, questions).
 - **CI failure flows:** Use `event='push_completed'` if code was changed, or `event='task_complete'` if no code changes.
+- **Merge-conflict flows:** Fetch and merge the latest target branch into the PR branch as described below. Use `event='push_completed'` after the merge is published, or `event='task_complete'` for analysis-only tasks.
 - **No active flow:** Use `event='task_complete'`.
 
 After `task_complete`, the state machine re-presents the same choices so the user can continue deciding — it does NOT restart the flow from scratch.
 
 **How to handle `resume_after_error`**: An error occurred but the user chose to resume monitoring. Simply call `pr_monitor_next_step` with `event='ready'` (and `monitorId='all'` for multi-PR mode) to re-enter the monitoring loop. Do not take any other action.
+
+**How to handle `resume_pending_task`**: This continues existing work, not a new assignment. `context` contains the original action, including its task, instructions, and context. Check session history, the working tree, and pushed commits to determine what already finished. Do not repeat completed fixes, pushes, messages, or GitHub writes. Continue unfinished work, then report the original task's completion event and data to the specific monitor ID. Do NOT substitute `ready` or `task_complete` for that event. If a server-side action was interrupted, verify its result before any retry and follow the returned completion instructions. Reconnecting is not approval to post, reply, resolve, or make any other GitHub write; obtain the user's required approval first. If no original action was saved, recover its instructions from history or ask the user rather than guessing.
+
+**How to handle `merge_target_branch`**: Fetch the latest PR target branch from its verified remote, then merge it into the PR head branch using `git merge --no-commit`. Do not rebase, rewrite existing commits, or rely on `git pull` defaults that might enable rebasing. Preserve unrelated work, present the resolution for review, honor the user's staging/commit/push approvals, and use a normal push. Never force-push; stop on a push rejection. Treat legacy `rebase` tasks or requests in this conflict flow as this same target-branch merge. Report `push_completed` only after publication succeeds.
 
 **How to handle `send_message`**: Send the provided message to each recipient using any messaging capability or skill available in the current environment. Do not assume Teams, Slack, email, or any other provider. If no messaging capability is available, show the prepared message to the user for manual delivery. In either case, call `pr_monitor_next_step` with `event='task_complete'`; lack of a messaging integration must not stop monitoring.
 
@@ -219,7 +226,7 @@ When composing a reply after making a code change, **always link the commit** th
 
 - **Trust the state machine** — do NOT improvise state flow. Do NOT add extra questions, skip steps, or interpret the context. Execute exactly what `pr_monitor_next_step` tells you.
 - **Resume by default** — after handling a terminal state, the state machine resumes polling automatically unless the user chose to stop.
-- **One monitor per PR** — if you push again to the same PR, call `pr_monitor_stop` then `pr_monitor_start` for a fresh baseline.
+- **One monitor per PR** — reuse the active monitor after a push; do NOT stop/reset it or discard a pending task. A stopped monitor is initialized fresh on the next start.
 - **Session-scoped** — monitoring only lasts for the current Copilot CLI session.
 - **CI failure investigation** — when CI fails, the state machine **automatically begins investigation** — the agent fetches logs (use Playwright browser automation to access build log pages if `gh` CLI can't fetch them), analyzes root cause, and reports findings. Provide a concrete diagnosis — not investigation steps. Always include a specific actionable recommendation in `data.suggested_fix`. **Do NOT make any code changes, edit files, or apply fixes during investigation** — the user decides what to do after reviewing your analysis.
 - **Comment explanation** — when a review comment is detected, the **server explains and recommends via sampling** — it gathers code context and analyzes the comment. The agent is only involved if the user chooses "Apply the recommendation" (to make code changes).
