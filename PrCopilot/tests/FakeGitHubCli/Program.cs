@@ -34,6 +34,23 @@ if (!string.IsNullOrEmpty(startupDirectory) &&
 
 File.AppendAllText(captureFile, JsonSerializer.Serialize(args) + Environment.NewLine);
 
+var mergeDirectory = Environment.GetEnvironmentVariable("PR_COPILOT_TEST_GH_MERGE_BARRIER");
+if (!string.IsNullOrEmpty(mergeDirectory) && args is ["pr", "merge", "42", "--squash", "--repo", _])
+{
+    var released = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    using var watcher = new FileSystemWatcher(mergeDirectory, "release");
+    watcher.Created += (_, _) => released.TrySetResult();
+    watcher.EnableRaisingEvents = true;
+    var entered = Path.Combine(mergeDirectory, Environment.ProcessId.ToString(CultureInfo.InvariantCulture) + ".entered");
+    File.WriteAllText(entered + ".tmp", JsonSerializer.Serialize(args));
+    File.Move(entered + ".tmp", entered);
+    if (File.Exists(Path.Combine(mergeDirectory, "release")))
+        released.TrySetResult();
+    await released.Task.WaitAsync(TimeSpan.FromSeconds(20));
+    Console.Write("Fixture PR merged.");
+    return 0;
+}
+
 var resolveDirectory = Environment.GetEnvironmentVariable("PR_COPILOT_TEST_GH_RESOLVE_BARRIER");
 if (!string.IsNullOrEmpty(resolveDirectory))
 {

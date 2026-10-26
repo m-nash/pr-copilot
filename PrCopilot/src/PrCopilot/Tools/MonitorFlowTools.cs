@@ -934,6 +934,15 @@ public class MonitorFlowTools
             });
         }
 
+        if (session.IsStopped || session.StopToken.IsCancellationRequested || session.State.CurrentState == MonitorStateId.Stopped)
+        {
+            return SerializeAction(new MonitorAction
+            {
+                Action = "stop",
+                Message = $"Monitor for PR #{session.State.PrNumber} is already stopped."
+            });
+        }
+
         // Start session-level heartbeat to keep MCP client alive.
         // Capture generation before try so the finally block can use it.
         var heartbeatGen = session.StartHeartbeat(server, progressToken);

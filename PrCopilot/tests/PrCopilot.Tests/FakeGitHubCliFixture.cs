@@ -12,6 +12,7 @@ internal sealed class FakeGitHubCliFixture : IDisposable
     private readonly string _captureFile;
     private readonly string _startupDirectory;
     private readonly string _resolveDirectory;
+    private readonly string _mergeDirectory;
     private bool _disposed;
 
     public FakeGitHubCliFixture()
@@ -25,6 +26,7 @@ internal sealed class FakeGitHubCliFixture : IDisposable
         _captureFile = Path.Combine(_directory, "arguments.jsonl");
         _startupDirectory = Path.Combine(_directory, "startup");
         _resolveDirectory = Path.Combine(_directory, "resolve");
+        _mergeDirectory = Path.Combine(_directory, "merge");
         File.WriteAllText(_responseFile, "[]");
 
         SetEnvironment("PATH", executableDirectory + Path.PathSeparator + Environment.GetEnvironmentVariable("PATH"));
@@ -35,6 +37,7 @@ internal sealed class FakeGitHubCliFixture : IDisposable
         SetEnvironment("PR_COPILOT_TEST_GH_START_SUCCESS", "");
         SetEnvironment("PR_COPILOT_TEST_GH_RESOLVE_BARRIER", "");
         SetEnvironment("PR_COPILOT_TEST_GH_PR_INFO", "");
+        SetEnvironment("PR_COPILOT_TEST_GH_MERGE_BARRIER", "");
     }
 
     public void Respond(string response, int exitCode = 0)
@@ -119,6 +122,18 @@ internal sealed class FakeGitHubCliFixture : IDisposable
 
     public void ReleaseResolveRequests() =>
         File.WriteAllText(Path.Combine(_resolveDirectory, "release"), "");
+
+    public void PauseMergeRequests()
+    {
+        Directory.CreateDirectory(_mergeDirectory);
+        Environment.SetEnvironmentVariable("PR_COPILOT_TEST_GH_MERGE_BARRIER", _mergeDirectory);
+    }
+
+    public Task WaitForMergeRequestsAsync(int count, CancellationToken cancellationToken = default) =>
+        WaitForRequestsAsync(_mergeDirectory, count, cancellationToken);
+
+    public void ReleaseMergeRequests() =>
+        File.WriteAllText(Path.Combine(_mergeDirectory, "release"), "");
 
     private static async Task WaitForRequestsAsync(string directory, int count, CancellationToken cancellationToken)
     {

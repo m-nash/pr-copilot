@@ -717,6 +717,64 @@ public class MonitorFlowToolsTests : IDisposable
         }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PrMonitorNextStep_CompletedMerge_DoesNotReviveStoppedSessionOnReconnect(bool viewerTrigger)
+    {
+        _gh.PauseMergeRequests();
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        var monitorId = $"pr-{owner}-repo-42";
+        var state = new MonitorState
+        {
+            Owner = owner,
+            Repo = "repo",
+            PrNumber = 42,
+            SessionFolder = _gh.DirectoryPath,
+            WaitingForReplyComments = [new CommentInfo { Id = "waiting", Author = "reviewer", Body = "Old waiting thread" }]
+        };
+        MonitorTransitions.BuildTerminalAction(state, TerminalStateType.ApprovedCiGreen);
+        using var session = new MonitorSession { State = state };
+        var sessions = GetSessions();
+        Assert.True(sessions.TryAdd(monitorId, session));
+        var tools = new MonitorFlowTools();
+        var replacementServer = new FakeElicitationMcpServer("stop");
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var original = tools.PrMonitorNextStep(monitorId, "user_chose", choice: "merge",
+            server: new FakeMcpServer(), cancellationToken: cancellation.Token);
+        Task<string>? replacement = null;
+        try
+        {
+            await _gh.WaitForMergeRequestsAsync(1);
+            if (viewerTrigger)
+                session.PendingTriggerContent = "ACTION|waiting";
+            replacement = tools.PrMonitorNextStep(monitorId, "ready",
+                server: replacementServer, cancellationToken: cancellation.Token);
+            await Assert.ThrowsAsync<TimeoutException>(() => replacement.WaitAsync(TimeSpan.FromMilliseconds(200)));
+            _gh.ReleaseMergeRequests();
+            using var originalResult = JsonDocument.Parse(await original.WaitAsync(TimeSpan.FromSeconds(3)));
+            Assert.Equal("stop", originalResult.RootElement.GetProperty("action").GetString());
+            using var response = JsonDocument.Parse(await replacement.WaitAsync(TimeSpan.FromSeconds(3)));
+
+            Assert.Equal("stop", response.RootElement.GetProperty("action").GetString());
+            Assert.Equal(MonitorStateId.Stopped, state.CurrentState);
+            Assert.Empty(replacementServer.Elicitations);
+            Assert.Empty(replacementServer.Requests);
+            Assert.Null(state.PendingAction);
+            Assert.Null(state.ActiveWaitingComment);
+            Assert.Single(_gh.ReadRequests());
+        }
+        finally
+        {
+            cancellation.Cancel();
+            _gh.ReleaseMergeRequests();
+            await Record.ExceptionAsync(() => original.WaitAsync(TimeSpan.FromSeconds(3)));
+            if (replacement != null)
+                await Record.ExceptionAsync(() => replacement.WaitAsync(TimeSpan.FromSeconds(3)));
+            sessions.TryRemove(monitorId, out _);
+        }
+    }
+
     [Fact]
     public async Task PrMonitorStart_SharesConcurrentStoppedInitialization()
     {
