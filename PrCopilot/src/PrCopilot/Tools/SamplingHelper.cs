@@ -19,7 +19,7 @@ namespace PrCopilot.Tools;
 internal static class SamplingHelper
 {
     // Sampling limits include model reasoning as well as the JSON response.
-    internal const int CommentExplanationMaxTokens = 4096;
+    internal const int StructuredResponseMaxTokens = 4096;
 
     private static readonly JsonSerializerOptions _jsonOptions = new()
     {
@@ -481,7 +481,7 @@ internal static class SamplingHelper
         {
             var result = await SampleStructuredAsync<FreeformClassification>(
                 server, systemPrompt, userMessage,
-                maxTokens: 150, temperature: 0.0f,
+                maxTokens: StructuredResponseMaxTokens, temperature: 0.0f,
                 cancellationToken);
 
             if (result != null)
@@ -534,7 +534,7 @@ internal static class SamplingHelper
         CommentInfo comment,
         MonitorState state,
         CancellationToken cancellationToken = default) =>
-        ExplainCommentAsync(server, comment, state, CommentExplanationMaxTokens, cancellationToken);
+        ExplainCommentAsync(server, comment, state, StructuredResponseMaxTokens, cancellationToken);
 
     internal static async Task<CommentExplanation?> ExplainCommentAsync(
         McpServer server,
@@ -617,11 +617,20 @@ internal static class SamplingHelper
     /// Compose a professional reply for a review comment thread using sampling.
     /// Returns null if sampling fails.
     /// </summary>
+    internal static Task<ReplyComposition?> ComposeReplyAsync(
+        McpServer server,
+        CommentInfo comment,
+        MonitorState state,
+        string completionEvent,
+        CancellationToken cancellationToken = default) =>
+        ComposeReplyAsync(server, comment, state, completionEvent, StructuredResponseMaxTokens, cancellationToken);
+
     internal static async Task<ReplyComposition?> ComposeReplyAsync(
         McpServer server,
         CommentInfo comment,
         MonitorState state,
         string completionEvent,
+        int maxTokens,
         CancellationToken cancellationToken = default)
     {
         DebugLogger.Log("Sampling", $"Composing reply for comment {comment.Id} ({completionEvent})");
@@ -649,7 +658,7 @@ internal static class SamplingHelper
 
         return await SampleStructuredAsync<ReplyComposition>(
             server, systemPrompt, userMessage,
-            maxTokens: 300, temperature: 0.3f,
+            maxTokens: maxTokens, temperature: 0.3f,
             cancellationToken);
     }
 }

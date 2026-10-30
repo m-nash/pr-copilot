@@ -75,8 +75,9 @@ public class MonitorFlowTools
     /// <summary>
     /// Attempt to handle an execute action server-side via sampling.
     /// If successful, sets state.SamplingCompletionEvent so the caller can feed
-    /// the result back to the state machine. Returns false only if the task is not
-    /// sampling-eligible. Throws if sampling fails for an eligible task.
+    /// the result back to the state machine. Returns false if the task is not
+    /// sampling-eligible, or if compose_reply gets no usable reply so the agent
+    /// composes it instead. Otherwise throws if sampling fails for an eligible task.
     /// </summary>
     private static async Task<bool> TryHandleViaSamplingAsync(
         McpServer server,
@@ -95,7 +96,7 @@ public class MonitorFlowTools
                     var explanation = await SamplingHelper.ExplainCommentAsync(server, comment, state, cancellationToken);
                     if (explanation == null)
                     {
-                        var retryMaxTokens = SamplingHelper.CommentExplanationMaxTokens * 2;
+                        var retryMaxTokens = SamplingHelper.StructuredResponseMaxTokens * 2;
                         DebugLogger.Log("Sampling", $"First explain attempt returned null — retrying with {retryMaxTokens} tokens");
                         explanation = await SamplingHelper.ExplainCommentAsync(server, comment, state, retryMaxTokens, cancellationToken);
                     }
@@ -134,11 +135,15 @@ public class MonitorFlowTools
                     var reply = await SamplingHelper.ComposeReplyAsync(server, comment, state, completionEvent, cancellationToken);
                     if (string.IsNullOrWhiteSpace(reply?.ReplyText))
                     {
-                        DebugLogger.Log("Sampling", "First compose attempt returned null/empty — retrying");
-                        reply = await SamplingHelper.ComposeReplyAsync(server, comment, state, completionEvent, cancellationToken);
+                        var retryMaxTokens = SamplingHelper.StructuredResponseMaxTokens * 2;
+                        DebugLogger.Log("Sampling", $"First compose attempt returned null/empty — retrying with {retryMaxTokens} tokens");
+                        reply = await SamplingHelper.ComposeReplyAsync(server, comment, state, completionEvent, retryMaxTokens, cancellationToken);
                     }
                     if (string.IsNullOrWhiteSpace(reply?.ReplyText))
-                        throw new InvalidOperationException("Sampling failed to compose reply after 2 attempts — LLM returned response that could not be parsed");
+                    {
+                        DebugLogger.Log("Sampling", "Compose failed after 2 attempts — returning compose_reply to the agent");
+                        return false;
+                    }
 
                     state.PendingReplyText = reply.ReplyText;
                     state.SamplingCompletionEvent = completionEvent;

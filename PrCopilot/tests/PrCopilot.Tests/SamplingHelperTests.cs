@@ -177,6 +177,22 @@ public class SamplingHelperTests
     }
 
     [Fact]
+    public async Task ClassifyFreeformAsync_ReservesBudgetForReasoning()
+    {
+        var server = new FakeSamplingMcpServer(request =>
+            [request.MaxTokens >= 4096 ? "{\"mapsToChoice\":\"address_all\",\"reasoning\":\"User said fix everything\"}" : "{\"mapsToChoice\":"]);
+
+        var result = await SamplingHelper.ClassifyFreeformAsync(
+            server,
+            "fix everything",
+            "What would you like to do?",
+            ["Address all comments", "I'll handle them myself"],
+            CancellationToken.None);
+
+        Assert.Equal("address_all", result?.MapsToChoice);
+    }
+
+    [Fact]
     public async Task ExplainCommentAsync_ReturnsExplanation()
     {
         var json = "{\"explanation\": \"The reviewer wants a null check\", \"recommendation\": \"Add null check at line 42\", \"recommendationType\": \"implement\"}";
