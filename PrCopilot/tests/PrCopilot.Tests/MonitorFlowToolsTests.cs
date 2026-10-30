@@ -21,7 +21,7 @@ public class MonitorFlowToolsTests : IDisposable
             [request.MaxTokens >= 8192 ? Explanation : "{\"explanation\":\"Review the"]);
         var state = new MonitorState();
 
-        var handled = await ExplainCommentAsync(server, state);
+        var handled = await HandleViaSamplingAsync(server, state, "explain_comment");
 
         Assert.True(handled);
         Assert.Equal([4096, 8192], server.Requests.Select(request => request.MaxTokens));
@@ -35,7 +35,7 @@ public class MonitorFlowToolsTests : IDisposable
         var server = new FakeSamplingMcpServer("{\"explanation\":\"Review the");
         var state = new MonitorState();
 
-        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => ExplainCommentAsync(server, state));
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => HandleViaSamplingAsync(server, state, "explain_comment"));
 
         Assert.Contains("after 2 attempts", error.Message);
         Assert.Equal([4096, 8192], server.Requests.Select(request => request.MaxTokens));
@@ -49,9 +49,51 @@ public class MonitorFlowToolsTests : IDisposable
         var server = new FakeSamplingMcpServer(Explanation);
         var state = new MonitorState();
 
-        Assert.True(await ExplainCommentAsync(server, state));
+        Assert.True(await HandleViaSamplingAsync(server, state, "explain_comment"));
         Assert.Single(server.Requests);
         Assert.Equal("Add a test", state.LastRecommendation);
+    }
+
+    [Fact]
+    public async Task ComposeReply_RetriesWithLargerBudget()
+    {
+        var server = new FakeSamplingMcpServer(request =>
+            [request.MaxTokens >= 8192 ? "{\"replyText\":\"Added the test\"}" : "{\"replyText\":\"Added the"]);
+        var state = new MonitorState { PendingCompletionEvent = "comment_addressed" };
+
+        Assert.True(await HandleViaSamplingAsync(server, state, "compose_reply"));
+        Assert.Equal([4096, 8192], server.Requests.Select(request => request.MaxTokens));
+        Assert.Equal("Added the test", state.PendingReplyText);
+        Assert.Equal("comment_addressed", state.SamplingCompletionEvent);
+    }
+
+    [Fact]
+    public async Task PrMonitorNextStep_ComposeReplyFailure_DelegatesReplyToAgent()
+    {
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        var monitorId = $"pr-{owner}-repo-42";
+        using var session = new MonitorSession { State = CreateResolvingCommentState(owner) };
+        var sessions = GetSessions();
+        Assert.True(sessions.TryAdd(monitorId, session));
+        var server = new FakeElicitationMcpServer("resume");
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        try
+        {
+            using var response = JsonDocument.Parse(await new MonitorFlowTools().PrMonitorNextStep(
+                monitorId, "comment_addressed", server: server, cancellationToken: cancellation.Token));
+
+            Assert.Equal("compose_reply", response.RootElement.GetProperty("task").GetString());
+            Assert.Contains("reply_text", response.RootElement.GetProperty("instructions").GetString()!);
+            Assert.Equal("compose_reply", session.State.PendingAction?.Task);
+            Assert.Empty(server.Elicitations);
+            Assert.Equal(2, server.Requests.Count);
+            Assert.Empty(_gh.ReadRequests());
+        }
+        finally
+        {
+            sessions.TryRemove(monitorId, out _);
+        }
     }
 
     [Theory]
@@ -977,14 +1019,14 @@ public class MonitorFlowToolsTests : IDisposable
         ]
     };
 
-    private static async Task<bool> ExplainCommentAsync(FakeSamplingMcpServer server, MonitorState state)
+    private static async Task<bool> HandleViaSamplingAsync(FakeSamplingMcpServer server, MonitorState state, string taskName)
     {
         var method = typeof(MonitorFlowTools).GetMethod("TryHandleViaSamplingAsync", BindingFlags.Static | BindingFlags.NonPublic);
         Assert.NotNull(method);
         var action = new MonitorAction
         {
             Action = "execute",
-            Task = "explain_comment",
+            Task = taskName,
             Context = new CommentInfo { Author = "reviewer", FilePath = "", Body = "Add a test" }
         };
         var task = (Task<bool>)method.Invoke(null, [server, state, action, CancellationToken.None])!;
