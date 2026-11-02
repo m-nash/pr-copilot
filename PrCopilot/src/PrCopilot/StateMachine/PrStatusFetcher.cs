@@ -77,19 +77,20 @@ public static class PrStatusFetcher
     /// </summary>
     public static async Task<CheckRunResult> FetchCheckRunsAsync(string owner, string repo, string headSha)
     {
-        // Fetch check runs (per_page=100 — API defaults to 30)
+        // Fetch every page of check runs (per_page=100 — API defaults to 30)
         var checkRunsJson = await RunGhAsync(
-            $"api \"repos/{owner}/{repo}/commits/{headSha}/check-runs?per_page=100\"");
+            $"api \"repos/{owner}/{repo}/commits/{headSha}/check-runs?per_page=100\" --paginate --slurp");
 
         using var checkDoc = JsonDocument.Parse(checkRunsJson);
-        var checkRuns = checkDoc.RootElement.GetProperty("check_runs");
+        var checkRuns = checkDoc.RootElement.EnumerateArray()
+            .SelectMany(page => page.GetProperty("check_runs").EnumerateArray());
 
         // Filter and dedup by name
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var counts = new CheckRunCounts();
         var failures = new List<FailedCheckInfo>();
 
-        foreach (var cr in checkRuns.EnumerateArray())
+        foreach (var cr in checkRuns)
         {
             var name = cr.GetProperty("name").GetString() ?? "";
 
@@ -130,15 +131,16 @@ public static class PrStatusFetcher
 
         counts.Total = seen.Count;
 
-        // Fetch legacy commit statuses and merge
+        // Fetch every page of legacy commit statuses (API defaults to 30 per page) and merge
         var legacyJson = await RunGhAsync(
-            $"api \"repos/{owner}/{repo}/commits/{headSha}/status\"");
+            $"api \"repos/{owner}/{repo}/commits/{headSha}/status?per_page=100\" --paginate --slurp");
 
         using var legacyDoc = JsonDocument.Parse(legacyJson);
-        var statuses = legacyDoc.RootElement.GetProperty("statuses");
+        var statuses = legacyDoc.RootElement.EnumerateArray()
+            .SelectMany(page => page.GetProperty("statuses").EnumerateArray());
 
         int legacyPending = 0, legacySuccess = 0, legacyFailure = 0;
-        foreach (var s in statuses.EnumerateArray())
+        foreach (var s in statuses)
         {
             var state = s.GetProperty("state").GetString() ?? "";
             switch (state)
@@ -158,22 +160,24 @@ public static class PrStatusFetcher
     }
 
     /// <summary>
-    /// Fetches reviews and classifies them as current approvals, stale approvals, etc.
-    /// Implements the exact step-by-step algorithm from SKILL.md.
+    /// Fetches every page of reviews and classifies each reviewer's latest verdict as a current or stale approval.
     /// </summary>
     public static async Task<ReviewResult> FetchReviewsAsync(string owner, string repo, int prNumber, string headSha)
     {
         var json = await RunGhAsync(
-            $"api \"repos/{owner}/{repo}/pulls/{prNumber}/reviews?per_page=100\" --jq \"[.[] | {{user: .user.login, state: .state, commit_id: .commit_id, submitted_at: .submitted_at}}]\"");
+            $"api \"repos/{owner}/{repo}/pulls/{prNumber}/reviews?per_page=100\" --paginate --slurp");
 
         using var doc = JsonDocument.Parse(json);
-        var reviews = doc.RootElement;
+        var reviews = doc.RootElement.EnumerateArray().SelectMany(page => page.EnumerateArray());
 
-        // De-duplicate by user: latest review wins
-        var latestByUser = new Dictionary<string, (string state, string commitId, DateTime submittedAt)>(StringComparer.OrdinalIgnoreCase);
-        foreach (var r in reviews.EnumerateArray())
+        var allAuthors = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var verdictByUser = new Dictionary<string, (string state, string commitId, DateTime submittedAt)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var r in reviews)
         {
-            var user = r.GetProperty("user").GetString() ?? "";
+            var user = r.TryGetProperty("user", out var author) && author.ValueKind == JsonValueKind.Object &&
+                       author.TryGetProperty("login", out var login)
+                ? login.GetString() ?? ""
+                : "";
             var state = r.GetProperty("state").GetString() ?? "";
             var commitId = r.GetProperty("commit_id").GetString() ?? "";
             var submittedAt = r.TryGetProperty("submitted_at", out var sa) && sa.ValueKind == JsonValueKind.String
@@ -184,15 +188,18 @@ public static class PrStatusFetcher
             if (IsCiBot(user))
                 continue;
 
-            // Latest review wins (array is chronological)
-            latestByUser[user] = (state, commitId, submittedAt);
+            allAuthors.Add(user);
+
+            // Reviews are chronological. As on GitHub, comment-only reviews (including thread
+            // replies) keep a reviewer's earlier verdict instead of replacing it.
+            if (state is "APPROVED" or "CHANGES_REQUESTED" or "DISMISSED")
+                verdictByUser[user] = (state, commitId, submittedAt);
         }
 
         var approvals = new List<ReviewInfo>();
         var staleApprovals = new List<ReviewInfo>();
-        var allAuthors = new HashSet<string>(latestByUser.Keys, StringComparer.OrdinalIgnoreCase);
 
-        foreach (var (user, (state, commitId, submittedAt)) in latestByUser)
+        foreach (var (user, (state, commitId, submittedAt)) in verdictByUser)
         {
             if (state != "APPROVED")
                 continue;
@@ -220,12 +227,14 @@ public static class PrStatusFetcher
     public static async Task<List<CommentInfo>> FetchUnresolvedCommentsAsync(string owner, string repo, int prNumber, string prAuthor = "")
     {
         // Use GraphQL to get review threads with resolution status
-        // Fetch first comment (original) and last comment (to check who replied last)
+        // Fetch first comment (original) and last comment (to check who replied last).
+        // gh --paginate follows reviewThreads pages through $endCursor and pageInfo.
         var query = $$"""
-            query {
+            query($endCursor: String) {
               repository(owner: \"{{owner}}\", name: \"{{repo}}\") {
                 pullRequest(number: {{prNumber}}) {
-                  reviewThreads(first: 100) {
+                  reviewThreads(first: 100, after: $endCursor) {
+                    pageInfo { hasNextPage endCursor }
                     nodes {
                       id
                       isResolved
@@ -254,18 +263,19 @@ public static class PrStatusFetcher
             }
             """;
 
-        var json = await RunGhAsync($"api graphql -f query=\"{query.Replace("\n", " ")}\"");
+        var json = await RunGhAsync($"api graphql --paginate --slurp -f query=\"{query.Replace("\n", " ")}\"");
 
         using var doc = JsonDocument.Parse(json);
-        var threads = doc.RootElement
+        var threads = doc.RootElement.EnumerateArray().SelectMany(page => page
             .GetProperty("data")
             .GetProperty("repository")
             .GetProperty("pullRequest")
             .GetProperty("reviewThreads")
-            .GetProperty("nodes");
+            .GetProperty("nodes")
+            .EnumerateArray());
 
         var comments = new List<CommentInfo>();
-        foreach (var thread in threads.EnumerateArray())
+        foreach (var thread in threads)
         {
             var isResolved = thread.GetProperty("isResolved").GetBoolean();
             if (isResolved)

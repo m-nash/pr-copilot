@@ -34,6 +34,36 @@ if (!string.IsNullOrEmpty(startupDirectory) &&
 
 File.AppendAllText(captureFile, JsonSerializer.Serialize(args) + Environment.NewLine);
 
+var routesFile = Environment.GetEnvironmentVariable("PR_COPILOT_TEST_GH_ROUTES");
+if (!string.IsNullOrEmpty(routesFile) && args is ["api", var routedEndpoint, .. var routeOptions])
+{
+    var routes = JsonSerializer.Deserialize<Dictionary<string, string[]>>(File.ReadAllText(routesFile))!;
+    if (routes.TryGetValue(routedEndpoint.Split('?')[0], out var pages))
+    {
+        var query = routeOptions is [.., "-f", var field] && field.StartsWith("query=", StringComparison.Ordinal) ? field : null;
+        var flags = query == null ? routeOptions : routeOptions[..^2];
+        if (flags is [])
+        {
+            Console.Write(pages[0]);
+            return 0;
+        }
+
+        // gh only follows GraphQL pages when the query declares and uses $endCursor and selects pageInfo.
+        if (flags is ["--paginate", "--slurp"] &&
+            (query == null || (query.Contains("$endCursor: String", StringComparison.Ordinal) &&
+                               query.Contains("after: $endCursor", StringComparison.Ordinal) &&
+                               query.Contains("pageInfo", StringComparison.Ordinal))))
+        {
+            Console.Write("[" + string.Join(",", pages) + "]");
+            return 0;
+        }
+
+        Console.Error.WriteLine($"Fake gh cannot serve {routedEndpoint} with [{string.Join(' ', flags)}]; " +
+            "it supports no flags or --paginate --slurp, and GraphQL paging needs $endCursor and pageInfo.");
+        return 1;
+    }
+}
+
 var mergeDirectory = Environment.GetEnvironmentVariable("PR_COPILOT_TEST_GH_MERGE_BARRIER");
 if (!string.IsNullOrEmpty(mergeDirectory) && args is ["pr", "merge", "42", "--squash", "--repo", _])
 {
@@ -82,10 +112,10 @@ if (Environment.GetEnvironmentVariable("PR_COPILOT_TEST_GH_START_SUCCESS") == "1
 {
     var response = args[1] switch
     {
-        var queryEndpoint when queryEndpoint.EndsWith("/check-runs?per_page=100", StringComparison.Ordinal) => """{"check_runs":[]}""",
-        var queryEndpoint when queryEndpoint.EndsWith("/status", StringComparison.Ordinal) => """{"statuses":[]}""",
-        var queryEndpoint when queryEndpoint.EndsWith("/reviews?per_page=100", StringComparison.Ordinal) => """[{"user":"Copilot","state":"COMMENTED","commit_id":"fixture-sha"}]""",
-        "graphql" => """{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}""",
+        var queryEndpoint when queryEndpoint.EndsWith("/check-runs?per_page=100", StringComparison.Ordinal) => """[{"check_runs":[]}]""",
+        var queryEndpoint when queryEndpoint.EndsWith("/status?per_page=100", StringComparison.Ordinal) => """[{"statuses":[]}]""",
+        var queryEndpoint when queryEndpoint.EndsWith("/reviews?per_page=100", StringComparison.Ordinal) => """[[{"user":{"login":"Copilot"},"state":"COMMENTED","commit_id":"fixture-sha"}]]""",
+        "graphql" => """[{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}]""",
         "user" => "fixture-author",
         _ => null
     };
