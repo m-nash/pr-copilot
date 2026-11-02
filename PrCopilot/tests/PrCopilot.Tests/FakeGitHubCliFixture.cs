@@ -13,6 +13,8 @@ internal sealed class FakeGitHubCliFixture : IDisposable
     private readonly string _startupDirectory;
     private readonly string _resolveDirectory;
     private readonly string _mergeDirectory;
+    private readonly string _routesFile;
+    private readonly Dictionary<string, string[]> _routes = new();
     private bool _disposed;
 
     public FakeGitHubCliFixture()
@@ -27,6 +29,7 @@ internal sealed class FakeGitHubCliFixture : IDisposable
         _startupDirectory = Path.Combine(_directory, "startup");
         _resolveDirectory = Path.Combine(_directory, "resolve");
         _mergeDirectory = Path.Combine(_directory, "merge");
+        _routesFile = Path.Combine(_directory, "routes.json");
         File.WriteAllText(_responseFile, "[]");
 
         SetEnvironment("PATH", executableDirectory + Path.PathSeparator + Environment.GetEnvironmentVariable("PATH"));
@@ -38,12 +41,24 @@ internal sealed class FakeGitHubCliFixture : IDisposable
         SetEnvironment("PR_COPILOT_TEST_GH_RESOLVE_BARRIER", "");
         SetEnvironment("PR_COPILOT_TEST_GH_PR_INFO", "");
         SetEnvironment("PR_COPILOT_TEST_GH_MERGE_BARRIER", "");
+        SetEnvironment("PR_COPILOT_TEST_GH_ROUTES", "");
     }
 
     public void Respond(string response, int exitCode = 0)
     {
         File.WriteAllText(_responseFile, response);
         Environment.SetEnvironmentVariable("PR_COPILOT_TEST_GH_EXIT_CODE", exitCode.ToString(System.Globalization.CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>
+    /// Serves <paramref name="pages"/> for an API path (query string ignored) the way gh does:
+    /// the first page without flags, or every page with --paginate --slurp.
+    /// </summary>
+    public void RespondToPages(string path, params string[] pages)
+    {
+        _routes[path] = pages;
+        File.WriteAllText(_routesFile, JsonSerializer.Serialize(_routes));
+        Environment.SetEnvironmentVariable("PR_COPILOT_TEST_GH_ROUTES", _routesFile);
     }
 
     public IReadOnlyList<string[]> ReadRequests() =>
