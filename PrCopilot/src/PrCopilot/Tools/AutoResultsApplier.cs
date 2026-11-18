@@ -60,18 +60,28 @@ internal static class AutoResultsApplier
     internal static string BuildReply(MonitorState state, AutoCommentResult result)
     {
         var reply = (result.ReplyText ?? "").TrimEnd();
-        if (result.Decision == AutoCommentResult.FollowUp && result.IssueUrl is { } issueUrl &&
-            !reply.Contains(issueUrl, StringComparison.OrdinalIgnoreCase) &&
-            !(AutoCommentResult.TryParseIssueReference(issueUrl, state.Owner, state.Repo, out _, out _, out var number) &&
-              Regex.IsMatch(reply, $@"#{number}\b")))
-        {
+        if (result.Decision == AutoCommentResult.FollowUp && result.IssueUrl is { } issueUrl && !LinksIssue(state, reply, issueUrl))
             reply += $"\n\nFollow-up: {issueUrl}";
-        }
 
         var footer = $"🤖 {state.CurrentUser}-copilot";
         if (!string.IsNullOrEmpty(state.CurrentUser) && !reply.Contains(footer, StringComparison.Ordinal))
             reply += $"\n\n---\n{footer}";
         return reply;
+    }
+
+    private static bool LinksIssue(MonitorState state, string reply, string issueUrl)
+    {
+        if (reply.Contains(issueUrl, StringComparison.OrdinalIgnoreCase))
+            return true;
+        if (!AutoCommentResult.TryParseIssueReference(issueUrl, state.Owner, state.Repo, out var owner, out var repo, out var number))
+            return false;
+
+        // GitHub links a bare #N to the PR's own repository, so an issue anywhere else needs owner/repo#N.
+        var qualifier = $"{Regex.Escape(owner)}/{Regex.Escape(repo)}";
+        var sameRepo = string.Equals(owner, state.Owner, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(repo, state.Repo, StringComparison.OrdinalIgnoreCase);
+        var prefix = sameRepo ? $"(?:{qualifier})?" : qualifier;
+        return Regex.IsMatch(reply, $@"(?<![\w/.-]){prefix}#{number}\b", RegexOptions.IgnoreCase);
     }
 
     private static async Task VerifyCommitsAsync(MonitorState state, List<AutoCommentResult> results, TimeSpan commitVisibilityDelay)

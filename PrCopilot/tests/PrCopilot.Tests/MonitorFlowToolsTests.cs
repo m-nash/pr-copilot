@@ -1249,6 +1249,18 @@ public class MonitorFlowToolsTests : IDisposable
         Assert.Equal(result.ReplyText, AutoResultsApplier.BuildReply(state, result));
     }
 
+    [Theory]
+    [InlineData("https://github.com/other/lib/issues/7", "Tracked in #7.", true)]
+    [InlineData("https://github.com/other/lib/issues/7", "Tracked in other/lib#7.", false)]
+    [InlineData("https://github.com/owner/repo/issues/7", "Tracked in other/lib#7.", true)]
+    public void AutoResultsApplier_BuildReply_AppendsIssueLinkUnlessReplyLinksThatIssue(string issueUrl, string replyText, bool appendsLink)
+    {
+        var state = new MonitorState { Owner = "owner", Repo = "repo" };
+        var result = new AutoCommentResult { Decision = AutoCommentResult.FollowUp, ReplyText = replyText, IssueUrl = issueUrl };
+
+        Assert.Equal(appendsLink, AutoResultsApplier.BuildReply(state, result).Contains($"Follow-up: {issueUrl}", StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task MergePr_RequiresTheEvaluatedHeadCommit()
     {
