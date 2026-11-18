@@ -122,7 +122,7 @@ After `task_complete`, the state machine re-presents the same choices so the use
 
 In auto mode the monitor handles comments, CI failures, merge conflicts, stale approvals, and merging without prompting. It starts when you pass `mode="auto"` or the user picks **Switch to auto mode** in a prompt.
 
-Tasks whose instructions begin with `AUTO MODE` are pre-approved by the user for that PR: do not ask for confirmation, and stage, commit, and push (never force-push) as instructed. Follow the task's evidence rules exactly, and never post replies, resolve threads, or request reviews yourself; the server does that after verifying your results.
+Tasks whose instructions begin with `AUTO MODE` are pre-approved by the user for that PR: do not ask for confirmation, and stage, commit, and push (never force-push) as instructed. Follow the task's evidence rules exactly, and never post replies, resolve threads, or request reviews yourself; the server does that after verifying your results. Switching to `mode="interactive"` revokes that pre-approval for any unfinished step: get the user's approval before committing, pushing, or opening issues.
 
 **How to handle `auto_address_comments`**: Follow its instructions for every comment, then report `comments_processed` with one result per comment.
 

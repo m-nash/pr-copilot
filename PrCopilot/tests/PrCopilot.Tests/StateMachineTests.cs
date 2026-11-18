@@ -3464,6 +3464,37 @@ public class StateMachineTests
         Assert.Equal(["c1", "c2"], state.AutoBatch.Select(c => c.Id));
     }
 
+    [Fact]
+    public void AutoMode_TurnedOffMidTask_ReconnectRevokesPreApproval()
+    {
+        var state = CreateAutoState(MakeComment("c1"));
+        MonitorTransitions.BuildTerminalAction(state, TerminalStateType.NewComment);
+        state.AutoMode = false;
+
+        var resume = MonitorTransitions.ProcessEvent(state, "ready", null, null);
+
+        Assert.Equal("resume_pending_task", resume.Task);
+        var original = Assert.IsType<MonitorAction>(resume.Context);
+        Assert.Equal("auto_address_comments", original.Task);
+        Assert.DoesNotContain("pre-approved", original.Instructions);
+        Assert.Contains("turned off", resume.Instructions);
+    }
+
+    [Fact]
+    public void AutoMode_TurnedOffBeforeResults_AsksBeforePosting()
+    {
+        var state = CreateAutoState(MakeComment("c1"));
+        MonitorTransitions.BuildTerminalAction(state, TerminalStateType.NewComment);
+        state.AutoMode = false;
+
+        var prompt = MonitorTransitions.ProcessEvent(state, "comments_processed", null, Results(
+            new { comment_id = "c1", decision = "fixed", reply_text = "Added the guard", evidence = "GuardTests failed before the fix", commit = "abc1234" }));
+
+        Assert.Equal("ask_user", prompt.Action);
+        Assert.Contains("Added the guard", prompt.Question);
+        Assert.Equal("apply_auto_results", MonitorTransitions.ProcessEvent(state, "user_chose", "post_auto_results", null).Task);
+    }
+
     [Theory]
     [InlineData("code", "apply_fix")]
     [InlineData("unknown", "rerun_via_browser")]

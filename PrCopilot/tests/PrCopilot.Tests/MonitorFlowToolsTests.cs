@@ -1117,6 +1117,45 @@ public class MonitorFlowToolsTests : IDisposable
     }
 
     [Fact]
+    public async Task PrMonitorStart_InteractiveDuringAutoTask_PostsNothingWithoutConfirmation()
+    {
+        _gh.PauseResolveRequests();
+        _gh.ReleaseResolveRequests();
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        var monitorId = $"pr-{owner}-repo-42";
+        var state = CreateAutoCommentState(owner, "c1");
+        MonitorTransitions.BuildTerminalAction(state, TerminalStateType.NewComment);
+        var sessions = GetSessions();
+        using var session = new MonitorSession { State = state };
+        Assert.True(sessions.TryAdd(monitorId, session));
+        var server = new FakeElicitationMcpServer("handle_myself", "stop");
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+
+        try
+        {
+            var tools = new MonitorFlowTools();
+            using var start = JsonDocument.Parse(await tools.PrMonitorStart(owner, "repo", 42, _gh.DirectoryPath, mode: "interactive"));
+            var data = JsonSerializer.Serialize(new
+            {
+                results = new object[] { new { comment_id = "c1", decision = "answered", reply_text = "It runs once per poll", evidence = "PollLoopTests" } }
+            });
+            using var response = JsonDocument.Parse(await tools.PrMonitorNextStep(
+                monitorId, "comments_processed", data: data, server: server, cancellationToken: cancellation.Token));
+
+            Assert.Equal("interactive", start.RootElement.GetProperty("mode").GetString());
+            Assert.Equal("stop", response.RootElement.GetProperty("action").GetString());
+            Assert.Contains("Auto mode was turned off", Assert.IsType<string>(server.Elicitations.FirstOrDefault()?.Message));
+            Assert.DoesNotContain(_gh.ReadRequests(), r => r.Length > 1 &&
+                (r[1].EndsWith("/replies", StringComparison.Ordinal) || r[1].EndsWith("/requested_reviewers", StringComparison.Ordinal) ||
+                 r.Any(arg => arg.Contains("resolveReviewThread", StringComparison.Ordinal))));
+        }
+        finally
+        {
+            sessions.TryRemove(monitorId, out _);
+        }
+    }
+
+    [Fact]
     public void AutoResultsApplier_BuildReply_AddsIssueLinkAndFooterOnce()
     {
         var state = new MonitorState { Owner = "owner", Repo = "repo", CurrentUser = "me" };
