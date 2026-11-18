@@ -224,7 +224,7 @@ public static class PrStatusFetcher
     /// Fetches unresolved review comment threads via GraphQL.
     /// Classifies threads as "needs action" vs "waiting for reply" based on last commenter.
     /// </summary>
-    public static async Task<List<CommentInfo>> FetchUnresolvedCommentsAsync(string owner, string repo, int prNumber, string prAuthor = "")
+    public static async Task<List<CommentInfo>> FetchUnresolvedCommentsAsync(string owner, string repo, int prNumber, string prAuthor = "", string currentUser = "")
     {
         // Use GraphQL to get review threads with resolution status
         // Fetch first comment (original) and last comment (to check who replied last).
@@ -311,10 +311,9 @@ public static class PrStatusFetcher
                     if (lastNodes[0].TryGetProperty("createdAt", out var ca) && ca.ValueKind == JsonValueKind.String)
                         lastReplyAt = DateTime.Parse(ca.GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind);
 
-                    // If PR author is the last commenter and there are replies (totalCount > 1),
+                    // If the PR author or the signed-in user replied last (totalCount > 1),
                     // the ball is in the reviewer's court
-                    if (totalCount > 1 && !string.IsNullOrEmpty(prAuthor) &&
-                        string.Equals(lastReplyAuthor, prAuthor, StringComparison.OrdinalIgnoreCase))
+                    if (totalCount > 1 && (IsUser(lastReplyAuthor, prAuthor) || IsUser(lastReplyAuthor, currentUser)))
                     {
                         isWaitingForReply = true;
                     }
@@ -354,9 +353,9 @@ public static class PrStatusFetcher
     /// AFTER we replied — approval after our reply implies acceptance.
     /// </summary>
     public static async Task<List<CommentInfo>> FetchAndCleanUnresolvedCommentsAsync(
-        string owner, string repo, int prNumber, string prAuthor = "", IReadOnlyList<ReviewInfo>? approvals = null)
+        string owner, string repo, int prNumber, string prAuthor = "", string currentUser = "", IReadOnlyList<ReviewInfo>? approvals = null)
     {
-        var comments = await FetchUnresolvedCommentsAsync(owner, repo, prNumber, prAuthor);
+        var comments = await FetchUnresolvedCommentsAsync(owner, repo, prNumber, prAuthor, currentUser);
 
         var botWaiting = comments
             .Where(c => c.IsWaitingForReply && IsBotReviewer(c.Author))
@@ -620,6 +619,9 @@ public static class PrStatusFetcher
         comment.TryGetProperty("authorAssociation", out var association) && association.ValueKind == JsonValueKind.String
             ? association.GetString() ?? ""
             : "";
+
+    private static bool IsUser(string login, string user) =>
+        !string.IsNullOrEmpty(user) && string.Equals(login, user, StringComparison.OrdinalIgnoreCase);
 
     private static void ClassifyCheckRun(string status, string conclusion, CheckRunCounts counts)
     {

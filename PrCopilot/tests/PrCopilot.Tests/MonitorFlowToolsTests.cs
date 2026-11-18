@@ -1145,6 +1145,54 @@ public class MonitorFlowToolsTests : IDisposable
     }
 
     [Fact]
+    public async Task PrMonitorNextStep_AutoMode_ThreadSignedInUserRepliedToLastWaitsForReviewer()
+    {
+        _gh.PauseStartupRequests();
+        _gh.CompleteStartupSuccessfully();
+        _gh.RespondToPrInfo("""{"title":"Fixture PR","body":"","sha":"fixture-sha","head_branch":"fixture","base_branch":"main","url":"https://github.com/owner/repo/pull/42","author":"fixture-author","mergeable":false,"mergeable_state":"dirty","state":"open","merged":false}""");
+        _gh.ReleaseStartupRequests();
+        _gh.RespondToPages("graphql", """
+            {"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":"c"},"nodes":[
+              {"id":"thread","isResolved":false,
+               "comments":{"totalCount":2,"nodes":[{"author":{"login":"reviewer"},"authorAssociation":"MEMBER","body":"Please fix","url":"https://github.com/owner/repo/pull/42"}]},
+               "lastReply":{"nodes":[{"author":{"login":"helper"},"authorAssociation":"COLLABORATOR","createdAt":"2026-11-18T18:49:30Z"}]}}]}}}}}
+            """);
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        var monitorId = $"pr-{owner}-repo-42";
+        var state = new MonitorState
+        {
+            Owner = owner,
+            Repo = "repo",
+            PrNumber = 42,
+            SessionFolder = _gh.DirectoryPath,
+            HeadBranch = "fixture",
+            BaseBranch = "main",
+            HeadSha = "fixture-sha",
+            PrAuthor = "fixture-author",
+            CurrentUser = "helper",
+            AutoMode = true
+        };
+        using var session = new MonitorSession { State = state };
+        var sessions = GetSessions();
+        Assert.True(sessions.TryAdd(monitorId, session));
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        try
+        {
+            using var response = JsonDocument.Parse(await new MonitorFlowTools().PrMonitorNextStep(
+                monitorId, "ready", server: new FakeElicitationMcpServer(), cancellationToken: cancellation.Token));
+
+            Assert.Equal(["thread"], state.WaitingForReplyComments.Select(c => c.Id));
+            Assert.Equal("merge_target_branch", response.RootElement.GetProperty("task").GetString());
+        }
+        finally
+        {
+            cancellation.Cancel();
+            sessions.TryRemove(monitorId, out _);
+        }
+    }
+
+    [Fact]
     public async Task PrMonitorStart_InteractiveDuringAutoTask_PostsNothingWithoutConfirmation()
     {
         _gh.PauseResolveRequests();

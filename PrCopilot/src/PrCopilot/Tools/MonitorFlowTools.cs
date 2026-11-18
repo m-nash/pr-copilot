@@ -511,18 +511,6 @@ public class MonitorFlowTools
         // Fetch all PR data
         var prInfo = await PrStatusFetcher.FetchPrInfoAsync(owner, repo, prNumber);
 
-        var checkResult = await PrStatusFetcher.FetchCheckRunsAsync(owner, repo, prInfo.HeadSha);
-
-        var reviewResult = await PrStatusFetcher.FetchReviewsAsync(owner, repo, prNumber, prInfo.HeadSha);
-        var allComments = await PrStatusFetcher.FetchAndCleanUnresolvedCommentsAsync(owner, repo, prNumber, prInfo.Author, reviewResult.Approvals);
-
-        // Fetch branch protection conversation requirement (cached for session lifetime)
-        var requiresConversationResolution = false;
-        if (!string.IsNullOrEmpty(prInfo.BaseBranch))
-        {
-            requiresConversationResolution = await PrStatusFetcher.FetchRequiresConversationResolutionAsync(owner, repo, prInfo.BaseBranch);
-        }
-
         // Get the current authenticated GitHub user
         var currentUser = "";
         try
@@ -532,6 +520,18 @@ public class MonitorFlowTools
         catch
         {
             currentUser = prInfo.Author; // fallback to PR author if gh fails
+        }
+
+        var checkResult = await PrStatusFetcher.FetchCheckRunsAsync(owner, repo, prInfo.HeadSha);
+
+        var reviewResult = await PrStatusFetcher.FetchReviewsAsync(owner, repo, prNumber, prInfo.HeadSha);
+        var allComments = await PrStatusFetcher.FetchAndCleanUnresolvedCommentsAsync(owner, repo, prNumber, prInfo.Author, currentUser, reviewResult.Approvals);
+
+        // Fetch branch protection conversation requirement (cached for session lifetime)
+        var requiresConversationResolution = false;
+        if (!string.IsNullOrEmpty(prInfo.BaseBranch))
+        {
+            requiresConversationResolution = await PrStatusFetcher.FetchRequiresConversationResolutionAsync(owner, repo, prInfo.BaseBranch);
         }
 
         DebugLogger.Log("PrMonitorStart", $"Fetched: {checkResult.Counts.Total} checks ({checkResult.Counts.Failed} failed), {reviewResult.Approvals.Count} approvals, {allComments.Count} comments, conversationResolution={requiresConversationResolution}");
@@ -1389,7 +1389,7 @@ public class MonitorFlowTools
                 state.Approvals = reviewResult.Approvals;
                 state.StaleApprovals = reviewResult.StaleApprovals;
 
-                var allComments = await PrStatusFetcher.FetchAndCleanUnresolvedCommentsAsync(state.Owner, state.Repo, state.PrNumber, state.PrAuthor, reviewResult.Approvals);
+                var allComments = await PrStatusFetcher.FetchAndCleanUnresolvedCommentsAsync(state.Owner, state.Repo, state.PrNumber, state.PrAuthor, state.CurrentUser, reviewResult.Approvals);
 
                 var needsAction = allComments.Where(c => !c.IsWaitingForReply).ToList();
                 var waitingForReply = allComments.Where(c => c.IsWaitingForReply).ToList();
@@ -1538,7 +1538,7 @@ public class MonitorFlowTools
         state.Approvals = reviewResult.Approvals;
         state.StaleApprovals = reviewResult.StaleApprovals;
 
-        var allComments = await PrStatusFetcher.FetchAndCleanUnresolvedCommentsAsync(state.Owner, state.Repo, state.PrNumber, state.PrAuthor, reviewResult.Approvals);
+        var allComments = await PrStatusFetcher.FetchAndCleanUnresolvedCommentsAsync(state.Owner, state.Repo, state.PrNumber, state.PrAuthor, state.CurrentUser, reviewResult.Approvals);
 
         var needsAction = allComments.Where(c => !c.IsWaitingForReply).ToList();
         var waitingForReply = allComments.Where(c => c.IsWaitingForReply).ToList();
@@ -1847,7 +1847,7 @@ public class MonitorFlowTools
                         try
                         {
                             var freshComments = await PrStatusFetcher.FetchUnresolvedCommentsAsync(
-                                state.Owner, state.Repo, state.PrNumber, state.PrAuthor);
+                                state.Owner, state.Repo, state.PrNumber, state.PrAuthor, state.CurrentUser);
                             var hasUnresolved = freshComments.Any(c =>
                                 string.Equals(c.Author, reviewer, StringComparison.OrdinalIgnoreCase) && !c.IsWaitingForReply);
                             if (hasUnresolved)
