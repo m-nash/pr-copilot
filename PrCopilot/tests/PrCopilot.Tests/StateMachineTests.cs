@@ -3326,7 +3326,7 @@ public class StateMachineTests
     public void AutoMode_CommentsProcessed_HandsUnsupportedClaimsToUser()
     {
         var state = CreateAutoState(MakeComment("fixed"), MakeComment("fix-no-evidence"), MakeComment("fix-no-commit"),
-            MakeComment("pushback-no-evidence"), MakeComment("silent"));
+            MakeComment("pushback-no-evidence"), MakeComment("null-decision"), MakeComment("silent"));
         MonitorTransitions.BuildTerminalAction(state, TerminalStateType.NewComment);
 
         var action = MonitorTransitions.ProcessEvent(state, "comments_processed", null, Results(
@@ -3334,18 +3334,20 @@ public class StateMachineTests
             new { comment_id = "fix-no-evidence", decision = "fixed", reply_text = "Fixed", commit = "abc1234" },
             new { comment_id = "fix-no-commit", decision = "fixed", reply_text = "Fixed", evidence = "NullGuardTests failed before the fix" },
             new { comment_id = "pushback-no-evidence", decision = "pushed_back", reply_text = "This is fine as is" },
+            new { comment_id = "null-decision", decision = (string?)null },
             new { comment_id = 7, decision = "fixed" },
             new { comment_id = "outside-batch", decision = "fixed", reply_text = "Fixed", evidence = "NullGuardTests", commit = "abc1234" }));
 
         Assert.Equal("auto_execute", action.Action);
         Assert.Equal("apply_auto_results", action.Task);
         var results = state.PendingAutoResults.ToDictionary(r => r.CommentId);
-        Assert.Equal(5, results.Count);
+        Assert.Equal(6, results.Count);
         Assert.Equal(AutoCommentResult.Fixed, results["fixed"].Decision);
         Assert.All(results.Values.Where(r => r.CommentId != "fixed"), r => Assert.Equal(AutoCommentResult.NeedsUser, r.Decision));
         Assert.Contains("a fix without evidence", results["fix-no-evidence"].Reason);
         Assert.Contains("a fix without the SHA", results["fix-no-commit"].Reason);
         Assert.Contains("a pushback without evidence", results["pushback-no-evidence"].Reason);
+        Assert.Contains("unknown decision", results["null-decision"].Reason);
         Assert.Contains("no result", results["silent"].Reason);
     }
 

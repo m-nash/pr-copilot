@@ -106,7 +106,7 @@ public class AutoCommentResult
     /// </summary>
     public void EnforceEvidenceRules()
     {
-        Decision = Decision.Trim().ToLowerInvariant();
+        Decision = Decision?.Trim().ToLowerInvariant() ?? "";
         var problem = Decision switch
         {
             NeedsUser => null,
