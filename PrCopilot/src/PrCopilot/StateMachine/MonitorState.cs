@@ -72,6 +72,9 @@ public class MonitorState
     /// <summary>Auto mode: PR state when a branch policy last rejected the merge; the merge is retried once it changes.</summary>
     public string? AutoMergeBlockedOn { get; set; }
 
+    /// <summary>Auto mode: when a branch policy last rejected the merge; the merge is also retried after a fixed interval.</summary>
+    public DateTime? AutoMergeBlockedAt { get; set; }
+
     /// <summary>Reason the agent gave with a needs_user event.</summary>
     public string? AutoEscalationReason { get; set; }
 

@@ -3621,6 +3621,35 @@ public class StateMachineTests
     }
 
     [Fact]
+    public void AutoMode_MergeBlockedByPolicy_RetriesWhenApproversChangeAtSameCount()
+    {
+        var state = CreateState();
+        state.AutoMode = true;
+        SetChecksAllGreen(state);
+        state.Approvals = [new ReviewInfo { Author = "teammate", State = "APPROVED", SubmittedAt = new DateTime(2026, 11, 18, 10, 0, 0, DateTimeKind.Utc) }];
+        MonitorTransitions.BuildAutoMergeBlockedAction(state, "the base branch policy prohibits the merge");
+
+        state.Approvals = [new ReviewInfo { Author = "code-owner", State = "APPROVED", SubmittedAt = new DateTime(2026, 11, 18, 11, 0, 0, DateTimeKind.Utc) }];
+
+        Assert.Equal(TerminalStateType.ApprovedCiGreen, MonitorTransitions.DetectTerminalState(state, [], false));
+    }
+
+    [Fact]
+    public void AutoMode_MergeBlockedByPolicy_RetriesAfterIntervalWithoutVisibleChange()
+    {
+        var state = CreateState();
+        state.AutoMode = true;
+        SetChecksAllGreen(state);
+        state.Approvals = [new ReviewInfo { Author = "approver", State = "APPROVED" }];
+        MonitorTransitions.BuildAutoMergeBlockedAction(state, "the base branch policy prohibits the merge");
+        Assert.Null(MonitorTransitions.DetectTerminalState(state, [], false));
+
+        state.AutoMergeBlockedAt = DateTime.UtcNow - MonitorTransitions.AutoMergeRetryInterval - TimeSpan.FromSeconds(1);
+
+        Assert.Equal(TerminalStateType.ApprovedCiGreen, MonitorTransitions.DetectTerminalState(state, [], false));
+    }
+
+    [Fact]
     public void AutoMode_StaleApproval_ReRequestsReviewOnce()
     {
         var state = CreateState();

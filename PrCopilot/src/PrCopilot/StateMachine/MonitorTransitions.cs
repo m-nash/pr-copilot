@@ -87,7 +87,7 @@ public static class MonitorTransitions
                 return null; // Don't re-trigger until we get more approvals
             // Auto mode merges by itself, so it waits until reviewers have answered every reply it left them,
             // and after a branch policy rejected the merge, until approvals, checks, or commits change.
-            if (state.AutoMode && (state.WaitingForReplyComments.Count > 0 || state.AutoMergeBlockedOn == MergeReadiness(state)))
+            if (state.AutoMode && (state.WaitingForReplyComments.Count > 0 || IsAutoMergeStillBlocked(state)))
                 return null;
             return TerminalStateType.ApprovedCiGreen;
         }
@@ -1695,12 +1695,22 @@ public static class MonitorTransitions
     internal static MonitorAction BuildAutoMergeBlockedAction(MonitorState state, string output)
     {
         state.AutoMergeBlockedOn = MergeReadiness(state);
+        state.AutoMergeBlockedAt = DateTime.UtcNow;
         DebugLogger.Log("AutoMode", $"Merge blocked by branch policy; retrying after approvals, checks, or commits change: {output}");
         return TransitionToPolling(state);
     }
 
+    // Dismissed change requests and resolved conversations don't show up in the fingerprint, so retry periodically too.
+    internal static readonly TimeSpan AutoMergeRetryInterval = TimeSpan.FromMinutes(15);
+
+    private static bool IsAutoMergeStillBlocked(MonitorState state) =>
+        state.AutoMergeBlockedOn == MergeReadiness(state) &&
+        state.AutoMergeBlockedAt is { } blockedAt && DateTime.UtcNow - blockedAt < AutoMergeRetryInterval;
+
     private static string MergeReadiness(MonitorState state) =>
-        $"{state.HeadSha}|{state.Approvals.Count}|{state.Checks.Passed}/{state.Checks.Pending}/{state.Checks.Total}";
+        $"{state.HeadSha}|" +
+        string.Join(",", state.Approvals.OrderBy(a => a.Author, StringComparer.OrdinalIgnoreCase).Select(a => $"{a.Author}@{a.SubmittedAt:O}")) +
+        $"|{state.Checks.Passed}/{state.Checks.Pending}/{state.Checks.Total}";
 
     /// <summary>The PR head moved after its checks and approvals were evaluated, so poll and evaluate the new commit before merging.</summary>
     internal static MonitorAction BuildMergeHeadMovedAction(MonitorState state, string currentHeadSha)
