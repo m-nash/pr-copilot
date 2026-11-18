@@ -1995,12 +1995,15 @@ public class MonitorFlowTools
                 }
             case "re_request_stale_reviews":
                 {
+                    var failures = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                     foreach (var reviewer in state.PendingStaleApprovalNotifications)
                     {
                         var (success, output) = await GitHubCliExecutor.RequestReviewAsync(state.Owner, state.Repo, state.PrNumber, reviewer);
                         DebugLogger.Log("AutoExec", $"re_request_stale_reviews {reviewer}: success={success}{(success ? "" : $", output={output}")}");
+                        if (!success)
+                            failures[reviewer] = output;
                     }
-                    return MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+                    return MonitorTransitions.CompleteStaleReviewRequests(state, failures);
                 }
             default:
                 DebugLogger.Error("AutoExec", $"Unknown auto_execute task: {action.Task}");

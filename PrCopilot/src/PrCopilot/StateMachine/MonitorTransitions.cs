@@ -1689,6 +1689,20 @@ public static class MonitorTransitions
     }
 
     /// <summary>
+    /// Record the stale approvers GitHub re-requested. Any it refused stay unhandled and go to the user with the
+    /// reason through the stale-approval prompt, where a reminder or skip settles them instead of a retry loop.
+    /// </summary>
+    internal static MonitorAction CompleteStaleReviewRequests(MonitorState state, IReadOnlyDictionary<string, string> failures)
+    {
+        MarkStaleApprovalNotificationsHandled(state, state.PendingStaleApprovalNotifications.Where(r => !failures.ContainsKey(r)).ToList());
+        state.PendingStaleApprovalNotifications.Clear();
+        if (failures.Count == 0)
+            return TransitionToPolling(state);
+
+        return Escalate(state, $"GitHub didn't re-request review from {string.Join("; ", failures.Select(f => $"{f.Key}: {f.Value}"))}");
+    }
+
+    /// <summary>
     /// Auto mode never admin-merges. A branch policy can block on approvals, required checks, or other rules, so the
     /// merge is retried once approvals, checks, or commits change rather than waiting only for another approval.
     /// </summary>

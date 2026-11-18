@@ -3677,7 +3677,7 @@ public class StateMachineTests
         state.StaleApprovals = [new ReviewInfo { Author = "approver", State = "APPROVED", IsStale = true }];
 
         var action = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.StaleApprovalCiGreen);
-        var next = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        var next = MonitorTransitions.CompleteStaleReviewRequests(state, new Dictionary<string, string>());
 
         Assert.Equal("re_request_stale_reviews", action.Task);
         Assert.Equal("polling", next.Action);

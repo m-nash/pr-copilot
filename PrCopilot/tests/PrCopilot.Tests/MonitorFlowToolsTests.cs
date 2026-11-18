@@ -1291,6 +1291,28 @@ public class MonitorFlowToolsTests : IDisposable
         Assert.Equal("polling", action.Action);
     }
 
+    [Fact]
+    public async Task ReRequestStaleReviews_GitHubRefuses_AsksUserWithTheReason()
+    {
+        var state = new MonitorState
+        {
+            Owner = "owner",
+            Repo = "repo",
+            PrNumber = 42,
+            SessionFolder = _gh.DirectoryPath,
+            HeadSha = "head-sha",
+            AutoMode = true,
+            StaleApprovals = [new ReviewInfo { Author = "outsider", State = "APPROVED", IsStale = true }]
+        };
+        MonitorTransitions.BuildTerminalAction(state, TerminalStateType.StaleApprovalCiGreen);
+
+        var action = await ExecuteAutoActionAsync(state, new MonitorAction { Action = "auto_execute", Task = "re_request_stale_reviews" });
+
+        Assert.Equal("ask_user", action.Action);
+        Assert.Contains("outsider: Unexpected GitHub CLI command in offline test.", action.Question);
+        Assert.Contains("approval from outsider is stale", action.Question);
+    }
+
     private static async Task<MonitorAction> ExecuteAutoActionAsync(MonitorState state, MonitorAction action)
     {
         var method = typeof(MonitorFlowTools).GetMethod("ExecuteAutoAction", BindingFlags.Static | BindingFlags.NonPublic);
