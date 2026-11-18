@@ -1670,6 +1670,10 @@ public static class MonitorTransitions
     private static MonitorAction BuildReRequestStaleReviewsAction(MonitorState state)
     {
         var approvers = GetStaleApproversNeedingNotification(state);
+        // Re-requesting a bot can retrigger automated reviews; record skipped bots so they aren't selected again.
+        var bots = approvers.Where(PrStatusFetcher.IsBotReviewer).ToList();
+        MarkStaleApprovalNotificationsHandled(state, bots);
+        approvers = approvers.Except(bots, StringComparer.OrdinalIgnoreCase).ToList();
         if (approvers.Count == 0)
             return TransitionToPolling(state);
 

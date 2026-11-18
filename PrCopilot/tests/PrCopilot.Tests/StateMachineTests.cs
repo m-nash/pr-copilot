@@ -3636,6 +3636,26 @@ public class StateMachineTests
         Assert.Null(MonitorTransitions.DetectTerminalState(state, [], false));
     }
 
+    [Fact]
+    public void AutoMode_StaleBotApproval_IsSkippedAndNotSelectedAgain()
+    {
+        var state = CreateState();
+        state.AutoMode = true;
+        SetChecksAllGreen(state);
+        state.StaleApprovals = [new ReviewInfo { Author = "approver-bot[bot]", State = "APPROVED", IsStale = true }];
+
+        var botOnly = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.StaleApprovalCiGreen);
+
+        Assert.Equal("polling", botOnly.Action);
+        Assert.Null(MonitorTransitions.DetectTerminalState(state, [], false));
+
+        state.StaleApprovals = [.. state.StaleApprovals, new ReviewInfo { Author = "approver", State = "APPROVED", IsStale = true }];
+        var withHuman = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.StaleApprovalCiGreen);
+
+        Assert.Equal("re_request_stale_reviews", withHuman.Task);
+        Assert.Equal(["approver"], state.PendingStaleApprovalNotifications);
+    }
+
     [Theory]
     [InlineData("abc1234", "abc1234")]
     [InlineData("Azure/azure-sdk-for-net@ABC1234DEF", "abc1234def")]
