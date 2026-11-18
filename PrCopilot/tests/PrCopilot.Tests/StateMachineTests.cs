@@ -3498,6 +3498,25 @@ public class StateMachineTests
     }
 
     [Theory]
+    [InlineData("auto_address_comments")]
+    [InlineData("apply_fix")]
+    [InlineData("merge_target_branch")]
+    public void AutoMode_AgentTasks_StartWithThePreApprovalMarker(string task)
+    {
+        var state = CreateAutoState(MakeComment("c1"));
+
+        var action = task switch
+        {
+            "auto_address_comments" => MonitorTransitions.BuildTerminalAction(state, TerminalStateType.NewComment),
+            "apply_fix" => InvestigateAutomatically(state, "code"),
+            _ => MonitorTransitions.BuildTerminalAction(state, TerminalStateType.MergeConflict)
+        };
+
+        Assert.Equal(task, action.Task);
+        Assert.StartsWith("AUTO MODE:", action.Instructions);
+    }
+
+    [Theory]
     [InlineData("code", "apply_fix")]
     [InlineData("unknown", "rerun_via_browser")]
     [InlineData("duplicate_artifact", "run_new_build")]
