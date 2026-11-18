@@ -1278,7 +1278,7 @@ public class MonitorFlowToolsTests : IDisposable
     [Theory]
     [InlineData("merge_pr")]
     [InlineData("merge_pr_admin")]
-    public async Task MergePr_HeadMovedSinceEvaluation_RepollsInsteadOfPrompting(string task)
+    public async Task MergePr_HeadMovedSinceEvaluation_PollsAgainInsteadOfPrompting(string task)
     {
         _gh.PauseStartupRequests();
         _gh.CompleteStartupSuccessfully();
