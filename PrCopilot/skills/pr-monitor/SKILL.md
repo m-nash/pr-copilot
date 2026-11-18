@@ -1,6 +1,6 @@
 ---
 name: pr-monitor
-description: "CRITICAL: When triggered, your FIRST action must be calling pr_monitor_start — do NOT reply to comments, read code, or take any PR action until the state machine tells you to. Use this skill for: git push to PR branch, 'monitor PR', 'resume monitoring', 'watch PR', 'check PR status', 'keep watching', 'show viewer', 'open viewer', 'monitor all my PRs', 'monitor all PRs', 'watch all my PRs'. Do NOT implement your own monitoring."
+description: "CRITICAL: When triggered, your FIRST action must be calling pr_monitor_start — do NOT reply to comments, read code, or take any PR action until the state machine tells you to. Use this skill for: git push to PR branch, 'monitor PR', 'resume monitoring', 'watch PR', 'check PR status', 'keep watching', 'show viewer', 'open viewer', 'monitor all my PRs', 'monitor all PRs', 'watch all my PRs', 'monitor PR in auto mode', 'switch to auto mode'. Do NOT implement your own monitoring."
 ---
 
 # PR Monitor
@@ -55,6 +55,8 @@ When triggered:
    ```
    This returns a `monitor_id`, PR title, URL, CI counts, and other status data. The viewer is launched by the MCP server — the agent does NOT need to launch it.
 
+   Pass `mode="auto"` when the user asks for auto mode (for example, "monitor this PR in auto mode") and `mode="interactive"` when they ask to turn it off. Otherwise omit `mode`, which keeps the current mode. Calling `pr_monitor_start` on a running monitor switches its mode; then reconnect with `ready` as usual.
+
 4. **Start or reconnect**: Call `pr_monitor_next_step(monitor_id, event="ready")`. An idle monitor begins polling; an active monitor resumes its pending task or re-presents its pending prompt. `ready` never marks work complete.
 
 **Do NOT skip step 3 on resume.** The MCP server handles viewer launch automatically — just call `pr_monitor_start` and it will launch or reuse the viewer.
@@ -82,9 +84,11 @@ call pr_monitor_next_step(monitor_id, event, data)
 | `ready` | Start/reconnect; resumes pending work before polling, never completes it | — |
 | `comment_addressed` | Finished addressing a review comment (implemented fix or agreed) | `data`: JSON with `reply_text` |
 | `comment_replied` | Replied to a comment without code changes (pushback or clarification) | `data`: JSON with `reply_text` |
+| `comments_processed` | Finished an `auto_address_comments` task | `data`: JSON with `results`, one per comment, as the task instructions describe |
 | `investigation_complete` | Finished analyzing CI failures | `data`: JSON with `findings` and optional `suggested_fix` |
 | `push_completed` | Committed and pushed a fix | — |
 | `task_complete` | Finished any other execute task | `data`: JSON with optional `recommendation` (for explain_comment tasks — a detailed, actionable summary of what you recommend) |
+| `needs_user` | An auto-mode task can't be completed safely | `data`: JSON with `reason` |
 | `user_chose` | Used by freeform interpretation when text maps to a choice | `choice`: mapped value |
 
 ## Freeform Text Input
@@ -113,6 +117,16 @@ After `task_complete`, the state machine re-presents the same choices so the use
 **How to handle `send_message`**: Send the provided message to each recipient using any messaging capability or skill available in the current environment. Do not assume Teams, Slack, email, or any other provider. If no messaging capability is available, show the prepared message to the user for manual delivery. In either case, call `pr_monitor_next_step` with `event='task_complete'`; lack of a messaging integration must not stop monitoring.
 
 **How to handle `relay_choice`** (multi-PR only): The server classified freeform text as matching a choice for a specific PR monitor. Follow the instructions exactly — call `pr_monitor_next_step` with the specified `monitorId`, `event='user_chose'`, and `choice`, then call `pr_monitor_next_step` with `monitorId='all'` and `event='ready'` to resume monitoring all PRs.
+
+## Auto Mode
+
+In auto mode the monitor handles comments, CI failures, merge conflicts, stale approvals, and merging without prompting. It starts when you pass `mode="auto"` or the user picks **Switch to auto mode** in a prompt.
+
+Tasks whose instructions begin with `AUTO MODE` are pre-approved by the user for that PR: do not ask for confirmation, and stage, commit, and push (never force-push) as instructed. Follow the task's evidence rules exactly, and never post replies, resolve threads, or request reviews yourself; the server does that after verifying your results.
+
+**How to handle `auto_address_comments`**: Follow its instructions for every comment, then report `comments_processed` with one result per comment.
+
+**When an auto task can't be completed safely** (for example, validation fails, a push is rejected, or the decision needs the user), call `pr_monitor_next_step` with `event='needs_user'` and `data='{"reason": "<one sentence>"}'` instead of guessing. The user is prompted with your reason.
 
 ## Monitor All My PRs
 
@@ -166,7 +180,7 @@ These commands work when monitoring is already active OR when the user just want
 
 ## Commit/Push Rules
 
-**⚠️ ALWAYS present code changes to the user for review before committing.** No exceptions — even when addressing review comments or applying fixes. Use `ask_user` to show a summary of what changed and get explicit approval before running `git commit` or `git push`.
+**⚠️ ALWAYS present code changes to the user for review before committing.** No exceptions — even when addressing review comments or applying fixes — except auto-mode tasks, whose instructions begin with `AUTO MODE` because the user pre-approved them. Use `ask_user` to show a summary of what changed and get explicit approval before running `git commit` or `git push`.
 
 When any flow in this skill involves committing and pushing code changes (e.g., addressing review comments, resolving merge conflicts):
 
@@ -228,7 +242,7 @@ When composing a reply after making a code change, **always link the commit** th
 - **Resume by default** — after handling a terminal state, the state machine resumes polling automatically unless the user chose to stop.
 - **One monitor per PR** — reuse the active monitor after a push; do NOT stop/reset it or discard a pending task. A stopped monitor is initialized fresh on the next start.
 - **Session-scoped** — monitoring only lasts for the current Copilot CLI session.
-- **CI failure investigation** — when CI fails, the state machine **automatically begins investigation** — the agent fetches logs (use Playwright browser automation to access build log pages if `gh` CLI can't fetch them), analyzes root cause, and reports findings. Provide a concrete diagnosis — not investigation steps. Always include a specific actionable recommendation in `data.suggested_fix`. **Do NOT make any code changes, edit files, or apply fixes during investigation** — the user decides what to do after reviewing your analysis.
+- **CI failure investigation** — when CI fails, the state machine **automatically begins investigation** — the agent fetches logs (use Playwright browser automation to access build log pages if `gh` CLI can't fetch them), analyzes root cause, and reports findings. Provide a concrete diagnosis — not investigation steps. Always include a specific actionable recommendation in `data.suggested_fix`. **Do NOT make any code changes, edit files, or apply fixes during investigation** — the user (or auto mode) decides what to do after reviewing your analysis.
 - **Comment explanation** — when a review comment is detected, the **server explains and recommends via sampling** — it gathers code context and analyzes the comment. The agent is only involved if the user chooses "Apply the recommendation" (to make code changes).
 - **Reply composition** — after the agent finishes addressing a comment: if the agent does **not** provide `data.reply_text`, the **server composes the reply via sampling** with professional tone and commit linking; if the agent **does** provide `data.reply_text`, that text is used as the reply and the server posts it. If sampling can't produce a usable reply, the server returns a `compose_reply` task instead: compose the reply yourself and send it in `data.reply_text` with the event named in the task instructions.
 - **NEVER use `/azp run` or `/azp rerun` comments** to trigger CI reruns. These PR comments are not reliable, may trigger unintended pipelines, and bypass the state machine's deferred rerun logic. Always use the Playwright browser automation (via `rerun_via_browser` task) or the state machine's built-in mechanisms to rerun failed jobs.

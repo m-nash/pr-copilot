@@ -57,6 +57,16 @@ public class PrStatusFetcherTests : IDisposable
     }
 
     [Fact]
+    public async Task FetchUnresolvedCommentsAsync_ReadsAuthorAssociation()
+    {
+        _gh.RespondToPages("graphql", ReviewThreadPage("open-thread", isResolved: false, hasNextPage: false));
+
+        var comment = Assert.Single(await PrStatusFetcher.FetchUnresolvedCommentsAsync("owner", "repo", 42, "author"));
+
+        Assert.Equal("MEMBER", comment.AuthorAssociation);
+    }
+
+    [Fact]
     public async Task FetchCheckRunsAsync_CountsFailedCheckRunBeyondFirstPage()
     {
         _gh.RespondToPages("repos/owner/repo/commits/head-sha/check-runs",
@@ -103,7 +113,7 @@ public class PrStatusFetcherTests : IDisposable
                                 comments = new
                                 {
                                     totalCount = 1,
-                                    nodes = new[] { new { author = new { login = "reviewer" }, body = "Please fix", url = "https://github.com/owner/repo/pull/42" } }
+                                    nodes = new[] { new { author = new { login = "reviewer" }, authorAssociation = "MEMBER", body = "Please fix", url = "https://github.com/owner/repo/pull/42" } }
                                 }
                             }
                         }

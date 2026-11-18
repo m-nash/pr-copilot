@@ -14,5 +14,8 @@ public enum CommentFlowState
     ExplainAllIterating,
     PickComment,
     PickRemaining,
-    WaitingForManualHandling
+    WaitingForManualHandling,
+
+    /// <summary>Auto mode: the agent is handling a batch of comments and will report comments_processed.</summary>
+    AutoAddressing
 }

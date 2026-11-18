@@ -15,6 +15,9 @@ internal enum TerminalStateColor
 
 internal static class TerminalStatePresentation
 {
+    /// <summary>Auto mode is working on a terminal state; the user does not need to act.</summary>
+    public const string AutoWorkingState = "auto_working";
+
     public static string GetViewerState(TerminalStateType? state) => state switch
     {
         TerminalStateType.NewComment => "new_comment",
@@ -35,6 +38,7 @@ internal static class TerminalStatePresentation
         "unresolved_comments" or "new_comment" => "💬",
         "merge_conflict" => "⚠️",
         "stopped" => "⏹️",
+        AutoWorkingState => "🤖",
         _ => "⚡"
     };
 
@@ -42,7 +46,7 @@ internal static class TerminalStatePresentation
     {
         "approved" or "approved_and_ci_green" or "ci_passed_comments_pending" => TerminalStateColor.Success,
         "ci_failure" or "merge_conflict" => TerminalStateColor.Error,
-        "unresolved_comments" or "new_comment" => TerminalStateColor.Comment,
+        "unresolved_comments" or "new_comment" or AutoWorkingState => TerminalStateColor.Comment,
         "stopped" => TerminalStateColor.Stopped,
         _ => TerminalStateColor.Warning
     };

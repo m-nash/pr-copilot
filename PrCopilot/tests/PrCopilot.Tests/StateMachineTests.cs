@@ -1,5 +1,6 @@
 // Licensed under the MIT License.
 
+using System.Text.Json;
 using PrCopilot.StateMachine;
 
 namespace PrCopilot.Tests;
@@ -20,6 +21,7 @@ public class StateMachineTests
     {
         Id = id,
         Author = author,
+        AuthorAssociation = "MEMBER",
         FilePath = file,
         Line = 10,
         Body = "Please fix this",
@@ -1863,7 +1865,7 @@ public class StateMachineTests
     }
 
     [Fact]
-    public void ExplainFlow_AfterExplainTaskComplete_OnlyTwoChoices()
+    public void ExplainFlow_AfterExplainTaskComplete_OffersApplyHandleOrAutoMode()
     {
         var state = CreateState();
         state.CurrentState = MonitorStateId.AwaitingUser;
@@ -1874,8 +1876,7 @@ public class StateMachineTests
         MonitorTransitions.ProcessEvent(state, "user_chose", "explain", null);
         var postExplainAction = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
 
-        Assert.Equal(2, postExplainAction.Choices!.Count);
-        Assert.DoesNotContain("Explain and suggest what to do", postExplainAction.Choices!);
+        Assert.Equal(["Apply the recommendation", "I'll handle it myself", "Switch to auto mode"], postExplainAction.Choices!);
     }
 
     [Fact]
@@ -3282,6 +3283,348 @@ public class StateMachineTests
         Assert.Equal("hello world foo", MonitorTransitions.NormalizeWhitespace("hello\n  world\r\n  foo"));
         Assert.Equal("single line", MonitorTransitions.NormalizeWhitespace("  single   line  "));
         Assert.Equal("", MonitorTransitions.NormalizeWhitespace(""));
+    }
+
+    #endregion
+
+    #region Auto Mode
+
+    private static MonitorState CreateAutoState(params CommentInfo[] comments)
+    {
+        var state = CreateState();
+        state.AutoMode = true;
+        state.UnresolvedComments = [.. comments];
+        return state;
+    }
+
+    private static string Results(params object[] results) => JsonSerializer.Serialize(new { results });
+
+    private static MonitorAction InvestigateAutomatically(MonitorState state, string issueType)
+    {
+        SetChecksFailed(state);
+        Assert.Equal("investigate_ci_failure", MonitorTransitions.BuildTerminalAction(state, TerminalStateType.CiFailure).Task);
+        state.IssueType = issueType;
+        state.SuggestedFix = "Add the missing null check";
+        return MonitorTransitions.ProcessEvent(state, "investigation_complete", null, null);
+    }
+
+    [Fact]
+    public void AutoMode_NewComments_AssignsEveryCommentToOneAgentTask()
+    {
+        var state = CreateAutoState(MakeComment("c1"), MakeComment("c2", "reviewer2"));
+
+        var action = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.NewComment);
+
+        Assert.Equal("execute", action.Action);
+        Assert.Equal("auto_address_comments", action.Task);
+        Assert.Contains("event='comments_processed'", action.Instructions);
+        Assert.Equal(CommentFlowState.AutoAddressing, state.CommentFlow);
+        Assert.Equal(["c1", "c2"], state.AutoBatch.Select(c => c.Id));
+    }
+
+    [Fact]
+    public void AutoMode_CommentsProcessed_HandsUnsupportedClaimsToUser()
+    {
+        var state = CreateAutoState(MakeComment("fixed"), MakeComment("fix-no-evidence"), MakeComment("fix-no-commit"),
+            MakeComment("pushback-no-evidence"), MakeComment("silent"));
+        MonitorTransitions.BuildTerminalAction(state, TerminalStateType.NewComment);
+
+        var action = MonitorTransitions.ProcessEvent(state, "comments_processed", null, Results(
+            new { comment_id = "fixed", decision = "fixed", reply_text = "Fixed", evidence = "NullGuardTests failed before the fix", commit = "abc1234" },
+            new { comment_id = "fix-no-evidence", decision = "fixed", reply_text = "Fixed", commit = "abc1234" },
+            new { comment_id = "fix-no-commit", decision = "fixed", reply_text = "Fixed", evidence = "NullGuardTests failed before the fix" },
+            new { comment_id = "pushback-no-evidence", decision = "pushed_back", reply_text = "This is fine as is" },
+            new { comment_id = 7, decision = "fixed" },
+            new { comment_id = "outside-batch", decision = "fixed", reply_text = "Fixed", evidence = "NullGuardTests", commit = "abc1234" }));
+
+        Assert.Equal("auto_execute", action.Action);
+        Assert.Equal("apply_auto_results", action.Task);
+        var results = state.PendingAutoResults.ToDictionary(r => r.CommentId);
+        Assert.Equal(5, results.Count);
+        Assert.Equal(AutoCommentResult.Fixed, results["fixed"].Decision);
+        Assert.All(results.Values.Where(r => r.CommentId != "fixed"), r => Assert.Equal(AutoCommentResult.NeedsUser, r.Decision));
+        Assert.Contains("a fix without evidence", results["fix-no-evidence"].Reason);
+        Assert.Contains("a fix without the SHA", results["fix-no-commit"].Reason);
+        Assert.Contains("a pushback without evidence", results["pushback-no-evidence"].Reason);
+        Assert.Contains("no result", results["silent"].Reason);
+    }
+
+    [Fact]
+    public void AutoMode_AfterServerApplies_PromptsWithReasonsOnlyForUnhandledComments()
+    {
+        var handled = MakeComment("handled");
+        var state = CreateAutoState(handled, MakeComment("d1"), MakeComment("d2", "reviewer2"));
+        MonitorTransitions.BuildTerminalAction(state, TerminalStateType.NewComment);
+        MonitorTransitions.ProcessEvent(state, "comments_processed", null, Results(
+            new { comment_id = "handled", decision = "fixed", reply_text = "Fixed", evidence = "NullGuardTests failed before the fix", commit = "abc1234" },
+            new { comment_id = "d1", decision = "needs_user", reason = "renaming the public API is the owner's call" }));
+        handled.IsAddressed = true;
+
+        var prompt = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        Assert.Equal("ask_user", prompt.Action);
+        Assert.Contains("renaming the public API is the owner's call", prompt.Question);
+        Assert.Contains("reported no result", prompt.Question);
+        Assert.Equal(["d1", "d2"], state.UnresolvedComments.Select(c => c.Id));
+        Assert.DoesNotContain(MonitorTransitions.SwitchToAutoModeChoice, prompt.Choices!);
+    }
+
+    [Fact]
+    public void AutoMode_DeferredThread_StaysWithUserUntilItChanges()
+    {
+        var state = CreateAutoState(MakeComment("c1"));
+        MonitorTransitions.BuildTerminalAction(state, TerminalStateType.NewComment);
+        MonitorTransitions.ProcessEvent(state, "comments_processed", null,
+            Results(new { comment_id = "c1", decision = "needs_user", reason = "needs the owner's call" }));
+        MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        state.CommentFlow = CommentFlowState.None;
+        state.UnresolvedComments = [MakeComment("c1"), MakeComment("c2")];
+        var unchanged = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.NewComment);
+
+        Assert.Equal("auto_address_comments", unchanged.Task);
+        Assert.Equal(["c2"], state.AutoBatch.Select(c => c.Id));
+
+        var newReply = MakeComment("c1");
+        newReply.ReplyCount = 1;
+        state.CommentFlow = CommentFlowState.None;
+        state.UnresolvedComments = [newReply];
+        var changed = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.NewComment);
+
+        Assert.Equal("auto_address_comments", changed.Task);
+        Assert.Equal(["c1"], state.AutoBatch.Select(c => c.Id));
+    }
+
+    [Theory]
+    [InlineData("NONE")]
+    [InlineData("CONTRIBUTOR")]
+    public void AutoMode_CommentsFromOutsideTheRepository_GoToUser(string association)
+    {
+        var outsider = MakeComment("outsider", "stranger");
+        outsider.AuthorAssociation = association;
+        var hijacked = MakeComment("hijacked");
+        hijacked.ReplyCount = 1;
+        hijacked.LastReplyAuthor = "stranger";
+        hijacked.LastReplyAuthorAssociation = association;
+        var copilot = MakeComment("copilot", "copilot-pull-request-reviewer[bot]");
+        copilot.AuthorAssociation = "NONE";
+        var state = CreateAutoState(outsider, hijacked, copilot);
+
+        MonitorTransitions.BuildTerminalAction(state, TerminalStateType.NewComment);
+
+        Assert.Equal(["copilot"], state.AutoBatch.Select(c => c.Id));
+        Assert.Contains("stranger is not a collaborator", state.AutoDeferred["outsider"].Reason);
+        Assert.Contains("latest reply is from stranger", state.AutoDeferred["hijacked"].Reason);
+    }
+
+    [Fact]
+    public void AutoMode_ThreadAtReplyCap_GoesToUserWithReason()
+    {
+        var state = CreateAutoState(MakeComment("c1"));
+        state.AutoReplyCounts["c1"] = MonitorTransitions.MaxAutoRepliesPerThread;
+
+        var explain = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.NewComment);
+        var prompt = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        Assert.Equal("explain_comment", explain.Task);
+        Assert.Equal("ask_user", prompt.Action);
+        Assert.Contains($"already replied {MonitorTransitions.MaxAutoRepliesPerThread} times", prompt.Question);
+    }
+
+    [Fact]
+    public void AutoMode_SwitchedOnDuringInteractiveFlow_TakesOverRemainingComments()
+    {
+        var state = CreateState();
+        state.CurrentState = MonitorStateId.AwaitingUser;
+        state.CommentFlow = CommentFlowState.AddressAllIterating;
+        state.UnresolvedComments = [MakeComment("c1"), MakeComment("c2")];
+        MonitorTransitions.ProcessEvent(state, "user_chose", "address", null);
+        state.AutoMode = true;
+        state.PendingReplyText = "Fixed";
+        MonitorTransitions.ProcessEvent(state, "comment_addressed", null, null);
+
+        var action = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        Assert.Equal("auto_address_comments", action.Task);
+        Assert.Equal(["c2"], state.AutoBatch.Select(c => c.Id));
+    }
+
+    [Fact]
+    public void SwitchToAutoModeChoice_HandsPromptedCommentsToAutoMode()
+    {
+        var state = CreateState();
+        state.UnresolvedComments = [MakeComment("c1"), MakeComment("c2")];
+        var prompt = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.NewComment);
+        Assert.Contains(MonitorTransitions.SwitchToAutoModeChoice, prompt.Choices!);
+
+        var action = MonitorTransitions.ProcessEvent(state, "user_chose", "auto_mode", null);
+
+        Assert.True(state.AutoMode);
+        Assert.Equal("auto_address_comments", action.Task);
+        Assert.Equal(["c1", "c2"], state.AutoBatch.Select(c => c.Id));
+    }
+
+    [Theory]
+    [InlineData("code", "apply_fix")]
+    [InlineData("unknown", "rerun_via_browser")]
+    [InlineData("duplicate_artifact", "run_new_build")]
+    public void AutoMode_CiFailure_ActsOncePerCommitThenEscalates(string issueType, string expectedTask)
+    {
+        var state = CreateState();
+        state.AutoMode = true;
+
+        var first = InvestigateAutomatically(state, issueType);
+        var second = InvestigateAutomatically(state, issueType);
+
+        Assert.Equal(expectedTask, first.Task);
+        Assert.Equal("ask_user", second.Action);
+        Assert.StartsWith("🤖 Auto mode needs you", second.Question);
+        Assert.Equal(CiFailureFlowState.InvestigationResults, state.CiFailureFlow);
+    }
+
+    [Fact]
+    public void AutoMode_CiFixesAcrossCommits_StopAtStreakUntilCiGoesGreen()
+    {
+        var state = CreateState();
+        state.AutoMode = true;
+        for (var i = 0; i < MonitorTransitions.MaxAutoPushStreak; i++)
+        {
+            state.HeadSha = $"sha{i}";
+            var fix = InvestigateAutomatically(state, "code");
+            Assert.Equal("apply_fix", fix.Task);
+            Assert.DoesNotContain("ask_user", fix.Instructions);
+            MonitorTransitions.ProcessEvent(state, "push_completed", null, null);
+        }
+
+        state.HeadSha = "sha-capped";
+        Assert.Equal("ask_user", InvestigateAutomatically(state, "code").Action);
+
+        state.HeadSha = "sha-green";
+        SetChecksAllGreen(state);
+        Assert.Null(MonitorTransitions.DetectTerminalState(state, [], false));
+        Assert.Equal("apply_fix", InvestigateAutomatically(state, "code").Task);
+    }
+
+    [Fact]
+    public void AutoMode_NeedsUserDuringFix_ShowsCiChoicesWithReason()
+    {
+        var state = CreateState();
+        state.AutoMode = true;
+        InvestigateAutomatically(state, "code");
+        state.AutoEscalationReason = "the fix breaks an unrelated test";
+
+        var prompt = MonitorTransitions.ProcessEvent(state, "needs_user", null, null);
+
+        Assert.Equal("ask_user", prompt.Action);
+        Assert.StartsWith("🤖 Auto mode needs you: the fix breaks an unrelated test", prompt.Question);
+        Assert.Contains("Apply the recommendation", prompt.Choices!);
+        Assert.Equal("apply_fix", MonitorTransitions.ProcessEvent(state, "user_chose", "apply_fix", null).Task);
+    }
+
+    [Fact]
+    public void AutoMode_MergeConflict_MergesTargetOncePerCommitThenEscalates()
+    {
+        var state = CreateState();
+        state.AutoMode = true;
+        state.BaseBranch = "main";
+
+        var first = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.MergeConflict);
+        var second = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.MergeConflict);
+
+        Assert.Equal("merge_target_branch", first.Task);
+        Assert.DoesNotContain("Obtain approval", first.Instructions);
+        Assert.Equal("ask_user", second.Action);
+        Assert.Contains("Resolve the conflict (merge target branch)", second.Choices!);
+    }
+
+    [Fact]
+    public void AutoMode_CancelledChecks_StartNewBuildOncePerCommit()
+    {
+        var state = CreateState();
+        state.AutoMode = true;
+        state.Checks = new CheckRunCounts { Passed = 3, Cancelled = 1, Total = 4 };
+
+        var first = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.CiCancelled);
+        var second = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.CiCancelled);
+
+        Assert.Equal("run_new_build", first.Task);
+        Assert.Equal("ask_user", second.Action);
+        Assert.Contains("Re-run cancelled jobs", second.Choices!);
+    }
+
+    [Fact]
+    public void AutoMode_ApprovedAndGreen_MergesOnlyAfterRepliesAreAnswered()
+    {
+        var state = CreateState();
+        state.AutoMode = true;
+        SetChecksAllGreen(state);
+        state.Approvals = [new ReviewInfo { Author = "approver", State = "APPROVED" }];
+        state.WaitingForReplyComments = [MakeComment("waiting")];
+
+        Assert.Null(MonitorTransitions.DetectTerminalState(state, [], false));
+
+        state.WaitingForReplyComments = [];
+        var terminal = MonitorTransitions.DetectTerminalState(state, [], false);
+        var action = MonitorTransitions.BuildTerminalAction(state, terminal!.Value);
+
+        Assert.Equal("auto_execute", action.Action);
+        Assert.Equal("merge_pr", action.Task);
+    }
+
+    [Fact]
+    public void AutoMode_MergeBlockedByPolicy_RetriesOnceApprovalsOrChecksChange()
+    {
+        var state = CreateState();
+        state.AutoMode = true;
+        SetChecksAllGreen(state);
+        state.Approvals = [new ReviewInfo { Author = "approver", State = "APPROVED" }];
+
+        var blocked = MonitorTransitions.BuildAutoMergeBlockedAction(state, "the base branch policy prohibits the merge");
+
+        Assert.Equal("polling", blocked.Action);
+        Assert.Null(MonitorTransitions.DetectTerminalState(state, [], false));
+        state.Approvals = [.. state.Approvals, new ReviewInfo { Author = "second", State = "APPROVED" }];
+        Assert.Equal(TerminalStateType.ApprovedCiGreen, MonitorTransitions.DetectTerminalState(state, [], false));
+    }
+
+    [Fact]
+    public void AutoMode_StaleApproval_ReRequestsReviewOnce()
+    {
+        var state = CreateState();
+        state.AutoMode = true;
+        SetChecksAllGreen(state);
+        state.StaleApprovals = [new ReviewInfo { Author = "approver", State = "APPROVED", IsStale = true }];
+
+        var action = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.StaleApprovalCiGreen);
+        var next = MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        Assert.Equal("re_request_stale_reviews", action.Task);
+        Assert.Equal("polling", next.Action);
+        Assert.Null(MonitorTransitions.DetectTerminalState(state, [], false));
+    }
+
+    [Theory]
+    [InlineData("abc1234", "abc1234")]
+    [InlineData("Azure/azure-sdk-for-net@ABC1234DEF", "abc1234def")]
+    [InlineData("https://github.com/o/r/commit/abc1234def5678", "abc1234def5678")]
+    [InlineData("abc12", null)]
+    [InlineData("", null)]
+    public void AutoCommentResult_NormalizeCommit_AcceptsCommonReferences(string input, string? expected)
+    {
+        Assert.Equal(expected, AutoCommentResult.NormalizeCommit(input));
+    }
+
+    [Theory]
+    [InlineData("https://github.com/other/lib/issues/12", true, "other", "lib", 12)]
+    [InlineData("other/lib#12", true, "other", "lib", 12)]
+    [InlineData("#12", true, "test-owner", "test-repo", 12)]
+    [InlineData("https://github.com/o/r/pull/12", false, "test-owner", "test-repo", 0)]
+    public void AutoCommentResult_TryParseIssueReference_ResolvesRepository(
+        string reference, bool parsed, string owner, string repo, int number)
+    {
+        Assert.Equal(parsed, AutoCommentResult.TryParseIssueReference(reference, "test-owner", "test-repo",
+            out var actualOwner, out var actualRepo, out var actualNumber));
+        Assert.Equal((owner, repo, number), (actualOwner, actualRepo, actualNumber));
     }
 
     #endregion

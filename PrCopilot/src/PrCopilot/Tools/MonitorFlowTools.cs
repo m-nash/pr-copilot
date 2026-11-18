@@ -5,6 +5,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
@@ -368,16 +369,71 @@ public class MonitorFlowTools
         }
     }
 
+    private const string ModeDescription =
+        "'auto' handles comments, CI failures, merge conflicts, and merging without prompting, under the user's standing approval; " +
+        "'interactive' prompts for each decision. Omit to keep the current mode; new monitors start interactive.";
+
+    private static bool TryParseMode(string? mode, out bool? autoMode)
+    {
+        switch (mode?.Trim().ToLowerInvariant())
+        {
+            case null or "":
+                autoMode = null;
+                return true;
+            case "auto":
+                autoMode = true;
+                return true;
+            case "interactive":
+                autoMode = false;
+                return true;
+            default:
+                autoMode = null;
+                return false;
+        }
+    }
+
+    private static string InvalidModeResponse(string? mode) => JsonSerializer.Serialize(new
+    {
+        action = "error",
+        message = $"Unknown mode '{mode}'. Use 'auto' or 'interactive', or omit mode to keep the current one."
+    }, _jsonOptions);
+
+    /// <summary>
+    /// Apply the caller's mode after the shared initialization, so every concurrent start gets the mode it asked for,
+    /// and report the resulting mode.
+    /// </summary>
+    private static string ApplyMode(string monitorId, bool? autoMode, string startResult)
+    {
+        if (!_sessions.TryGetValue(monitorId, out var session))
+            return startResult;
+
+        var state = session.State;
+        if (autoMode is { } auto && state.AutoMode != auto)
+        {
+            state.AutoMode = auto;
+            // A prompt that is already waiting is handed to auto mode when the agent reconnects.
+            state.AutoModeSwitchPending = auto && state.PendingAction?.Action == "ask_user";
+            DebugLogger.Log("PrMonitorStart", $"{monitorId}: switched to {(auto ? "auto" : "interactive")} mode");
+        }
+
+        if (JsonNode.Parse(startResult) is not JsonObject response)
+            return startResult;
+        response["mode"] = state.AutoMode ? "auto" : "interactive";
+        return response.ToJsonString(_jsonOptions);
+    }
+
     [McpServerTool(Name = "pr_monitor_start"), Description("Initialize PR monitoring. Fetches PR data, sets up log file, returns monitor_id. Call pr_monitor_next_step next.")]
-    public Task<string> PrMonitorStart(
+    public async Task<string> PrMonitorStart(
         [Description("GitHub repository owner")] string owner,
         [Description("GitHub repository name")] string repo,
         [Description("Pull request number")] int prNumber,
         [Description("Session folder path for log/trigger/debug files")] string sessionFolder,
+        [Description(ModeDescription)] string? mode = null,
         CancellationToken cancellationToken = default)
     {
-        if (cancellationToken.IsCancellationRequested)
-            return Task.FromCanceled<string>(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!TryParseMode(mode, out var autoMode))
+            return InvalidModeResponse(mode);
 
         var monitorId = $"pr-{owner}-{repo}-{prNumber}";
         var initialization = _initializations.GetOrAdd(monitorId, key => new Lazy<Task<string>>(() =>
@@ -388,7 +444,8 @@ public class MonitorFlowTools
                 TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
             return task;
         }));
-        return initialization.Value.WaitAsync(cancellationToken);
+        var result = await initialization.Value.WaitAsync(cancellationToken);
+        return ApplyMode(monitorId, autoMode, result);
 
         async Task<string> InitializeAsync()
         {
@@ -576,9 +633,12 @@ public class MonitorFlowTools
     public async Task<string> PrMonitorStartAll(
         [Description("Session folder path for log/trigger/debug files")] string sessionFolder,
         [Description("GitHub username. If not provided, auto-detected from gh CLI auth.")] string? githubUser = null,
+        [Description(ModeDescription)] string? mode = null,
         CancellationToken cancellationToken = default)
     {
-        DebugLogger.Log("PrMonitorStartAll", $"Called: user={githubUser ?? "(auto-detect)"}, sessionFolder={sessionFolder}");
+        DebugLogger.Log("PrMonitorStartAll", $"Called: user={githubUser ?? "(auto-detect)"}, sessionFolder={sessionFolder}, mode={mode ?? "(keep)"}");
+        if (!TryParseMode(mode, out _))
+            return InvalidModeResponse(mode);
 
         // Auto-detect user if not provided
         if (string.IsNullOrEmpty(githubUser))
@@ -620,7 +680,7 @@ public class MonitorFlowTools
         {
             try
             {
-                await PrMonitorStart(pr.Owner, pr.Repo, pr.Number, sessionFolder, cancellationToken);
+                await PrMonitorStart(pr.Owner, pr.Repo, pr.Number, sessionFolder, mode, cancellationToken);
                 var monitorId = $"pr-{pr.Owner}-{pr.Repo}-{pr.Number}";
                 monitorIds.Add(monitorId);
                 results.Add(new
@@ -668,7 +728,7 @@ public class MonitorFlowTools
     [McpServerTool(Name = "pr_monitor_next_step"), Description("The one tool the agent calls in a loop. Reports the result of the last action and gets the next instruction. May block for minutes/hours when in polling mode (zero tokens burned), or return instantly during active flows.")]
     public async Task<string> PrMonitorNextStep(
         [Description("Monitor ID from pr_monitor_start")] string monitorId,
-        [Description("Event: ready (start/reconnect without completing pending work), user_chose, comment_addressed, comment_replied, investigation_complete, push_completed, task_complete")] string @event,
+        [Description("Event: ready (start/reconnect without completing pending work), user_chose, comment_addressed, comment_replied, comments_processed (auto mode), investigation_complete, push_completed, task_complete, needs_user (auto mode)")] string @event,
         [Description("User's choice (for user_chose events)")] string? choice = null,
         [Description("Event data as JSON string (findings, suggested_fix, etc.)")] string? data = null,
         McpServer server = null!,
@@ -833,6 +893,18 @@ public class MonitorFlowTools
                     if (action.Action != "merged" && action.MonitorId != null &&
                         sessions.TryGetValue(action.MonitorId, out var stoppedMember) && stoppedMember.StopToken.IsCancellationRequested)
                         continue;
+
+                    // Auto-mode PRs produce server-side actions directly from polling; run them here like the single-PR loop does.
+                    if (action.Action is "auto_execute" or "polling" && action.MonitorId != null &&
+                        sessions.TryGetValue(action.MonitorId, out var autoMember))
+                    {
+                        action = await RunMemberAutoActionsAsync(action.MonitorId, autoMember, action);
+                        if (action.Action == "polling")
+                        {
+                            await WriteLogEntryAsync(autoMember.State, action);
+                            continue;
+                        }
+                    }
 
                     // Elicit directly for multi-PR terminal states
                     if (action.Action == "ask_user" && action.Choices?.Count > 0)
@@ -1037,6 +1109,8 @@ public class MonitorFlowTools
                     }
                     if (root.TryGetProperty("recommendation", out var recommendation))
                         state.LastRecommendation = recommendation.GetString();
+                    if (@event == "needs_user" && root.TryGetProperty("reason", out var reason))
+                        state.AutoEscalationReason = reason.GetString();
                 }
                 catch { /* ignore parse errors in data */ }
             }
@@ -1668,6 +1742,29 @@ public class MonitorFlowTools
     }
 
     /// <summary>
+    /// Run a multi-PR member's server-side auto actions until one needs the agent or the user.
+    /// A member that merged is removed from monitoring, as in the combined poll loop.
+    /// </summary>
+    private static async Task<MonitorAction> RunMemberAutoActionsAsync(string monitorId, MonitorSession member, MonitorAction action)
+    {
+        while (action.Action == "auto_execute")
+        {
+            action = await ExecuteAutoAction(member.State, action);
+            member.State.RememberAction(action);
+        }
+
+        if (action.Action == "merged" && _sessions.TryRemove(new KeyValuePair<string, MonitorSession>(monitorId, member)))
+        {
+            NotifyMembershipChanged();
+            lock (_multiMonitorLock) { _multiMonitorIds.Remove(monitorId); }
+            member.Dispose();
+        }
+
+        action.MonitorId = monitorId;
+        return action;
+    }
+
+    /// <summary>
     /// Execute a deterministic action in C# (no LLM needed) and return the next state machine action.
     /// </summary>
     private static async Task<MonitorAction> ExecuteAutoAction(MonitorState state, MonitorAction action)
@@ -1782,6 +1879,9 @@ public class MonitorFlowTools
                     {
                         // Detect branch policy failure — offer richer choices
                         var isBranchPolicy = output.Contains("policy prohibits") || output.Contains("not mergeable");
+                        if (state.AutoMode && isBranchPolicy)
+                            return MonitorTransitions.BuildAutoMergeBlockedAction(state, output);
+
                         state.CurrentState = MonitorStateId.AwaitingUser;
 
                         if (isBranchPolicy)
@@ -1882,6 +1982,20 @@ public class MonitorFlowTools
 
                     return new MonitorAction { Action = "polling", Message = $"New CI run triggered — {output}. Resuming monitoring." };
                 }
+            case "apply_auto_results":
+                {
+                    await AutoResultsApplier.ApplyAsync(state);
+                    return MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+                }
+            case "re_request_stale_reviews":
+                {
+                    foreach (var reviewer in state.PendingStaleApprovalNotifications)
+                    {
+                        var (success, output) = await GitHubCliExecutor.RequestReviewAsync(state.Owner, state.Repo, state.PrNumber, reviewer);
+                        DebugLogger.Log("AutoExec", $"re_request_stale_reviews {reviewer}: success={success}{(success ? "" : $", output={output}")}");
+                    }
+                    return MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+                }
             default:
                 DebugLogger.Error("AutoExec", $"Unknown auto_execute task: {action.Task}");
                 return MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
@@ -1898,11 +2012,19 @@ public class MonitorFlowTools
             return true;
 
         var replyText = state.PendingReplyText;
+        // Cleared before posting so a failed post can never leak this text into another thread.
+        state.PendingReplyText = null;
+        return await PostReplyAsync(state, comment, replyText);
+    }
 
+    /// <summary>
+    /// Post a reply to a review thread via the REST API, retrying transient failures. Returns true if posted.
+    /// </summary>
+    internal static async Task<bool> PostReplyAsync(MonitorState state, CommentInfo comment, string replyText)
+    {
         if (!comment.RestCommentId.HasValue)
         {
             DebugLogger.Error("AutoExec", $"Cannot post reply — no RestCommentId for thread {comment.Id}");
-            state.PendingReplyText = null;
             return false;
         }
 
@@ -1914,18 +2036,13 @@ public class MonitorFlowTools
             DebugLogger.Log("AutoExec", $"post_thread_reply {comment.Id} (REST ID {comment.RestCommentId.Value}): attempt={attempt}, success={success}");
 
             if (success)
-            {
-                state.PendingReplyText = null;
                 return true;
-            }
 
             DebugLogger.Error("AutoExec", $"Failed to post reply (attempt {attempt}/{maxRetries}): {output}");
             if (attempt < maxRetries)
                 await Task.Delay(TimeSpan.FromSeconds(2 * attempt));
         }
 
-        // All attempts failed; clear pending reply to avoid posting stale text to another thread
-        state.PendingReplyText = null;
         return false;
     }
 
@@ -2111,6 +2228,8 @@ public class MonitorFlowTools
             string? line = action.Action switch
             {
                 "ask_user" when action.Question != null => BuildTerminalLogLine(state, action),
+                "execute" when state.AutoMode && action.Message != null =>
+                    $"TERMINAL|{JsonSerializer.Serialize(new { state = TerminalStatePresentation.AutoWorkingState, description = action.Message }, _jsonOptions)}",
                 "stop" => $"STOPPED|{timestamp}|{action.Message}",
                 "merged" => $"STOPPED|{timestamp}|{action.Message}",
                 "polling" => $"RESUMING|{timestamp}|Resuming monitoring...",
