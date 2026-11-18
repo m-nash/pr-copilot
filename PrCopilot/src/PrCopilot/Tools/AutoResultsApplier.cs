@@ -32,13 +32,19 @@ internal static class AutoResultsApplier
                 continue;
             }
 
+            DebugLogger.Log("AutoMode", $"Posted {result.Decision} reply to {comment.Author} on {comment.FilePath}:{comment.Line} ({comment.Url})");
             state.AutoReplyCounts[comment.Id] = state.AutoReplyCounts.GetValueOrDefault(comment.Id) + 1;
             if (result.Decision is AutoCommentResult.Fixed or AutoCommentResult.FollowUp || PrStatusFetcher.IsBotReviewer(comment.Author))
             {
                 var (resolved, output) = await GitHubCliExecutor.ResolveThreadAsync(comment.Id);
                 if (!resolved)
                     DebugLogger.Error("AutoMode", $"Replied but could not resolve thread {comment.Id}: {output}");
-                comment.IsAddressed = true;
+
+                // Each poll retries resolving bot threads we replied to; nothing retries a human reviewer's thread.
+                if (resolved || PrStatusFetcher.IsBotReviewer(comment.Author))
+                    comment.IsAddressed = true;
+                else
+                    result.HandToUser("auto mode already posted its reply but could not resolve the thread, so resolve it on GitHub (no further reply is needed)");
             }
             else
             {
@@ -46,8 +52,6 @@ internal static class AutoResultsApplier
                 if (!state.WaitingForReplyComments.Any(c => c.Id == comment.Id))
                     state.WaitingForReplyComments.Add(comment);
             }
-
-            DebugLogger.Log("AutoMode", $"Posted {result.Decision} reply to {comment.Author} on {comment.FilePath}:{comment.Line} ({comment.Url})");
         }
 
         await ReRequestReviewsAsync(state, results);

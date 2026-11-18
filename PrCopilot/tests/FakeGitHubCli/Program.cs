@@ -95,6 +95,11 @@ if (!string.IsNullOrEmpty(resolveDirectory))
         if (File.Exists(Path.Combine(resolveDirectory, "release")))
             released.TrySetResult();
         await released.Task.WaitAsync(TimeSpan.FromSeconds(20));
+        if (Environment.GetEnvironmentVariable("PR_COPILOT_TEST_GH_RESOLVE_FAIL") == "1")
+        {
+            Console.Error.WriteLine("fixture resolve failure");
+            return 1;
+        }
         Console.Write("""{"data":{"resolveReviewThread":{"thread":{"isResolved":true}}}}""");
         return 0;
     }

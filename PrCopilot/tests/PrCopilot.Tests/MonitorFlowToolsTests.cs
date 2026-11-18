@@ -1117,6 +1117,34 @@ public class MonitorFlowToolsTests : IDisposable
     }
 
     [Fact]
+    public async Task AutoResultsApplier_ResolveFails_HandsOnlyHumanThreadsToUser()
+    {
+        _gh.PauseResolveRequests();
+        _gh.ReleaseResolveRequests();
+        _gh.FailResolveRequests();
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        _gh.RespondToPages($"repos/{owner}/repo/pulls/42/commits", """[{"sha":"abc1234def5678"}]""");
+        var state = CreateAutoCommentState(owner, "human", "bot");
+        state.UnresolvedComments[1].Author = "copilot-pull-request-reviewer[bot]";
+        MonitorTransitions.BuildTerminalAction(state, TerminalStateType.NewComment);
+        MonitorTransitions.ProcessEvent(state, "comments_processed", null, JsonSerializer.Serialize(new
+        {
+            results = new object[]
+            {
+                new { comment_id = "human", decision = "fixed", reply_text = "Added the guard", evidence = "GuardTests.RejectsNull failed before the fix", commit = "abc1234" },
+                new { comment_id = "bot", decision = "fixed", reply_text = "Added the check", evidence = "CheckTests failed before the fix", commit = "abc1234" }
+            }
+        }));
+
+        await AutoResultsApplier.ApplyAsync(state, TimeSpan.Zero);
+        MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        Assert.Equal(2, _gh.ReadRequests().Count(r => r.Length > 1 && r[1].EndsWith("/replies", StringComparison.Ordinal)));
+        Assert.Contains("already posted", Assert.Contains("human", state.AutoDeferred).Reason);
+        Assert.DoesNotContain("bot", state.AutoDeferred.Keys);
+    }
+
+    [Fact]
     public async Task PrMonitorStart_InteractiveDuringAutoTask_PostsNothingWithoutConfirmation()
     {
         _gh.PauseResolveRequests();
