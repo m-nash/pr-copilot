@@ -1872,11 +1872,14 @@ public class MonitorFlowTools
                 }
             case "merge_pr":
                 {
-                    var (success, output) = await GitHubCliExecutor.MergePrAsync(state.Owner, state.Repo, state.PrNumber);
+                    var (success, output) = await GitHubCliExecutor.MergePrAsync(state.Owner, state.Repo, state.PrNumber, state.HeadSha);
                     DebugLogger.Log("AutoExec", $"merge_pr #{state.PrNumber}: success={success}");
 
                     if (!success)
                     {
+                        if (await FetchMovedHeadAsync(state) is { } movedHead)
+                            return MonitorTransitions.BuildMergeHeadMovedAction(state, movedHead);
+
                         // Detect branch policy failure — offer richer choices
                         var isBranchPolicy = output.Contains("policy prohibits") || output.Contains("not mergeable");
                         if (state.AutoMode && isBranchPolicy)
@@ -1915,11 +1918,14 @@ public class MonitorFlowTools
                 }
             case "merge_pr_admin":
                 {
-                    var (success, output) = await GitHubCliExecutor.MergePrAdminAsync(state.Owner, state.Repo, state.PrNumber);
+                    var (success, output) = await GitHubCliExecutor.MergePrAdminAsync(state.Owner, state.Repo, state.PrNumber, state.HeadSha);
                     DebugLogger.Log("AutoExec", $"merge_pr_admin #{state.PrNumber}: success={success}");
 
                     if (!success)
                     {
+                        if (await FetchMovedHeadAsync(state) is { } movedHead)
+                            return MonitorTransitions.BuildMergeHeadMovedAction(state, movedHead);
+
                         state.CurrentState = MonitorStateId.AwaitingUser;
                         return new MonitorAction
                         {
@@ -1999,6 +2005,26 @@ public class MonitorFlowTools
             default:
                 DebugLogger.Error("AutoExec", $"Unknown auto_execute task: {action.Task}");
                 return MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+        }
+    }
+
+    /// <summary>
+    /// After a failed merge, returns the PR's current head if it moved past the evaluated commit, so the new commit is
+    /// evaluated instead of the failure being reported. Returns null when the head is unchanged or can't be read.
+    /// </summary>
+    private static async Task<string?> FetchMovedHeadAsync(MonitorState state)
+    {
+        try
+        {
+            var current = (await PrStatusFetcher.FetchPrInfoAsync(state.Owner, state.Repo, state.PrNumber)).HeadSha;
+            return string.IsNullOrEmpty(current) || string.Equals(current, state.HeadSha, StringComparison.OrdinalIgnoreCase)
+                ? null
+                : current;
+        }
+        catch (Exception ex)
+        {
+            DebugLogger.Log("AutoExec", $"Could not read the PR head after a failed merge: {ex.Message}");
+            return null;
         }
     }
 

@@ -1626,6 +1626,13 @@ public static class MonitorTransitions
     private static string MergeReadiness(MonitorState state) =>
         $"{state.HeadSha}|{state.Approvals.Count}|{state.Checks.Passed}/{state.Checks.Pending}/{state.Checks.Total}";
 
+    /// <summary>The PR head moved after its checks and approvals were evaluated, so poll and evaluate the new commit before merging.</summary>
+    internal static MonitorAction BuildMergeHeadMovedAction(MonitorState state, string currentHeadSha)
+    {
+        DebugLogger.Log("StateMachine", $"PR head moved from {state.HeadSha} to {currentHeadSha} before the merge; re-evaluating");
+        return TransitionToPolling(state);
+    }
+
     #endregion
 
     private static MonitorAction BuildMergeConflictAction(MonitorState state, string timestamp)

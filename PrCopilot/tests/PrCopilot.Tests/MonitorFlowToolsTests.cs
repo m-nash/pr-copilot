@@ -1134,6 +1134,43 @@ public class MonitorFlowToolsTests : IDisposable
         Assert.Equal(result.ReplyText, AutoResultsApplier.BuildReply(state, result));
     }
 
+    [Fact]
+    public async Task MergePr_RequiresTheEvaluatedHeadCommit()
+    {
+        _gh.PauseMergeRequests();
+        _gh.ReleaseMergeRequests();
+        var state = new MonitorState { Owner = "owner", Repo = "repo", PrNumber = 42, SessionFolder = _gh.DirectoryPath, HeadSha = "evaluated-sha" };
+
+        var action = await ExecuteAutoActionAsync(state, new MonitorAction { Action = "auto_execute", Task = "merge_pr" });
+
+        Assert.Equal("merged", action.Action);
+        Assert.Contains(_gh.ReadRequests(), request =>
+            request is ["pr", "merge", "42", "--squash", "--repo", "owner/repo", "--match-head-commit", "evaluated-sha"]);
+    }
+
+    [Theory]
+    [InlineData("merge_pr")]
+    [InlineData("merge_pr_admin")]
+    public async Task MergePr_HeadMovedSinceEvaluation_RepollsInsteadOfPrompting(string task)
+    {
+        _gh.PauseStartupRequests();
+        _gh.CompleteStartupSuccessfully();
+        _gh.ReleaseStartupRequests();
+        _gh.RespondToPrInfo("""{"title":"Fixture PR","body":"","sha":"newer-sha","head_branch":"fixture","base_branch":"main","url":"https://github.com/owner/repo/pull/42","author":"fixture-author","mergeable":true,"mergeable_state":"clean","state":"open","merged":false}""");
+        var state = new MonitorState { Owner = "owner", Repo = "repo", PrNumber = 42, SessionFolder = _gh.DirectoryPath, HeadSha = "evaluated-sha" };
+
+        var action = await ExecuteAutoActionAsync(state, new MonitorAction { Action = "auto_execute", Task = task });
+
+        Assert.Equal("polling", action.Action);
+    }
+
+    private static async Task<MonitorAction> ExecuteAutoActionAsync(MonitorState state, MonitorAction action)
+    {
+        var method = typeof(MonitorFlowTools).GetMethod("ExecuteAutoAction", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        return await (Task<MonitorAction>)method.Invoke(null, [state, action])!;
+    }
+
     private MonitorState CreateAutoCommentState(string owner, params string[] commentIds) => new()
     {
         Owner = owner,

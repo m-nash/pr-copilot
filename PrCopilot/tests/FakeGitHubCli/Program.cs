@@ -65,7 +65,7 @@ if (!string.IsNullOrEmpty(routesFile) && args is ["api", var routedEndpoint, .. 
 }
 
 var mergeDirectory = Environment.GetEnvironmentVariable("PR_COPILOT_TEST_GH_MERGE_BARRIER");
-if (!string.IsNullOrEmpty(mergeDirectory) && args is ["pr", "merge", "42", "--squash", "--repo", _])
+if (!string.IsNullOrEmpty(mergeDirectory) && args is ["pr", "merge", "42", "--squash", "--repo", _, ..])
 {
     var released = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     using var watcher = new FileSystemWatcher(mergeDirectory, "release");
