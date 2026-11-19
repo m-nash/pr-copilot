@@ -3498,6 +3498,33 @@ public class StateMachineTests
     }
 
     [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void AutoMode_ReenabledWhileConfirmingResults_AppliesTheSavedResults(bool viaReconnect)
+    {
+        var state = CreateAutoState(MakeComment("c1"));
+        MonitorTransitions.BuildTerminalAction(state, TerminalStateType.NewComment);
+        state.AutoMode = false;
+        MonitorTransitions.ProcessEvent(state, "comments_processed", null, Results(
+            new { comment_id = "c1", decision = "fixed", reply_text = "Added the guard", evidence = "GuardTests failed before the fix", commit = "abc1234" }));
+
+        MonitorAction action;
+        if (viaReconnect)
+        {
+            state.AutoMode = true;
+            state.AutoModeSwitchPending = true;
+            action = MonitorTransitions.ProcessEvent(state, "ready", null, null);
+        }
+        else
+        {
+            action = MonitorTransitions.ProcessEvent(state, "user_chose", "auto_mode", null);
+        }
+
+        Assert.Equal("apply_auto_results", action.Task);
+        Assert.Equal("Added the guard", Assert.Single(state.PendingAutoResults).ReplyText);
+    }
+
+    [Theory]
     [InlineData("auto_address_comments")]
     [InlineData("apply_fix")]
     [InlineData("merge_target_branch")]

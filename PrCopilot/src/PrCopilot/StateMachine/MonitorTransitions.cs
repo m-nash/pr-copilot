@@ -1284,6 +1284,10 @@ public static class MonitorTransitions
         state.AutoMode = true;
         DebugLogger.Log("AutoMode", $"Switched to auto mode: state={state.CurrentState}, commentFlow={state.CommentFlow}, ciFlow={state.CiFailureFlow}, terminal={state.LastTerminalState?.ToString() ?? "none"}");
 
+        // The agent already finished this batch, so its commits and follow-up issues exist; only posting waited on the user.
+        if (state.CommentFlow == CommentFlowState.AutoResultsConfirmation)
+            return ApplyRetainedAutoResults(state);
+
         if (state.CommentFlow != CommentFlowState.None)
         {
             state.UnresolvedComments = state.UnresolvedComments.Where(c => !c.IsAddressed && !c.IsWaitingForReply).ToList();
@@ -1487,6 +1491,11 @@ public static class MonitorTransitions
     private static MonitorAction PostConfirmedAutoResults(MonitorState state)
     {
         state.AutoResultsConfirmed = true;
+        return ApplyRetainedAutoResults(state);
+    }
+
+    private static MonitorAction ApplyRetainedAutoResults(MonitorState state)
+    {
         state.CommentFlow = CommentFlowState.AutoAddressing;
         state.CurrentState = MonitorStateId.ExecutingTask;
         return BuildApplyAutoResultsAction(state);
