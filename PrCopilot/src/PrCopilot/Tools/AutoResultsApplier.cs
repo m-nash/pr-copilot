@@ -20,6 +20,7 @@ internal static class AutoResultsApplier
         var results = state.PendingAutoResults;
         await VerifyCommitsAsync(state, results, commitVisibilityDelay ?? DefaultCommitVisibilityDelay, cancellationToken);
         await VerifyFollowUpIssuesAsync(state, results);
+        await VerifyThreadsUnchangedAsync(state, results);
 
         // Turning auto mode off mid-batch withdraws approval for replies not yet posted, unless the user confirmed this batch.
         bool Approved() => state.AutoMode || state.AutoResultsConfirmed;
@@ -157,6 +158,37 @@ internal static class AutoResultsApplier
 
             var host = Uri.TryCreate(state.PrUrl, UriKind.Absolute, out var prUri) ? prUri.GetLeftPart(UriPartial.Authority) : "https://github.com";
             result.IssueUrl = $"{host}/{owner}/{repo}/issues/{number}";
+        }
+    }
+
+    /// <summary>
+    /// Hand the user any thread that got a reply from someone else while the agent worked: replying from the old
+    /// snapshot, and especially resolving the thread, would bury feedback the agent never saw.
+    /// </summary>
+    private static async Task VerifyThreadsUnchangedAsync(MonitorState state, List<AutoCommentResult> results)
+    {
+        var pending = results.Where(r => r.Decision != AutoCommentResult.NeedsUser && r.Comment != null).ToList();
+        if (pending.Count == 0)
+            return;
+
+        List<CommentInfo> threads;
+        try
+        {
+            threads = await PrStatusFetcher.FetchUnresolvedCommentsAsync(state.Owner, state.Repo, state.PrNumber, state.PrAuthor, state.CurrentUser);
+        }
+        catch (Exception ex)
+        {
+            DebugLogger.Error("AutoMode", $"Could not re-read review threads, so posting without the new-reply check: {ex.Message}");
+            return;
+        }
+
+        foreach (var result in pending)
+        {
+            if (threads.FirstOrDefault(t => t.Id == result.Comment!.Id) is { } thread &&
+                thread.ReplyCount > result.Comment!.ReplyCount && !thread.IsWaitingForReply)
+            {
+                result.HandToUser($"{thread.LastReplyAuthor} replied while auto mode was working, so it didn't reply or resolve the thread; review the new reply (any fix is already pushed)");
+            }
         }
     }
 

@@ -1282,6 +1282,33 @@ public class MonitorFlowToolsTests : IDisposable
         Assert.Equal(2, _gh.ReadRequests().Count(r => r.Length > 1 && r[1].EndsWith("/replies", StringComparison.Ordinal)));
     }
 
+    [Fact]
+    public async Task AutoResultsApplier_ReviewerRepliedDuringWork_HandsThreadToUserWithoutPosting()
+    {
+        _gh.PauseResolveRequests();
+        _gh.ReleaseResolveRequests();
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        _gh.RespondToPages($"repos/{owner}/repo/pulls/42/commits", """[{"sha":"abc1234def5678"}]""");
+        _gh.RespondToPages("graphql", """
+            {"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":"c"},"nodes":[
+              {"id":"first","isResolved":false,
+               "comments":{"totalCount":2,"nodes":[{"author":{"login":"reviewer"},"body":"Please fix","url":"https://github.com/owner/repo/pull/42"}]},
+               "lastReply":{"nodes":[{"author":{"login":"reviewer"},"createdAt":"2026-11-18T18:49:30Z"}]}},
+              {"id":"second","isResolved":false,
+               "comments":{"totalCount":2,"nodes":[{"author":{"login":"reviewer"},"body":"Please fix","url":"https://github.com/owner/repo/pull/42"}]},
+               "lastReply":{"nodes":[{"author":{"login":"author"},"createdAt":"2026-11-18T18:49:30Z"}]}}]}}}}}
+            """);
+        var state = CreateAutoCommentState(owner, "first", "second");
+        MonitorTransitions.BuildTerminalAction(state, TerminalStateType.NewComment);
+        MonitorTransitions.ProcessEvent(state, "comments_processed", null, TwoFixedResults());
+
+        await AutoResultsApplier.ApplyAsync(state, TimeSpan.Zero);
+
+        Assert.Equal([$"repos/{owner}/repo/pulls/42/comments/2/replies"],
+            _gh.ReadRequests().Where(r => r.Length > 1 && r[1].EndsWith("/replies", StringComparison.Ordinal)).Select(r => r[1]));
+        Assert.Contains("reviewer replied while auto mode was working", state.PendingAutoResults[0].Reason);
+    }
+
     private static string TwoFixedResults() => JsonSerializer.Serialize(new
     {
         results = new object[]
