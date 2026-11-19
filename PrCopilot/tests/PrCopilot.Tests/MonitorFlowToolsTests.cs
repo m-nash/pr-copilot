@@ -1487,6 +1487,23 @@ public class MonitorFlowToolsTests : IDisposable
         Assert.Contains("approval from outsider is stale", action.Question);
     }
 
+    [Theory]
+    [InlineData(true, "copilot-pull-request-reviewer[bot]", false)]
+    [InlineData(true, "reviewer", true)]
+    [InlineData(false, "copilot-pull-request-reviewer[bot]", true)]
+    public async Task ReRequestCatchUp_InAutoMode_SkipsBotReviewers(bool autoMode, string reviewer, bool reRequested)
+    {
+        _gh.RespondToPages("repos/owner/repo/pulls/42/requested_reviewers", "[]");
+        var state = new MonitorState { Owner = "owner", Repo = "repo", PrNumber = 42, PrAuthor = "author", CurrentUser = "author", AutoMode = autoMode };
+        var method = typeof(MonitorFlowTools).GetMethod("ReRequestReviewForFullyRepliedReviewersAsync", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        List<CommentInfo> waiting = [new CommentInfo { Id = "thread", Author = reviewer, IsWaitingForReply = true }];
+
+        await (Task)method.Invoke(null, [state, waiting, new List<CommentInfo>()])!;
+
+        Assert.Equal(reRequested, _gh.ReadRequests().Any(r => r.Contains("POST") && r[1].EndsWith("/requested_reviewers", StringComparison.Ordinal)));
+    }
+
     private static async Task<MonitorAction> ExecuteAutoActionAsync(MonitorState state, MonitorAction action)
     {
         var method = typeof(MonitorFlowTools).GetMethod("ExecuteAutoAction", BindingFlags.Static | BindingFlags.NonPublic);

@@ -42,7 +42,8 @@ if (!string.IsNullOrEmpty(routesFile) && args is ["api", var routedEndpoint, .. 
     {
         var query = routeOptions is [.., "-f", var field] && field.StartsWith("query=", StringComparison.Ordinal) ? field : null;
         var flags = query == null ? routeOptions : routeOptions[..^2];
-        if (flags is [])
+        // A route for a --jq call holds gh's already-filtered output.
+        if (flags is [] or ["--jq", _])
         {
             Console.Write(pages[0]);
             return 0;
@@ -59,7 +60,7 @@ if (!string.IsNullOrEmpty(routesFile) && args is ["api", var routedEndpoint, .. 
         }
 
         Console.Error.WriteLine($"Fake gh cannot serve {routedEndpoint} with [{string.Join(' ', flags)}]; " +
-            "it supports no flags or --paginate --slurp, and GraphQL paging needs $endCursor and pageInfo.");
+            "it supports no flags, --jq, or --paginate --slurp, and GraphQL paging needs $endCursor and pageInfo.");
         return 1;
     }
 }

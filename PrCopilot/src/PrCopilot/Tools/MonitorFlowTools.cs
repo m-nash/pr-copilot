@@ -2175,9 +2175,10 @@ public class MonitorFlowTools
             return;
         }
 
-        // Get unique reviewers with waiting-for-reply comments
+        // Get unique reviewers with waiting-for-reply comments.
+        // Auto mode never re-requests bots (see AutoResultsApplier): a bot's re-review brings new comments for it to answer, looping.
         var reviewersWithWaiting = waitingForReply
-            .Where(c => !string.IsNullOrEmpty(c.Author))
+            .Where(c => !string.IsNullOrEmpty(c.Author) && !(state.AutoMode && PrStatusFetcher.IsBotReviewer(c.Author)))
             .Select(c => c.Author)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
