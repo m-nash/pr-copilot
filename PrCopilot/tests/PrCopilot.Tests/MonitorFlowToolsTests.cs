@@ -1277,7 +1277,7 @@ public class MonitorFlowToolsTests : IDisposable
     }
 
     [Fact]
-    public async Task PrMonitorStart_InteractiveDuringAutoResults_HandsUnpostedRepliesToUser()
+    public async Task PrMonitorStart_InteractiveDuringAutoResults_HandsRemainingRepliesToUser()
     {
         _gh.PauseResolveRequests();
         var owner = $"fixture-{Guid.NewGuid():N}";
