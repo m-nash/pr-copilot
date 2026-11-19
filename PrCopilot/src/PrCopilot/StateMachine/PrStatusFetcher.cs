@@ -224,7 +224,7 @@ public static class PrStatusFetcher
     /// Fetches unresolved review comment threads via GraphQL.
     /// Classifies threads as "needs action" vs "waiting for reply" based on last commenter.
     /// </summary>
-    public static async Task<List<CommentInfo>> FetchUnresolvedCommentsAsync(string owner, string repo, int prNumber, string prAuthor = "")
+    public static async Task<List<CommentInfo>> FetchUnresolvedCommentsAsync(string owner, string repo, int prNumber, string prAuthor = "", string currentUser = "")
     {
         // Use GraphQL to get review threads with resolution status
         // Fetch first comment (original) and last comment (to check who replied last).
@@ -244,6 +244,7 @@ public static class PrStatusFetcher
                         nodes {
                           databaseId
                           author { login __typename }
+                          authorAssociation
                           body
                           url
                           path
@@ -253,6 +254,7 @@ public static class PrStatusFetcher
                       lastReply: comments(last: 1) {
                         nodes {
                           author { login __typename }
+                          authorAssociation
                           createdAt
                         }
                       }
@@ -296,6 +298,7 @@ public static class PrStatusFetcher
 
             // Determine if PR author is the last replier
             var lastReplyAuthor = "";
+            var lastReplyAuthorAssociation = "";
             var isWaitingForReply = false;
             DateTime? lastReplyAt = null;
             if (thread.TryGetProperty("lastReply", out var lastReply))
@@ -304,13 +307,13 @@ public static class PrStatusFetcher
                 if (lastNodes.GetArrayLength() > 0)
                 {
                     lastReplyAuthor = NormalizeBotLogin(lastNodes[0].GetProperty("author"));
+                    lastReplyAuthorAssociation = ReadAuthorAssociation(lastNodes[0]);
                     if (lastNodes[0].TryGetProperty("createdAt", out var ca) && ca.ValueKind == JsonValueKind.String)
                         lastReplyAt = DateTime.Parse(ca.GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind);
 
-                    // If PR author is the last commenter and there are replies (totalCount > 1),
+                    // If the PR author or the signed-in user replied last (totalCount > 1),
                     // the ball is in the reviewer's court
-                    if (totalCount > 1 && !string.IsNullOrEmpty(prAuthor) &&
-                        string.Equals(lastReplyAuthor, prAuthor, StringComparison.OrdinalIgnoreCase))
+                    if (totalCount > 1 && (IsUser(lastReplyAuthor, prAuthor) || IsUser(lastReplyAuthor, currentUser)))
                     {
                         isWaitingForReply = true;
                     }
@@ -321,6 +324,7 @@ public static class PrStatusFetcher
             {
                 Id = thread.GetProperty("id").GetString() ?? "",
                 Author = author,
+                AuthorAssociation = ReadAuthorAssociation(firstComment),
                 Body = firstComment.GetProperty("body").GetString() ?? "",
                 Url = firstComment.GetProperty("url").GetString() ?? "",
                 RestCommentId = firstComment.TryGetProperty("databaseId", out var dbId) && dbId.ValueKind == JsonValueKind.Number
@@ -332,6 +336,7 @@ public static class PrStatusFetcher
                 IsResolved = false,
                 IsWaitingForReply = isWaitingForReply,
                 LastReplyAuthor = lastReplyAuthor,
+                LastReplyAuthorAssociation = lastReplyAuthorAssociation,
                 LastReplyAt = lastReplyAt,
                 ReplyCount = totalCount - 1
             });
@@ -348,9 +353,9 @@ public static class PrStatusFetcher
     /// AFTER we replied — approval after our reply implies acceptance.
     /// </summary>
     public static async Task<List<CommentInfo>> FetchAndCleanUnresolvedCommentsAsync(
-        string owner, string repo, int prNumber, string prAuthor = "", IReadOnlyList<ReviewInfo>? approvals = null)
+        string owner, string repo, int prNumber, string prAuthor = "", string currentUser = "", IReadOnlyList<ReviewInfo>? approvals = null)
     {
-        var comments = await FetchUnresolvedCommentsAsync(owner, repo, prNumber, prAuthor);
+        var comments = await FetchUnresolvedCommentsAsync(owner, repo, prNumber, prAuthor, currentUser);
 
         var botWaiting = comments
             .Where(c => c.IsWaitingForReply && IsBotReviewer(c.Author))
@@ -466,6 +471,44 @@ public static class PrStatusFetcher
     }
 
     /// <summary>
+    /// Fetches the hash of every commit on the PR (the API returns at most 250).
+    /// Auto mode uses this to confirm a reported fix was actually pushed before resolving its thread.
+    /// </summary>
+    public static async Task<List<string>> FetchPrCommitHashesAsync(string owner, string repo, int prNumber)
+    {
+        var json = await RunGhAsync(
+            $"api \"repos/{owner}/{repo}/pulls/{prNumber}/commits?per_page=100\" --paginate --slurp");
+
+        using var doc = JsonDocument.Parse(json);
+        return doc.RootElement.EnumerateArray()
+            .SelectMany(page => page.EnumerateArray())
+            .Select(commit => commit.TryGetProperty("sha", out var sha) ? sha.GetString() ?? "" : "")
+            .Where(sha => sha.Length > 0)
+            .ToList();
+    }
+
+    /// <summary>
+    /// Returns true if the issue exists and is an issue rather than a pull request.
+    /// Auto mode uses this to confirm a follow-up issue before linking it in a reply.
+    /// </summary>
+    public static async Task<bool> IssueExistsAsync(string owner, string repo, int number)
+    {
+        try
+        {
+            var json = await RunGhAsync($"api repos/{owner}/{repo}/issues/{number}");
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            return root.TryGetProperty("number", out var n) && n.ValueKind == JsonValueKind.Number && n.GetInt32() == number &&
+                !root.TryGetProperty("pull_request", out _);
+        }
+        catch (Exception ex)
+        {
+            DebugLogger.Log("IssueExists", $"{owner}/{repo}#{number} not confirmed: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Checks whether the given branch requires all review conversations to be resolved before merging.
     /// Uses the repository rulesets API, which is accessible to anyone with read access.
     /// Returns false on API failure (permissions, older GH Enterprise, etc.).
@@ -571,6 +614,14 @@ public static class PrStatusFetcher
         }
         return login;
     }
+
+    private static string ReadAuthorAssociation(JsonElement comment) =>
+        comment.TryGetProperty("authorAssociation", out var association) && association.ValueKind == JsonValueKind.String
+            ? association.GetString() ?? ""
+            : "";
+
+    private static bool IsUser(string login, string user) =>
+        !string.IsNullOrEmpty(user) && string.Equals(login, user, StringComparison.OrdinalIgnoreCase);
 
     private static void ClassifyCheckRun(string status, string conclusion, CheckRunCounts counts)
     {

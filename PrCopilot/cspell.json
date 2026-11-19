@@ -2,6 +2,7 @@
   "version": "0.2",
   "language": "en",
   "words": [
+    "applier",
     "capturable",
     "csproj",
     "dedup",
@@ -15,6 +16,7 @@
     "nums",
     "osascript",
     "parseable",
+    "permalink",
     "pushback",
     "slnx",
     "unreplied",

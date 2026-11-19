@@ -39,6 +39,7 @@ internal sealed class FakeGitHubCliFixture : IDisposable
         SetEnvironment("PR_COPILOT_TEST_GH_START_BARRIER", "");
         SetEnvironment("PR_COPILOT_TEST_GH_START_SUCCESS", "");
         SetEnvironment("PR_COPILOT_TEST_GH_RESOLVE_BARRIER", "");
+        SetEnvironment("PR_COPILOT_TEST_GH_RESOLVE_FAIL", "");
         SetEnvironment("PR_COPILOT_TEST_GH_PR_INFO", "");
         SetEnvironment("PR_COPILOT_TEST_GH_MERGE_BARRIER", "");
         SetEnvironment("PR_COPILOT_TEST_GH_ROUTES", "");
@@ -137,6 +138,9 @@ internal sealed class FakeGitHubCliFixture : IDisposable
 
     public void ReleaseResolveRequests() =>
         File.WriteAllText(Path.Combine(_resolveDirectory, "release"), "");
+
+    public void FailResolveRequests() =>
+        Environment.SetEnvironmentVariable("PR_COPILOT_TEST_GH_RESOLVE_FAIL", "1");
 
     public void PauseMergeRequests()
     {

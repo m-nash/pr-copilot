@@ -635,6 +635,10 @@ public static class MonitorViewer
                 {
                     statusLabel.Text = $"{emoji} {terminalDescription} — closing in 5 seconds...";
                 }
+                else if (terminalState == TerminalStatePresentation.AutoWorkingState)
+                {
+                    statusLabel.Text = $"{emoji} {terminalDescription} — no action needed";
+                }
                 else
                 {
                     statusLabel.Text = $"{emoji} {terminalDescription} — check your Copilot CLI window";

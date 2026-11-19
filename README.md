@@ -8,6 +8,7 @@ An MCP server that monitors GitHub pull requests through GitHub Copilot CLI. It 
 - **State machine architecture** — deterministic C# logic drives all decisions; the LLM agent is a thin executor
 - **TUI dashboard** — live Terminal.Gui viewer with CI status, comments, approvals, progress bars, and deep links
 - **Comment handling** — address, explain, or ignore review comments one-by-one or in batch
+- **Auto mode** — handles comments, CI failures, merge conflicts, and merging without prompting; decides each comment from evidence and hands back anything it can't settle or verify
 - **CI failure investigation** — analyze failed check logs, suggest fixes, rerun failed jobs via Azure DevOps
 - **Merge conflict handling** — fetches and merges the latest target branch into the PR branch with git-workflow approvals and a normal push; no rebasing or force-pushes
 - **Auto-merge** — squash merge when approved + CI green (with admin override option)
@@ -102,6 +103,7 @@ In any Copilot CLI session with a PR checked out:
 > monitor the pr
 > monitor this pr https://github.com/owner/repo/pull/123
 > monitor pr 456
+> monitor the pr in auto mode
 ```
 
 The `pr-monitor` skill activates automatically on:
@@ -119,6 +121,18 @@ The `pr-monitor` skill activates automatically on:
    - ✅ Approved + CI green → Merge / Wait for more approvals
    - ⚠️ Merge conflict → Handle myself
 4. **After your action** — monitoring resumes automatically
+
+### Auto mode
+
+Auto mode is for leaving a PR unattended. Ask for it when you start monitoring, or pick **Switch to auto mode** in any monitor prompt. Turning it on gives standing approval, for that PR, to commit, push (never force-push), open follow-up issues, post and resolve review replies, re-request reviews, and merge. Turning it off revokes that approval for unfinished work, and comment results it hasn't posted wait for your confirmation. If your Copilot instructions require approval for those actions, add an exception for auto mode.
+
+- **Comments** — one agent task handles every new comment, with one commit per fix and a single push. The agent checks each comment against the code before choosing an action: it fixes problems it confirms belong in the PR, pushes back on non-issues, opens a linked follow-up issue for legitimate out-of-scope requests, and answers questions. Every decision must cite evidence (a test result, build or analyzer output, or a pinned permalink or doc), and comments the evidence doesn't settle come back to you. Before posting, the server confirms each decision includes evidence, each fix commit is on the PR, and each follow-up issue exists. Anything that fails comes back to you as a normal prompt with the reason.
+- **CI failures** — the agent investigates, then auto mode applies the suggested code fix, reruns infrastructure failures, or starts a fresh build.
+- **Merge conflicts** — merges the latest target branch, without rebasing.
+- **Approved and green** — squash-merges once no reviewer still owes a reply to auto mode's pushback. If a branch policy rejects the merge, auto mode retries after approvals, checks, or commits change, and every 15 minutes otherwise; it never uses `--admin`.
+- **Stale approvals** — re-requests review on GitHub instead of sending a message.
+
+Each CI or conflict action runs at most once per commit, and after two automatic pushes in a row without green CI, auto mode asks you. It acts only on threads from the repository's owners, members, and collaborators (and Copilot's reviewer), because anyone can comment on a public PR; other threads come back to you. It stops replying on a thread after two replies and hands it to you. It doesn't re-request reviews from bots, which would loop. Threads it hands back stay with you until someone replies on them.
 
 Starting monitoring again reconnects to an active session but initializes a fresh session after a monitor has stopped. `ready` re-presents a pending prompt or returns `resume_pending_task` with the original action and reconciliation instructions; it never marks work complete or automatically repeats a GitHub write. This also applies to multi-PR monitoring. After pushing a fix, reconnect and report the original task's completion event rather than resetting the monitor or reapplying completed work. Pending actions are retained for the lifetime of the MCP server, not across server restarts.
 

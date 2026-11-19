@@ -39,6 +39,48 @@ public class MonitorState
     /// <summary>The action awaiting completion or user input, retained across reconnects.</summary>
     public MonitorAction? PendingAction { get; set; }
 
+    /// <summary>
+    /// Auto mode handles terminal states without prompting: the user's standing approval covers commits, pushes,
+    /// replies, follow-up issues, and merging for this PR. Decisions that need the user still prompt.
+    /// </summary>
+    public bool AutoMode { get; set; }
+
+    /// <summary>Set when auto mode is switched on while a prompt is pending, so reconnecting handles it automatically.</summary>
+    public bool AutoModeSwitchPending { get; set; }
+
+    /// <summary>Auto mode: comments assigned to the agent in the current auto_address_comments task.</summary>
+    public List<CommentInfo> AutoBatch { get; set; } = [];
+
+    /// <summary>Auto mode: validated results awaiting server-side verification, posting, and resolution.</summary>
+    public List<AutoCommentResult> PendingAutoResults { get; set; } = [];
+
+    /// <summary>The user confirmed posting <see cref="PendingAutoResults"/> after auto mode was turned off.</summary>
+    public bool AutoResultsConfirmed { get; set; }
+
+    /// <summary>
+    /// Auto mode: threads handed to the user, by thread ID. A thread stays with the user until its reply count changes,
+    /// so the agent is not rerun on a conversation it already gave up on.
+    /// </summary>
+    public Dictionary<string, AutoCommentResult> AutoDeferred { get; set; } = new();
+
+    /// <summary>Auto mode: replies posted per thread, capped so auto mode can't argue with a reviewer indefinitely.</summary>
+    public Dictionary<string, int> AutoReplyCounts { get; set; } = new();
+
+    /// <summary>Auto mode: CI and conflict actions already tried, keyed by action and head SHA, so repeats escalate instead of looping.</summary>
+    public HashSet<string> AutoAttempts { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Auto mode: consecutive automatic pushes for CI failures, cancelled checks, or conflicts since CI was last green.</summary>
+    public int AutoPushStreak { get; set; }
+
+    /// <summary>Auto mode: PR state when a branch policy last rejected the merge; the merge is retried once it changes.</summary>
+    public string? AutoMergeBlockedOn { get; set; }
+
+    /// <summary>Auto mode: when a branch policy last rejected the merge; the merge is also retried after a fixed interval.</summary>
+    public DateTime? AutoMergeBlockedAt { get; set; }
+
+    /// <summary>Reason the agent gave with a needs_user event.</summary>
+    public string? AutoEscalationReason { get; set; }
+
     internal bool HasPendingAction => CurrentState != MonitorStateId.Stopped &&
         (PendingAction != null || CurrentState is not (MonitorStateId.Idle or MonitorStateId.Polling));
 
@@ -131,6 +173,9 @@ public class MonitorState
         PendingReRequestReviewer = null;
         SamplingCompletionEvent = null;
         PendingCompletionEvent = null;
+        AutoBatch = [];
+        PendingAutoResults = [];
+        AutoResultsConfirmed = false;
     }
 
     internal MonitorAction RememberAction(MonitorAction action)

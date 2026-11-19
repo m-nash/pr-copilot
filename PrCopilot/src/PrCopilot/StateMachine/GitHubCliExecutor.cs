@@ -30,12 +30,16 @@ public static class GitHubCliExecutor
     }
 
     /// <summary>
-    /// Merge a PR using squash merge.
+    /// Merge a PR using squash merge, only while its head is still the evaluated commit.
     /// </summary>
-    public static async Task<(bool success, string output)> MergePrAsync(string owner, string repo, int prNumber)
+    public static async Task<(bool success, string output)> MergePrAsync(string owner, string repo, int prNumber, string headSha)
     {
-        return await RunGhAsync($"pr merge {prNumber} --squash --repo {owner}/{repo}");
+        return await RunGhAsync($"pr merge {prNumber} --squash --repo {owner}/{repo}{MatchHeadCommit(headSha)}");
     }
+
+    // A commit pushed after the PR was evaluated must never be merged unchecked; GitHub rejects the merge if the head moved.
+    private static string MatchHeadCommit(string headSha) =>
+        string.IsNullOrWhiteSpace(headSha) ? "" : $" --match-head-commit {headSha}";
 
     /// <summary>
     /// Post a reply to an existing review comment thread via the REST API.
@@ -67,11 +71,11 @@ public static class GitHubCliExecutor
     }
 
     /// <summary>
-    /// Merge a PR using squash merge with --admin flag to bypass branch protection.
+    /// Merge a PR using squash merge with --admin flag to bypass branch protection, only while its head is still the evaluated commit.
     /// </summary>
-    public static async Task<(bool success, string output)> MergePrAdminAsync(string owner, string repo, int prNumber)
+    public static async Task<(bool success, string output)> MergePrAdminAsync(string owner, string repo, int prNumber, string headSha)
     {
-        return await RunGhAsync($"pr merge {prNumber} --squash --admin --repo {owner}/{repo}");
+        return await RunGhAsync($"pr merge {prNumber} --squash --admin --repo {owner}/{repo}{MatchHeadCommit(headSha)}");
     }
 
     /// <summary>

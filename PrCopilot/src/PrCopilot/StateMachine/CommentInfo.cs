@@ -9,6 +9,8 @@ public class CommentInfo
 {
     public string Id { get; set; } = "";
     public string Author { get; set; } = "";
+    /// <summary>The thread author's relationship to the repository (OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR, NONE, ...).</summary>
+    public string AuthorAssociation { get; set; } = "";
     public string FilePath { get; set; } = "";
     public int? Line { get; set; }
     public string Body { get; set; } = "";
@@ -22,6 +24,8 @@ public class CommentInfo
     /// Used by ShouldReRequestReview to skip already-handled comments when deciding if a reviewer's last comment has been resolved.</summary>
     public bool IsAddressed { get; set; }
     public string LastReplyAuthor { get; set; } = "";
+    /// <summary>The last replier's relationship to the repository, like <see cref="AuthorAssociation"/>.</summary>
+    public string LastReplyAuthorAssociation { get; set; } = "";
     /// <summary>When the last reply was posted (UTC). Used to compare against approval timestamp.</summary>
     public DateTime? LastReplyAt { get; set; }
     public int ReplyCount { get; set; }

@@ -125,7 +125,7 @@ public class MonitorFlowToolsTests : IDisposable
         try
         {
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-                new MonitorFlowTools().PrMonitorStart(owner, "repo", 42, "", cancellation.Token));
+                new MonitorFlowTools().PrMonitorStart(owner, "repo", 42, "", cancellationToken: cancellation.Token));
 
             Assert.Same(session, sessions[monitorId]);
             Assert.Equal(permanentlyStopped, session.IsStopped);
@@ -703,6 +703,54 @@ public class MonitorFlowToolsTests : IDisposable
     }
 
     [Theory]
+    [InlineData("fixture-sha", "rerun_via_browser")]
+    [InlineData("older-sha", "investigate_ci_failure")]
+    public async Task PrMonitorNextStep_AllPrs_ServicesDeferredRerun(string deferredOnSha, string expectedTask)
+    {
+        _gh.PauseStartupRequests();
+        _gh.CompleteStartupSuccessfully();
+        _gh.RespondToPrInfo("""{"title":"Fixture PR","body":"","sha":"fixture-sha","head_branch":"fixture","base_branch":"main","url":"https://github.com/owner/repo/pull/42","author":"fixture-author","mergeable":true,"mergeable_state":"clean","state":"open","merged":false}""");
+        _gh.ReleaseStartupRequests();
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        var monitorId = $"pr-{owner}-repo-42";
+        _gh.RespondToPages($"repos/{owner}/repo/commits/fixture-sha/check-runs",
+            """{"check_runs":[{"name":"build","status":"completed","conclusion":"failure","details_url":"https://dev.azure.com/org/project/_build/results?buildId=1"}]}""");
+        _gh.RespondToPages($"repos/{owner}/repo/commits/fixture-sha/status", """{"statuses":[]}""");
+        var state = new MonitorState
+        {
+            Owner = owner,
+            Repo = "repo",
+            PrNumber = 42,
+            SessionFolder = _gh.DirectoryPath,
+            HeadBranch = "fixture",
+            BaseBranch = "main",
+            HeadSha = deferredOnSha,
+            PrAuthor = "fixture-author",
+            CurrentUser = "fixture-author",
+            PendingRerunWhenChecksComplete = true
+        };
+        using var session = new MonitorSession { State = state };
+        var sessions = GetSessions();
+        Assert.True(sessions.TryAdd(monitorId, session));
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        try
+        {
+            using var response = JsonDocument.Parse(await new MonitorFlowTools().PrMonitorNextStep("all", "ready",
+                server: new FakeElicitationMcpServer(), cancellationToken: cancellation.Token));
+
+            Assert.Equal("execute", response.RootElement.GetProperty("action").GetString());
+            Assert.Equal(expectedTask, response.RootElement.GetProperty("task").GetString());
+            Assert.False(state.PendingRerunWhenChecksComplete);
+        }
+        finally
+        {
+            cancellation.Cancel();
+            sessions.TryRemove(monitorId, out _);
+        }
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task PrMonitorNextStep_ChangedTargetBranch_UsesFreshTargetBranchForConflictResolution(bool monitorAll)
@@ -865,7 +913,7 @@ public class MonitorFlowToolsTests : IDisposable
         try
         {
             await _gh.WaitForStartupRequestsAsync(1);
-            second = new MonitorFlowTools().PrMonitorStart(owner, "repo", 42, "", cancellation.Token);
+            second = new MonitorFlowTools().PrMonitorStart(owner, "repo", 42, "", cancellationToken: cancellation.Token);
             cancellation.Cancel();
 
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => second.WaitAsync(TimeSpan.FromSeconds(2)));
@@ -894,7 +942,7 @@ public class MonitorFlowToolsTests : IDisposable
         File.WriteAllText(state.LogFile + ".viewer.pid",
             Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture));
         using var cancellation = new CancellationTokenSource();
-        var first = new MonitorFlowTools().PrMonitorStart(owner, "repo", 42, _gh.DirectoryPath, cancellation.Token);
+        var first = new MonitorFlowTools().PrMonitorStart(owner, "repo", 42, _gh.DirectoryPath, cancellationToken: cancellation.Token);
         Task<string>? second = null;
         try
         {
@@ -984,6 +1032,496 @@ public class MonitorFlowToolsTests : IDisposable
         Check();
         await written.Task.WaitAsync(TimeSpan.FromSeconds(3), cancellationToken);
     }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PrMonitorStart_AutoMode_HandsPendingPromptToAutoMode(bool monitorAll)
+    {
+        _gh.PauseMergeRequests();
+        _gh.ReleaseMergeRequests();
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        var monitorId = $"pr-{owner}-repo-42";
+        var state = new MonitorState
+        {
+            Owner = owner,
+            Repo = "repo",
+            PrNumber = 42,
+            SessionFolder = _gh.DirectoryPath,
+            Checks = new CheckRunCounts { Passed = 3, Total = 3 },
+            Approvals = [new ReviewInfo { Author = "approver", State = "APPROVED" }]
+        };
+        var prompt = MonitorTransitions.BuildTerminalAction(state, TerminalStateType.ApprovedCiGreen);
+        Assert.Contains(MonitorTransitions.SwitchToAutoModeChoice, prompt.Choices!);
+        var sessions = GetSessions();
+        using var session = new MonitorSession { State = state };
+        Assert.True(sessions.TryAdd(monitorId, session));
+        var server = new FakeElicitationMcpServer();
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        try
+        {
+            var tools = new MonitorFlowTools();
+            using var start = JsonDocument.Parse(await tools.PrMonitorStart(owner, "repo", 42, _gh.DirectoryPath, mode: "auto"));
+            using var response = JsonDocument.Parse(await tools.PrMonitorNextStep(
+                monitorAll ? "all" : monitorId, "ready", server: server, cancellationToken: cancellation.Token));
+
+            Assert.Equal("auto", start.RootElement.GetProperty("mode").GetString());
+            Assert.Equal("merged", response.RootElement.GetProperty("action").GetString());
+            Assert.Contains(_gh.ReadRequests(), request => request is ["pr", "merge", "42", "--squash", "--repo", _]);
+            Assert.Empty(server.Elicitations);
+            Assert.Equal(monitorAll, !sessions.ContainsKey(monitorId));
+        }
+        finally
+        {
+            sessions.TryRemove(monitorId, out _);
+        }
+    }
+
+    [Fact]
+    public async Task PrMonitorStart_UnknownMode_ReturnsErrorWithoutStarting()
+    {
+        var owner = $"fixture-{Guid.NewGuid():N}";
+
+        using var response = JsonDocument.Parse(await new MonitorFlowTools().PrMonitorStart(owner, "repo", 42, "", mode: "manual"));
+
+        Assert.Equal("error", response.RootElement.GetProperty("action").GetString());
+        Assert.False(GetSessions().ContainsKey($"pr-{owner}-repo-42"));
+        Assert.Empty(_gh.ReadRequests());
+    }
+
+    [Fact]
+    public async Task PrMonitorNextStep_AutoResults_PostsOnlyVerifiedClaims()
+    {
+        _gh.PauseResolveRequests();
+        _gh.ReleaseResolveRequests();
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        var monitorId = $"pr-{owner}-repo-42";
+        _gh.RespondToPages($"repos/{owner}/repo/pulls/42/commits", """[{"sha":"abc1234def5678"}]""");
+        var state = CreateAutoCommentState(owner, "fixed", "pushback", "no-commit", "no-evidence");
+        MonitorTransitions.BuildTerminalAction(state, TerminalStateType.NewComment);
+        var sessions = GetSessions();
+        using var session = new MonitorSession { State = state };
+        Assert.True(sessions.TryAdd(monitorId, session));
+        var server = new FakeElicitationMcpServer("handle_myself", "stop");
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        try
+        {
+            var data = JsonSerializer.Serialize(new
+            {
+                results = new object[]
+                {
+                    new { comment_id = "fixed", decision = "fixed", reply_text = "Added the guard", evidence = "GuardTests.RejectsNull failed before the fix", commit = $"{owner}/repo@abc1234" },
+                    new { comment_id = "pushback", decision = "pushed_back", reply_text = "The guard already exists", evidence = "GuardTests.RejectsNull passes" },
+                    new { comment_id = "no-commit", decision = "fixed", reply_text = "Added the check", evidence = "CheckTests failed before the fix" },
+                    new { comment_id = "no-evidence", decision = "pushed_back", reply_text = "I think this is fine" }
+                }
+            });
+            using var response = JsonDocument.Parse(await new MonitorFlowTools().PrMonitorNextStep(
+                monitorId, "comments_processed", data: data, server: server, cancellationToken: cancellation.Token));
+
+            Assert.Equal("stop", response.RootElement.GetProperty("action").GetString());
+            var prompt = server.Elicitations[0].Message;
+            Assert.Contains("Auto mode needs you on 2 comments", prompt);
+            Assert.Contains("without the SHA of the commit", prompt);
+            Assert.Contains("a pushback without evidence", prompt);
+            var requests = _gh.ReadRequests();
+            Assert.Equal(
+                [$"repos/{owner}/repo/pulls/42/comments/1/replies", $"repos/{owner}/repo/pulls/42/comments/2/replies"],
+                requests.Where(r => r.Length > 1 && r[1].EndsWith("/replies", StringComparison.Ordinal)).Select(r => r[1]));
+            var resolve = Assert.Single(requests, r => r.Any(arg => arg.Contains("resolveReviewThread", StringComparison.Ordinal)));
+            Assert.Contains("threadId: \"fixed\"", resolve[^1]);
+            Assert.Equal(["pushback"], state.WaitingForReplyComments.Select(c => c.Id));
+        }
+        finally
+        {
+            sessions.TryRemove(monitorId, out _);
+        }
+    }
+
+    [Fact]
+    public async Task AutoResultsApplier_ClaimsGitHubCannotConfirm_GoToUserWithoutReplies()
+    {
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        _gh.RespondToPages($"repos/{owner}/repo/pulls/42/commits", """[{"sha":"abc1234def5678"}]""");
+        var state = CreateAutoCommentState(owner, "not-pushed", "no-issue");
+        MonitorTransitions.BuildTerminalAction(state, TerminalStateType.NewComment);
+        MonitorTransitions.ProcessEvent(state, "comments_processed", null, JsonSerializer.Serialize(new
+        {
+            results = new object[]
+            {
+                new { comment_id = "not-pushed", decision = "fixed", reply_text = "Added the check", evidence = "CheckTests failed before the fix", commit = "9999999" },
+                new { comment_id = "no-issue", decision = "follow_up", reply_text = "Tracked separately", evidence = "The PR description limits it to renames", issue_url = $"{owner}/repo#7" }
+            }
+        }));
+
+        await AutoResultsApplier.ApplyAsync(state, TimeSpan.Zero);
+
+        Assert.All(state.PendingAutoResults, r => Assert.Equal(AutoCommentResult.NeedsUser, r.Decision));
+        Assert.Contains("not on the PR branch", state.PendingAutoResults[0].Reason);
+        Assert.Contains($"{owner}/repo#7 could not be found", state.PendingAutoResults[1].Reason);
+        Assert.DoesNotContain(_gh.ReadRequests(), r => r.Length > 1 && r[1].EndsWith("/replies", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task AutoResultsApplier_ResolveFails_HandsOnlyHumanThreadsToUser()
+    {
+        _gh.PauseResolveRequests();
+        _gh.ReleaseResolveRequests();
+        _gh.FailResolveRequests();
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        _gh.RespondToPages($"repos/{owner}/repo/pulls/42/commits", """[{"sha":"abc1234def5678"}]""");
+        var state = CreateAutoCommentState(owner, "human", "bot");
+        state.UnresolvedComments[1].Author = "copilot-pull-request-reviewer[bot]";
+        MonitorTransitions.BuildTerminalAction(state, TerminalStateType.NewComment);
+        MonitorTransitions.ProcessEvent(state, "comments_processed", null, JsonSerializer.Serialize(new
+        {
+            results = new object[]
+            {
+                new { comment_id = "human", decision = "fixed", reply_text = "Added the guard", evidence = "GuardTests.RejectsNull failed before the fix", commit = "abc1234" },
+                new { comment_id = "bot", decision = "fixed", reply_text = "Added the check", evidence = "CheckTests failed before the fix", commit = "abc1234" }
+            }
+        }));
+
+        await AutoResultsApplier.ApplyAsync(state, TimeSpan.Zero);
+        MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
+
+        Assert.Equal(2, _gh.ReadRequests().Count(r => r.Length > 1 && r[1].EndsWith("/replies", StringComparison.Ordinal)));
+        Assert.Contains("already posted", Assert.Contains("human", state.AutoDeferred).Reason);
+        Assert.DoesNotContain("bot", state.AutoDeferred.Keys);
+    }
+
+    [Fact]
+    public async Task PrMonitorNextStep_AutoMode_ThreadSignedInUserRepliedToLastWaitsForReviewer()
+    {
+        _gh.PauseStartupRequests();
+        _gh.CompleteStartupSuccessfully();
+        _gh.RespondToPrInfo("""{"title":"Fixture PR","body":"","sha":"fixture-sha","head_branch":"fixture","base_branch":"main","url":"https://github.com/owner/repo/pull/42","author":"fixture-author","mergeable":false,"mergeable_state":"dirty","state":"open","merged":false}""");
+        _gh.ReleaseStartupRequests();
+        _gh.RespondToPages("graphql", """
+            {"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":"c"},"nodes":[
+              {"id":"thread","isResolved":false,
+               "comments":{"totalCount":2,"nodes":[{"author":{"login":"reviewer"},"authorAssociation":"MEMBER","body":"Please fix","url":"https://github.com/owner/repo/pull/42"}]},
+               "lastReply":{"nodes":[{"author":{"login":"helper"},"authorAssociation":"COLLABORATOR","createdAt":"2026-11-18T18:49:30Z"}]}}]}}}}}
+            """);
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        var monitorId = $"pr-{owner}-repo-42";
+        var state = new MonitorState
+        {
+            Owner = owner,
+            Repo = "repo",
+            PrNumber = 42,
+            SessionFolder = _gh.DirectoryPath,
+            HeadBranch = "fixture",
+            BaseBranch = "main",
+            HeadSha = "fixture-sha",
+            PrAuthor = "fixture-author",
+            CurrentUser = "helper",
+            AutoMode = true
+        };
+        using var session = new MonitorSession { State = state };
+        var sessions = GetSessions();
+        Assert.True(sessions.TryAdd(monitorId, session));
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        try
+        {
+            using var response = JsonDocument.Parse(await new MonitorFlowTools().PrMonitorNextStep(
+                monitorId, "ready", server: new FakeElicitationMcpServer(), cancellationToken: cancellation.Token));
+
+            Assert.Equal(["thread"], state.WaitingForReplyComments.Select(c => c.Id));
+            Assert.Equal("merge_target_branch", response.RootElement.GetProperty("task").GetString());
+        }
+        finally
+        {
+            cancellation.Cancel();
+            sessions.TryRemove(monitorId, out _);
+        }
+    }
+
+    [Fact]
+    public async Task PrMonitorStop_DuringAutoResults_PostsNoFurtherReplies()
+    {
+        _gh.PauseResolveRequests();
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        var monitorId = $"pr-{owner}-repo-42";
+        _gh.RespondToPages($"repos/{owner}/repo/pulls/42/commits", """[{"sha":"abc1234def5678"}]""");
+        var state = CreateAutoCommentState(owner, "first", "second");
+        MonitorTransitions.BuildTerminalAction(state, TerminalStateType.NewComment);
+        using var session = new MonitorSession { State = state };
+        var sessions = GetSessions();
+        Assert.True(sessions.TryAdd(monitorId, session));
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var tools = new MonitorFlowTools();
+        var step = tools.PrMonitorNextStep(monitorId, "comments_processed", data: TwoFixedResults(),
+            server: new FakeElicitationMcpServer(), cancellationToken: cancellation.Token);
+
+        try
+        {
+            await _gh.WaitForResolveRequestsAsync(1);
+            tools.PrMonitorStop(monitorId);
+            _gh.ReleaseResolveRequests();
+            using var result = JsonDocument.Parse(await step.WaitAsync(TimeSpan.FromSeconds(5)));
+
+            Assert.Equal("stop", result.RootElement.GetProperty("action").GetString());
+            Assert.Single(_gh.ReadRequests(), r => r.Length > 1 && r[1].EndsWith("/replies", StringComparison.Ordinal));
+        }
+        finally
+        {
+            cancellation.Cancel();
+            _gh.ReleaseResolveRequests();
+            await Record.ExceptionAsync(() => step.WaitAsync(TimeSpan.FromSeconds(3)));
+            sessions.TryRemove(monitorId, out _);
+        }
+    }
+
+    [Fact]
+    public async Task PrMonitorStart_InteractiveDuringAutoResults_HandsRemainingRepliesToUser()
+    {
+        _gh.PauseResolveRequests();
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        var monitorId = $"pr-{owner}-repo-42";
+        _gh.RespondToPages($"repos/{owner}/repo/pulls/42/commits", """[{"sha":"abc1234def5678"}]""");
+        var state = CreateAutoCommentState(owner, "first", "second");
+        MonitorTransitions.BuildTerminalAction(state, TerminalStateType.NewComment);
+        using var session = new MonitorSession { State = state };
+        var sessions = GetSessions();
+        Assert.True(sessions.TryAdd(monitorId, session));
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var tools = new MonitorFlowTools();
+        var step = tools.PrMonitorNextStep(monitorId, "comments_processed", data: TwoFixedResults(),
+            server: new FakeElicitationMcpServer("handle_myself", "stop"), cancellationToken: cancellation.Token);
+
+        try
+        {
+            await _gh.WaitForResolveRequestsAsync(1);
+            await tools.PrMonitorStart(owner, "repo", 42, _gh.DirectoryPath, mode: "interactive");
+            _gh.ReleaseResolveRequests();
+            await Record.ExceptionAsync(() => step.WaitAsync(TimeSpan.FromSeconds(5)));
+
+            Assert.Single(_gh.ReadRequests(), r => r.Length > 1 && r[1].EndsWith("/replies", StringComparison.Ordinal));
+            Assert.Contains("turned off before it posted", Assert.Contains("second", state.AutoDeferred).Reason);
+        }
+        finally
+        {
+            cancellation.Cancel();
+            _gh.ReleaseResolveRequests();
+            await Record.ExceptionAsync(() => step.WaitAsync(TimeSpan.FromSeconds(3)));
+            sessions.TryRemove(monitorId, out _);
+        }
+    }
+
+    [Fact]
+    public async Task AutoResultsApplier_RepliesConfirmedAfterAutoModeTurnedOff_ArePosted()
+    {
+        _gh.PauseResolveRequests();
+        _gh.ReleaseResolveRequests();
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        _gh.RespondToPages($"repos/{owner}/repo/pulls/42/commits", """[{"sha":"abc1234def5678"}]""");
+        var state = CreateAutoCommentState(owner, "first", "second");
+        MonitorTransitions.BuildTerminalAction(state, TerminalStateType.NewComment);
+        state.AutoMode = false;
+        MonitorTransitions.ProcessEvent(state, "comments_processed", null, TwoFixedResults());
+        MonitorTransitions.ProcessEvent(state, "user_chose", "post_auto_results", null);
+
+        await AutoResultsApplier.ApplyAsync(state, TimeSpan.Zero);
+
+        Assert.Equal(2, _gh.ReadRequests().Count(r => r.Length > 1 && r[1].EndsWith("/replies", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task AutoResultsApplier_ReviewerRepliedDuringWork_HandsThreadToUserWithoutPosting()
+    {
+        _gh.PauseResolveRequests();
+        _gh.ReleaseResolveRequests();
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        _gh.RespondToPages($"repos/{owner}/repo/pulls/42/commits", """[{"sha":"abc1234def5678"}]""");
+        _gh.RespondToPages("graphql", """
+            {"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":"c"},"nodes":[
+              {"id":"first","isResolved":false,
+               "comments":{"totalCount":2,"nodes":[{"author":{"login":"reviewer"},"body":"Please fix","url":"https://github.com/owner/repo/pull/42"}]},
+               "lastReply":{"nodes":[{"author":{"login":"reviewer"},"createdAt":"2026-11-18T18:49:30Z"}]}},
+              {"id":"second","isResolved":false,
+               "comments":{"totalCount":2,"nodes":[{"author":{"login":"reviewer"},"body":"Please fix","url":"https://github.com/owner/repo/pull/42"}]},
+               "lastReply":{"nodes":[{"author":{"login":"author"},"createdAt":"2026-11-18T18:49:30Z"}]}}]}}}}}
+            """);
+        var state = CreateAutoCommentState(owner, "first", "second");
+        MonitorTransitions.BuildTerminalAction(state, TerminalStateType.NewComment);
+        MonitorTransitions.ProcessEvent(state, "comments_processed", null, TwoFixedResults());
+
+        await AutoResultsApplier.ApplyAsync(state, TimeSpan.Zero);
+
+        Assert.Equal([$"repos/{owner}/repo/pulls/42/comments/2/replies"],
+            _gh.ReadRequests().Where(r => r.Length > 1 && r[1].EndsWith("/replies", StringComparison.Ordinal)).Select(r => r[1]));
+        Assert.Contains("reviewer replied while auto mode was working", state.PendingAutoResults[0].Reason);
+    }
+
+    private static string TwoFixedResults() => JsonSerializer.Serialize(new
+    {
+        results = new object[]
+        {
+            new { comment_id = "first", decision = "fixed", reply_text = "Added the guard", evidence = "GuardTests.RejectsNull failed before the fix", commit = "abc1234" },
+            new { comment_id = "second", decision = "fixed", reply_text = "Added the check", evidence = "CheckTests failed before the fix", commit = "abc1234" }
+        }
+    });
+
+    [Fact]
+    public async Task PrMonitorStart_InteractiveDuringAutoTask_PostsNothingWithoutConfirmation()
+    {
+        _gh.PauseResolveRequests();
+        _gh.ReleaseResolveRequests();
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        var monitorId = $"pr-{owner}-repo-42";
+        var state = CreateAutoCommentState(owner, "c1");
+        MonitorTransitions.BuildTerminalAction(state, TerminalStateType.NewComment);
+        var sessions = GetSessions();
+        using var session = new MonitorSession { State = state };
+        Assert.True(sessions.TryAdd(monitorId, session));
+        var server = new FakeElicitationMcpServer("handle_myself", "stop");
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+
+        try
+        {
+            var tools = new MonitorFlowTools();
+            using var start = JsonDocument.Parse(await tools.PrMonitorStart(owner, "repo", 42, _gh.DirectoryPath, mode: "interactive"));
+            var data = JsonSerializer.Serialize(new
+            {
+                results = new object[] { new { comment_id = "c1", decision = "answered", reply_text = "It runs once per poll", evidence = "PollLoopTests" } }
+            });
+            using var response = JsonDocument.Parse(await tools.PrMonitorNextStep(
+                monitorId, "comments_processed", data: data, server: server, cancellationToken: cancellation.Token));
+
+            Assert.Equal("interactive", start.RootElement.GetProperty("mode").GetString());
+            Assert.Equal("stop", response.RootElement.GetProperty("action").GetString());
+            Assert.Contains("Auto mode was turned off", Assert.IsType<string>(server.Elicitations.FirstOrDefault()?.Message));
+            Assert.DoesNotContain(_gh.ReadRequests(), r => r.Length > 1 &&
+                (r[1].EndsWith("/replies", StringComparison.Ordinal) || r[1].EndsWith("/requested_reviewers", StringComparison.Ordinal) ||
+                 r.Any(arg => arg.Contains("resolveReviewThread", StringComparison.Ordinal))));
+        }
+        finally
+        {
+            sessions.TryRemove(monitorId, out _);
+        }
+    }
+
+    [Fact]
+    public void AutoResultsApplier_BuildReply_AddsIssueLinkAndFooterOnce()
+    {
+        var state = new MonitorState { Owner = "owner", Repo = "repo", CurrentUser = "me" };
+        var result = new AutoCommentResult
+        {
+            Decision = AutoCommentResult.FollowUp,
+            ReplyText = "Good idea, but out of scope here.",
+            IssueUrl = "https://github.com/owner/repo/issues/7"
+        };
+
+        Assert.Equal("Good idea, but out of scope here.\n\nFollow-up: https://github.com/owner/repo/issues/7\n\n---\n🤖 me-copilot",
+            AutoResultsApplier.BuildReply(state, result));
+
+        result.ReplyText = "Tracked in #7.\n\n---\n🤖 me-copilot";
+        Assert.Equal(result.ReplyText, AutoResultsApplier.BuildReply(state, result));
+    }
+
+    [Theory]
+    [InlineData("https://github.com/other/lib/issues/7", "Tracked in #7.", true)]
+    [InlineData("https://github.com/other/lib/issues/7", "Tracked in other/lib#7.", false)]
+    [InlineData("https://github.com/owner/repo/issues/7", "Tracked in other/lib#7.", true)]
+    public void AutoResultsApplier_BuildReply_AppendsIssueLinkUnlessReplyLinksThatIssue(string issueUrl, string replyText, bool appendsLink)
+    {
+        var state = new MonitorState { Owner = "owner", Repo = "repo" };
+        var result = new AutoCommentResult { Decision = AutoCommentResult.FollowUp, ReplyText = replyText, IssueUrl = issueUrl };
+
+        Assert.Equal(appendsLink, AutoResultsApplier.BuildReply(state, result).Contains($"Follow-up: {issueUrl}", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task MergePr_RequiresTheEvaluatedHeadCommit()
+    {
+        _gh.PauseMergeRequests();
+        _gh.ReleaseMergeRequests();
+        var state = new MonitorState { Owner = "owner", Repo = "repo", PrNumber = 42, SessionFolder = _gh.DirectoryPath, HeadSha = "evaluated-sha" };
+
+        var action = await ExecuteAutoActionAsync(state, new MonitorAction { Action = "auto_execute", Task = "merge_pr" });
+
+        Assert.Equal("merged", action.Action);
+        Assert.Contains(_gh.ReadRequests(), request =>
+            request is ["pr", "merge", "42", "--squash", "--repo", "owner/repo", "--match-head-commit", "evaluated-sha"]);
+    }
+
+    [Theory]
+    [InlineData("merge_pr")]
+    [InlineData("merge_pr_admin")]
+    public async Task MergePr_HeadMovedSinceEvaluation_PollsAgainInsteadOfPrompting(string task)
+    {
+        _gh.PauseStartupRequests();
+        _gh.CompleteStartupSuccessfully();
+        _gh.ReleaseStartupRequests();
+        _gh.RespondToPrInfo("""{"title":"Fixture PR","body":"","sha":"newer-sha","head_branch":"fixture","base_branch":"main","url":"https://github.com/owner/repo/pull/42","author":"fixture-author","mergeable":true,"mergeable_state":"clean","state":"open","merged":false}""");
+        var state = new MonitorState { Owner = "owner", Repo = "repo", PrNumber = 42, SessionFolder = _gh.DirectoryPath, HeadSha = "evaluated-sha" };
+
+        var action = await ExecuteAutoActionAsync(state, new MonitorAction { Action = "auto_execute", Task = task });
+
+        Assert.Equal("polling", action.Action);
+    }
+
+    [Fact]
+    public async Task ReRequestStaleReviews_GitHubRefuses_AsksUserWithTheReason()
+    {
+        var state = new MonitorState
+        {
+            Owner = "owner",
+            Repo = "repo",
+            PrNumber = 42,
+            SessionFolder = _gh.DirectoryPath,
+            HeadSha = "head-sha",
+            AutoMode = true,
+            StaleApprovals = [new ReviewInfo { Author = "outsider", State = "APPROVED", IsStale = true }]
+        };
+        MonitorTransitions.BuildTerminalAction(state, TerminalStateType.StaleApprovalCiGreen);
+
+        var action = await ExecuteAutoActionAsync(state, new MonitorAction { Action = "auto_execute", Task = "re_request_stale_reviews" });
+
+        Assert.Equal("ask_user", action.Action);
+        Assert.Contains("outsider: Unexpected GitHub CLI command in offline test.", action.Question);
+        Assert.Contains("approval from outsider is stale", action.Question);
+    }
+
+    [Theory]
+    [InlineData(true, "copilot-pull-request-reviewer[bot]", false)]
+    [InlineData(true, "reviewer", true)]
+    [InlineData(false, "copilot-pull-request-reviewer[bot]", true)]
+    public async Task ReRequestCatchUp_InAutoMode_SkipsBotReviewers(bool autoMode, string reviewer, bool reRequested)
+    {
+        _gh.RespondToPages("repos/owner/repo/pulls/42/requested_reviewers", "[]");
+        var state = new MonitorState { Owner = "owner", Repo = "repo", PrNumber = 42, PrAuthor = "author", CurrentUser = "author", AutoMode = autoMode };
+        var method = typeof(MonitorFlowTools).GetMethod("ReRequestReviewForFullyRepliedReviewersAsync", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        List<CommentInfo> waiting = [new CommentInfo { Id = "thread", Author = reviewer, IsWaitingForReply = true }];
+
+        await (Task)method.Invoke(null, [state, waiting, new List<CommentInfo>()])!;
+
+        Assert.Equal(reRequested, _gh.ReadRequests().Any(r => r.Contains("POST") && r[1].EndsWith("/requested_reviewers", StringComparison.Ordinal)));
+    }
+
+    private static async Task<MonitorAction> ExecuteAutoActionAsync(MonitorState state, MonitorAction action)
+    {
+        var method = typeof(MonitorFlowTools).GetMethod("ExecuteAutoAction", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        return await (Task<MonitorAction>)method.Invoke(null, [state, action, CancellationToken.None])!;
+    }
+
+    private MonitorState CreateAutoCommentState(string owner, params string[] commentIds) => new()
+    {
+        Owner = owner,
+        Repo = "repo",
+        PrNumber = 42,
+        SessionFolder = _gh.DirectoryPath,
+        PrAuthor = "author",
+        CurrentUser = "author",
+        AutoMode = true,
+        UnresolvedComments = [.. commentIds.Select((id, i) => new CommentInfo { Id = id, Author = "reviewer", AuthorAssociation = "MEMBER", RestCommentId = i + 1 })]
+    };
 
     private MonitorState CreateCommentState(string owner) => new()
     {
