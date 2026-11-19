@@ -898,7 +898,15 @@ public class MonitorFlowTools
                     if (action.Action is "auto_execute" or "polling" && action.MonitorId != null &&
                         sessions.TryGetValue(action.MonitorId, out var autoMember))
                     {
-                        action = await RunMemberAutoActionsAsync(action.MonitorId, autoMember, action);
+                        try
+                        {
+                            action = await RunMemberAutoActionsAsync(action.MonitorId, autoMember, action, cancellationToken);
+                        }
+                        catch (OperationCanceledException) when (autoMember.StopToken.IsCancellationRequested &&
+                            !cancellationToken.IsCancellationRequested)
+                        {
+                            continue;
+                        }
                         if (action.Action == "polling")
                         {
                             await WriteLogEntryAsync(autoMember.State, action);
@@ -1131,7 +1139,7 @@ public class MonitorFlowTools
                 while (action.Action == "auto_execute")
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    action = await ExecuteAutoAction(state, action);
+                    action = await ExecuteAutoAction(state, action, cancellationToken);
                     state.RememberAction(action);
                     cancellationToken.ThrowIfCancellationRequested();
                     DebugLogger.Log("NextStep", $"Auto-execute result: action={action.Action}, task={action.Task ?? "null"}");
@@ -1745,11 +1753,12 @@ public class MonitorFlowTools
     /// Run a multi-PR member's server-side auto actions until one needs the agent or the user.
     /// A member that merged is removed from monitoring, as in the combined poll loop.
     /// </summary>
-    private static async Task<MonitorAction> RunMemberAutoActionsAsync(string monitorId, MonitorSession member, MonitorAction action)
+    private static async Task<MonitorAction> RunMemberAutoActionsAsync(string monitorId, MonitorSession member, MonitorAction action, CancellationToken cancellationToken)
     {
+        using var memberCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, member.StopToken);
         while (action.Action == "auto_execute")
         {
-            action = await ExecuteAutoAction(member.State, action);
+            action = await ExecuteAutoAction(member.State, action, memberCancellation.Token);
             member.State.RememberAction(action);
         }
 
@@ -1767,7 +1776,7 @@ public class MonitorFlowTools
     /// <summary>
     /// Execute a deterministic action in C# (no LLM needed) and return the next state machine action.
     /// </summary>
-    private static async Task<MonitorAction> ExecuteAutoAction(MonitorState state, MonitorAction action)
+    private static async Task<MonitorAction> ExecuteAutoAction(MonitorState state, MonitorAction action, CancellationToken cancellationToken)
     {
         switch (action.Task)
         {
@@ -1990,7 +1999,7 @@ public class MonitorFlowTools
                 }
             case "apply_auto_results":
                 {
-                    await AutoResultsApplier.ApplyAsync(state);
+                    await AutoResultsApplier.ApplyAsync(state, cancellationToken: cancellationToken);
                     return MonitorTransitions.ProcessEvent(state, "task_complete", null, null);
                 }
             case "re_request_stale_reviews":
@@ -1998,6 +2007,7 @@ public class MonitorFlowTools
                     var failures = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                     foreach (var reviewer in state.PendingStaleApprovalNotifications)
                     {
+                        cancellationToken.ThrowIfCancellationRequested();
                         var (success, output) = await GitHubCliExecutor.RequestReviewAsync(state.Owner, state.Repo, state.PrNumber, reviewer);
                         DebugLogger.Log("AutoExec", $"re_request_stale_reviews {reviewer}: success={success}{(success ? "" : $", output={output}")}");
                         if (!success)

@@ -15,10 +15,10 @@ internal static class AutoResultsApplier
     // A just-pushed fix can take a moment to appear in the PR's commit list.
     private static readonly TimeSpan DefaultCommitVisibilityDelay = TimeSpan.FromSeconds(5);
 
-    public static async Task ApplyAsync(MonitorState state, TimeSpan? commitVisibilityDelay = null)
+    public static async Task ApplyAsync(MonitorState state, TimeSpan? commitVisibilityDelay = null, CancellationToken cancellationToken = default)
     {
         var results = state.PendingAutoResults;
-        await VerifyCommitsAsync(state, results, commitVisibilityDelay ?? DefaultCommitVisibilityDelay);
+        await VerifyCommitsAsync(state, results, commitVisibilityDelay ?? DefaultCommitVisibilityDelay, cancellationToken);
         await VerifyFollowUpIssuesAsync(state, results);
 
         foreach (var result in results)
@@ -26,6 +26,8 @@ internal static class AutoResultsApplier
             if (result.Decision == AutoCommentResult.NeedsUser || result.Comment is not { } comment)
                 continue;
 
+            // Checked before each write instead of passed to gh, because killing gh can't undo a write already in flight.
+            cancellationToken.ThrowIfCancellationRequested();
             if (!await MonitorFlowTools.PostReplyAsync(state, comment, BuildReply(state, result)))
             {
                 result.HandToUser("auto mode could not post its reply");
@@ -36,6 +38,7 @@ internal static class AutoResultsApplier
             state.AutoReplyCounts[comment.Id] = state.AutoReplyCounts.GetValueOrDefault(comment.Id) + 1;
             if (result.Decision is AutoCommentResult.Fixed or AutoCommentResult.FollowUp || PrStatusFetcher.IsBotReviewer(comment.Author))
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var (resolved, output) = await GitHubCliExecutor.ResolveThreadAsync(comment.Id);
                 if (!resolved)
                     DebugLogger.Error("AutoMode", $"Replied but could not resolve thread {comment.Id}: {output}");
@@ -54,7 +57,7 @@ internal static class AutoResultsApplier
             }
         }
 
-        await ReRequestReviewsAsync(state, results);
+        await ReRequestReviewsAsync(state, results, cancellationToken);
     }
 
     internal static string BuildReply(MonitorState state, AutoCommentResult result)
@@ -84,7 +87,7 @@ internal static class AutoResultsApplier
         return Regex.IsMatch(reply, $@"(?<![\w/.-]){prefix}#{number}\b", RegexOptions.IgnoreCase);
     }
 
-    private static async Task VerifyCommitsAsync(MonitorState state, List<AutoCommentResult> results, TimeSpan commitVisibilityDelay)
+    private static async Task VerifyCommitsAsync(MonitorState state, List<AutoCommentResult> results, TimeSpan commitVisibilityDelay, CancellationToken cancellationToken)
     {
         var claims = results
             .Where(r => r.Decision == AutoCommentResult.Fixed ||
@@ -96,7 +99,7 @@ internal static class AutoResultsApplier
         var prCommits = await TryFetchPrCommitHashesAsync(state);
         if ((prCommits == null || claims.Any(r => !IsOnPr(prCommits, r.Commit))) && commitVisibilityDelay > TimeSpan.Zero)
         {
-            await Task.Delay(commitVisibilityDelay);
+            await Task.Delay(commitVisibilityDelay, cancellationToken);
             prCommits = await TryFetchPrCommitHashesAsync(state) ?? prCommits;
         }
 
@@ -147,7 +150,7 @@ internal static class AutoResultsApplier
         }
     }
 
-    private static async Task ReRequestReviewsAsync(MonitorState state, List<AutoCommentResult> results)
+    private static async Task ReRequestReviewsAsync(MonitorState state, List<AutoCommentResult> results, CancellationToken cancellationToken)
     {
         // Bot reviewers are skipped: re-requesting them in auto mode can loop review -> fixes -> review indefinitely.
         var reviewers = results
@@ -168,6 +171,7 @@ internal static class AutoResultsApplier
                     requested.Concat(state.ReviewsReRequested), state.UnresolvedComments))
                 continue;
 
+            cancellationToken.ThrowIfCancellationRequested();
             var (success, output) = await GitHubCliExecutor.RequestReviewAsync(state.Owner, state.Repo, state.PrNumber, reviewer);
             if (success)
                 state.ReviewsReRequested.Add(reviewer);

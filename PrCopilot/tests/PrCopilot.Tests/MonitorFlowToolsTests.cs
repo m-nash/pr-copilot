@@ -1193,6 +1193,50 @@ public class MonitorFlowToolsTests : IDisposable
     }
 
     [Fact]
+    public async Task PrMonitorStop_DuringAutoResults_PostsNoFurtherReplies()
+    {
+        _gh.PauseResolveRequests();
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        var monitorId = $"pr-{owner}-repo-42";
+        _gh.RespondToPages($"repos/{owner}/repo/pulls/42/commits", """[{"sha":"abc1234def5678"}]""");
+        var state = CreateAutoCommentState(owner, "first", "second");
+        MonitorTransitions.BuildTerminalAction(state, TerminalStateType.NewComment);
+        using var session = new MonitorSession { State = state };
+        var sessions = GetSessions();
+        Assert.True(sessions.TryAdd(monitorId, session));
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var tools = new MonitorFlowTools();
+        var data = JsonSerializer.Serialize(new
+        {
+            results = new object[]
+            {
+                new { comment_id = "first", decision = "fixed", reply_text = "Added the guard", evidence = "GuardTests.RejectsNull failed before the fix", commit = "abc1234" },
+                new { comment_id = "second", decision = "fixed", reply_text = "Added the check", evidence = "CheckTests failed before the fix", commit = "abc1234" }
+            }
+        });
+        var step = tools.PrMonitorNextStep(monitorId, "comments_processed", data: data,
+            server: new FakeElicitationMcpServer(), cancellationToken: cancellation.Token);
+
+        try
+        {
+            await _gh.WaitForResolveRequestsAsync(1);
+            tools.PrMonitorStop(monitorId);
+            _gh.ReleaseResolveRequests();
+            using var result = JsonDocument.Parse(await step.WaitAsync(TimeSpan.FromSeconds(5)));
+
+            Assert.Equal("stop", result.RootElement.GetProperty("action").GetString());
+            Assert.Single(_gh.ReadRequests(), r => r.Length > 1 && r[1].EndsWith("/replies", StringComparison.Ordinal));
+        }
+        finally
+        {
+            cancellation.Cancel();
+            _gh.ReleaseResolveRequests();
+            await Record.ExceptionAsync(() => step.WaitAsync(TimeSpan.FromSeconds(3)));
+            sessions.TryRemove(monitorId, out _);
+        }
+    }
+
+    [Fact]
     public async Task PrMonitorStart_InteractiveDuringAutoTask_PostsNothingWithoutConfirmation()
     {
         _gh.PauseResolveRequests();
@@ -1317,7 +1361,7 @@ public class MonitorFlowToolsTests : IDisposable
     {
         var method = typeof(MonitorFlowTools).GetMethod("ExecuteAutoAction", BindingFlags.Static | BindingFlags.NonPublic);
         Assert.NotNull(method);
-        return await (Task<MonitorAction>)method.Invoke(null, [state, action])!;
+        return await (Task<MonitorAction>)method.Invoke(null, [state, action, CancellationToken.None])!;
     }
 
     private MonitorState CreateAutoCommentState(string owner, params string[] commentIds) => new()
