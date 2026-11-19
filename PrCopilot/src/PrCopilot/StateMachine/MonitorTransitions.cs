@@ -192,6 +192,37 @@ public static class MonitorTransitions
     }
 
     /// <summary>
+    /// Poll-time handling of a rerun deferred until the remaining checks finish, shared by the single- and multi-PR
+    /// loops. A new commit (CI restarts fresh) or a finished run with no failures cancels it; otherwise it runs once
+    /// every check has completed. Returns the rerun action when it's due.
+    /// </summary>
+    public static MonitorAction? ServiceDeferredRerun(MonitorState state, string previousHeadSha)
+    {
+        if (!state.PendingRerunWhenChecksComplete)
+            return null;
+
+        if (!string.Equals(previousHeadSha, state.HeadSha, StringComparison.OrdinalIgnoreCase))
+        {
+            DebugLogger.Log("StateMachine", $"New commit detected ({previousHeadSha} → {state.HeadSha}) — cancelling deferred rerun");
+            state.PendingRerunWhenChecksComplete = false;
+            return null;
+        }
+
+        // Legacy pending statuses stay pending until merge, so only in-progress and queued CI jobs are waited on.
+        if (state.Checks.InProgress > 0 || state.Checks.Queued > 0)
+            return null;
+
+        if (state.Checks.Failed == 0)
+        {
+            DebugLogger.Log("StateMachine", "Deferred rerun cancelled — no failures remain");
+            state.PendingRerunWhenChecksComplete = false;
+            return null;
+        }
+
+        return CompletePendingRerun(state);
+    }
+
+    /// <summary>
     /// Process an event from the agent and return the next action.
     /// This is the heart of the state machine — deterministic transitions.
     /// </summary>

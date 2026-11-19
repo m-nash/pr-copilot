@@ -2399,9 +2399,6 @@ public class StateMachineTests
     [Fact]
     public void DetectTerminalState_PendingRerunWithNewCommit_FlagShouldBeCleared()
     {
-        // Simulates what the poll loop does: new SHA means flag should be cleared
-        // (The actual clearing happens in MonitorFlowTools, but verify the state machine
-        // still detects CiFailure normally once the flag is cleared)
         var state = CreateState();
         SetChecksFailed(state);
         state.PendingRerunWhenChecksComplete = true;
@@ -2409,26 +2406,22 @@ public class StateMachineTests
         // While flag is set, CiFailure is suppressed
         Assert.Null(MonitorTransitions.DetectTerminalState(state, [], false));
 
-        // After poll loop clears flag (new commit detected), CiFailure fires again
-        state.PendingRerunWhenChecksComplete = false;
+        // A new commit cancels the deferred rerun, so CiFailure fires again
+        Assert.Null(MonitorTransitions.ServiceDeferredRerun(state, "older-sha"));
         Assert.Equal(TerminalStateType.CiFailure, MonitorTransitions.DetectTerminalState(state, [], false));
     }
 
     [Fact]
     public void DetectTerminalState_PendingRerunNoFailures_ResumeNormalDetection()
     {
-        // Simulates what the poll loop does: failures resolved, flag cleared,
-        // normal terminal state detection resumes
         var state = CreateState();
         state.PendingRerunWhenChecksComplete = true;
         state.Checks = new CheckRunCounts { Passed = 5, Total = 5 };
         state.Approvals = [new ReviewInfo { Author = "approver", State = "APPROVED" }];
 
-        // Poll loop would clear the flag since Failed == 0, then DetectTerminalState runs normally
-        state.PendingRerunWhenChecksComplete = false;
-        var result = MonitorTransitions.DetectTerminalState(state, [], false);
-
-        Assert.Equal(TerminalStateType.ApprovedCiGreen, result);
+        // With no failures left, the deferred rerun is cancelled and normal detection resumes
+        Assert.Null(MonitorTransitions.ServiceDeferredRerun(state, state.HeadSha));
+        Assert.Equal(TerminalStateType.ApprovedCiGreen, MonitorTransitions.DetectTerminalState(state, [], false));
     }
 
     #endregion

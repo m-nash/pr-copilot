@@ -1382,13 +1382,6 @@ public class MonitorFlowTools
                 state.BaseBranch = prInfo.BaseBranch;
                 state.HasMergeConflict = !prInfo.Mergeable && prInfo.MergeableState == "dirty";
 
-                // New commit pushed — cancel any deferred rerun (CI restarts fresh)
-                if (state.PendingRerunWhenChecksComplete && !string.Equals(previousHeadSha, state.HeadSha, StringComparison.OrdinalIgnoreCase))
-                {
-                    DebugLogger.Log("PollLoop", $"New commit detected ({ShortSha(previousHeadSha)} → {ShortSha(state.HeadSha)}) — cancelling deferred rerun");
-                    state.PendingRerunWhenChecksComplete = false;
-                }
-
                 var checkResult = await PrStatusFetcher.FetchCheckRunsAsync(state.Owner, state.Repo, state.HeadSha);
                 state.Checks = checkResult.Counts;
                 state.FailedChecks = checkResult.Failures;
@@ -1414,22 +1407,8 @@ public class MonitorFlowTools
                 var statusLine = BuildStatusLine(state);
                 await File.AppendAllTextAsync(state.LogFile, statusLine + Environment.NewLine, cancellationToken);
 
-                // Check for deferred rerun: user chose rerun while checks were still in progress
-                // (Ignore legacy pending statuses — only actual CI jobs matter)
-                if (state.PendingRerunWhenChecksComplete && state.Checks.InProgress == 0 && state.Checks.Queued == 0)
-                {
-                    // Safeguard: if failures resolved themselves (e.g., flaky test passed on re-poll), resume normal monitoring
-                    if (state.Checks.Failed == 0)
-                    {
-                        DebugLogger.Log("PollLoop", "Deferred rerun cancelled — no failures remain");
-                        state.PendingRerunWhenChecksComplete = false;
-                    }
-                    else
-                    {
-                        DebugLogger.Log("PollLoop", "All checks complete — triggering deferred rerun");
-                        return MonitorTransitions.CompletePendingRerun(state);
-                    }
-                }
+                if (MonitorTransitions.ServiceDeferredRerun(state, previousHeadSha) is { } deferredRerun)
+                    return deferredRerun;
 
                 // Check for terminal state — only needs-action comments trigger it
                 var terminal = MonitorTransitions.DetectTerminalState(state, needsAction, state.HasMergeConflict);
@@ -1534,6 +1513,7 @@ public class MonitorFlowTools
             };
         }
 
+        var previousHeadSha = state.HeadSha;
         state.HeadSha = prInfo.HeadSha;
         state.BaseBranch = prInfo.BaseBranch;
         state.HasMergeConflict = !prInfo.Mergeable && prInfo.MergeableState == "dirty";
@@ -1557,6 +1537,9 @@ public class MonitorFlowTools
 
         var statusLine = BuildStatusLine(state);
         await File.AppendAllTextAsync(state.LogFile, statusLine + Environment.NewLine, cancellationToken);
+
+        if (MonitorTransitions.ServiceDeferredRerun(state, previousHeadSha) is { } deferredRerun)
+            return deferredRerun;
 
         var terminal = MonitorTransitions.DetectTerminalState(state, needsAction, state.HasMergeConflict);
         if (terminal.HasValue)

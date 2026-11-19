@@ -703,6 +703,54 @@ public class MonitorFlowToolsTests : IDisposable
     }
 
     [Theory]
+    [InlineData("fixture-sha", "rerun_via_browser")]
+    [InlineData("older-sha", "investigate_ci_failure")]
+    public async Task PrMonitorNextStep_AllPrs_ServicesDeferredRerun(string deferredOnSha, string expectedTask)
+    {
+        _gh.PauseStartupRequests();
+        _gh.CompleteStartupSuccessfully();
+        _gh.RespondToPrInfo("""{"title":"Fixture PR","body":"","sha":"fixture-sha","head_branch":"fixture","base_branch":"main","url":"https://github.com/owner/repo/pull/42","author":"fixture-author","mergeable":true,"mergeable_state":"clean","state":"open","merged":false}""");
+        _gh.ReleaseStartupRequests();
+        var owner = $"fixture-{Guid.NewGuid():N}";
+        var monitorId = $"pr-{owner}-repo-42";
+        _gh.RespondToPages($"repos/{owner}/repo/commits/fixture-sha/check-runs",
+            """{"check_runs":[{"name":"build","status":"completed","conclusion":"failure","details_url":"https://dev.azure.com/org/project/_build/results?buildId=1"}]}""");
+        _gh.RespondToPages($"repos/{owner}/repo/commits/fixture-sha/status", """{"statuses":[]}""");
+        var state = new MonitorState
+        {
+            Owner = owner,
+            Repo = "repo",
+            PrNumber = 42,
+            SessionFolder = _gh.DirectoryPath,
+            HeadBranch = "fixture",
+            BaseBranch = "main",
+            HeadSha = deferredOnSha,
+            PrAuthor = "fixture-author",
+            CurrentUser = "fixture-author",
+            PendingRerunWhenChecksComplete = true
+        };
+        using var session = new MonitorSession { State = state };
+        var sessions = GetSessions();
+        Assert.True(sessions.TryAdd(monitorId, session));
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        try
+        {
+            using var response = JsonDocument.Parse(await new MonitorFlowTools().PrMonitorNextStep("all", "ready",
+                server: new FakeElicitationMcpServer(), cancellationToken: cancellation.Token));
+
+            Assert.Equal("execute", response.RootElement.GetProperty("action").GetString());
+            Assert.Equal(expectedTask, response.RootElement.GetProperty("task").GetString());
+            Assert.False(state.PendingRerunWhenChecksComplete);
+        }
+        finally
+        {
+            cancellation.Cancel();
+            sessions.TryRemove(monitorId, out _);
+        }
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task PrMonitorNextStep_ChangedTargetBranch_UsesFreshTargetBranchForConflictResolution(bool monitorAll)
