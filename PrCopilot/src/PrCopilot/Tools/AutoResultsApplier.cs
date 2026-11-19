@@ -21,6 +21,9 @@ internal static class AutoResultsApplier
         await VerifyCommitsAsync(state, results, commitVisibilityDelay ?? DefaultCommitVisibilityDelay, cancellationToken);
         await VerifyFollowUpIssuesAsync(state, results);
 
+        // Turning auto mode off mid-batch withdraws approval for replies not yet posted, unless the user confirmed this batch.
+        bool Approved() => state.AutoMode || state.AutoResultsConfirmed;
+
         foreach (var result in results)
         {
             if (result.Decision == AutoCommentResult.NeedsUser || result.Comment is not { } comment)
@@ -28,6 +31,12 @@ internal static class AutoResultsApplier
 
             // Checked before each write instead of passed to gh, because killing gh can't undo a write already in flight.
             cancellationToken.ThrowIfCancellationRequested();
+            if (!Approved())
+            {
+                result.HandToUser(MonitorTransitions.TurnedOffBeforePosting(result));
+                continue;
+            }
+
             if (!await MonitorFlowTools.PostReplyAsync(state, comment, BuildReply(state, result)))
             {
                 result.HandToUser("auto mode could not post its reply");
@@ -57,7 +66,8 @@ internal static class AutoResultsApplier
             }
         }
 
-        await ReRequestReviewsAsync(state, results, cancellationToken);
+        if (Approved())
+            await ReRequestReviewsAsync(state, results, cancellationToken);
     }
 
     internal static string BuildReply(MonitorState state, AutoCommentResult result)

@@ -54,6 +54,9 @@ public class MonitorState
     /// <summary>Auto mode: validated results awaiting server-side verification, posting, and resolution.</summary>
     public List<AutoCommentResult> PendingAutoResults { get; set; } = [];
 
+    /// <summary>The user confirmed posting <see cref="PendingAutoResults"/> after auto mode was turned off.</summary>
+    public bool AutoResultsConfirmed { get; set; }
+
     /// <summary>
     /// Auto mode: threads handed to the user, by thread ID. A thread stays with the user until its reply count changes,
     /// so the agent is not rerun on a conversation it already gave up on.
@@ -172,6 +175,7 @@ public class MonitorState
         PendingCompletionEvent = null;
         AutoBatch = [];
         PendingAutoResults = [];
+        AutoResultsConfirmed = false;
     }
 
     internal MonitorAction RememberAction(MonitorAction action)

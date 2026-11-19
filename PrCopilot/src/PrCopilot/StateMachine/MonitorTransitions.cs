@@ -1450,6 +1450,7 @@ public static class MonitorTransitions
         }
 
         state.PendingAutoResults = results;
+        state.AutoResultsConfirmed = false;
         return state.AutoMode ? BuildApplyAutoResultsAction(state) : ConfirmAutoResults(state);
     }
 
@@ -1485,6 +1486,7 @@ public static class MonitorTransitions
 
     private static MonitorAction PostConfirmedAutoResults(MonitorState state)
     {
+        state.AutoResultsConfirmed = true;
         state.CommentFlow = CommentFlowState.AutoAddressing;
         state.CurrentState = MonitorStateId.ExecutingTask;
         return BuildApplyAutoResultsAction(state);
@@ -1496,10 +1498,13 @@ public static class MonitorTransitions
         {
             Defer(state, result.Comment!, result.Decision == AutoCommentResult.NeedsUser
                 ? result.Reason ?? "auto mode could not decide"
-                : $"auto mode was turned off before it posted: \"{Truncate(NormalizeWhitespace(result.ReplyText ?? ""), 300)}\"");
+                : TurnedOffBeforePosting(result));
         }
         return EscalateDeferredComments(state);
     }
+
+    internal static string TurnedOffBeforePosting(AutoCommentResult result) =>
+        $"auto mode was turned off before it posted: \"{Truncate(NormalizeWhitespace(result.ReplyText ?? ""), 300)}\"";
 
     private static MonitorAction WithoutAutoPreApproval(MonitorAction action) => new()
     {
